@@ -44,10 +44,10 @@ exige um **ID do cliente OAuth**. É grátis e leva uns 10 minutos.
 
 ### 1. Publicar no GitHub Pages
 
-1. Junte esta branch na `main`.
-2. No GitHub: **Settings → Pages → Build and deployment → Source: “GitHub Actions”**.
-3. A cada push na `main`, o workflow `Publicar no GitHub Pages` publica o app em
-   **`https://ragzonte.github.io/trabalho_rh/`**.
+1. No GitHub: **Settings → Pages → Build and deployment → Source: “GitHub Actions”**.
+2. Em **Actions → Publicar no GitHub Pages → Run workflow**, rode a primeira publicação.
+3. Depois disso, a cada push na branch principal do repositório, o app é publicado
+   sozinho em **`https://ragzonte.github.io/trabalho_rh/`**.
 
 ### 2. Criar o login do Google
 
@@ -93,8 +93,8 @@ verdade que abre o app em tela cheia usando o Chrome do celular. Por isso o logi
 com Google funciona igual, e **toda melhoria publicada no site chega no app sem
 reinstalar**.
 
-O workflow `App Android` compila o APK sozinho. A cada push na `main` que mexa em
-`android/`, ele publica em **Releases → App Android** (link fixo para baixar:
+O workflow `App Android` compila o APK sozinho. A cada push na branch principal que
+mexa em `android/`, ele publica em **Releases → App Android** (link fixo para baixar:
 `https://github.com/ragzonte/trabalho_rh/releases/download/android/contas-a-dois.apk`).
 Para gerar na hora: aba **Actions → App Android → Run workflow**.
 

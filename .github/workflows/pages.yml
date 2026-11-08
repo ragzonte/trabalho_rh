@@ -1,10 +1,9 @@
-# Publica o app no GitHub Pages a cada push na branch main.
+# Publica o app no GitHub Pages a cada push na branch principal do repositório.
 # Antes da primeira vez: Settings → Pages → Source: "GitHub Actions".
 name: Publicar no GitHub Pages
 
 on:
   push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -17,7 +16,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.pages.outputs.enabled }}
+    steps:
+      - id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/pages" >/dev/null 2>&1; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GitHub Pages ainda não está ativado. Vá em Settings → Pages → Source: GitHub Actions e rode este workflow de novo (Actions → Publicar no GitHub Pages → Run workflow)."
+          fi
+
   deploy:
+    needs: check
+    if: needs.check.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
