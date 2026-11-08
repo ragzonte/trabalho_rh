@@ -1,13 +1,14 @@
 {
   "name": "contas-a-dois",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Controle de despesas do casal (PWA) usando uma planilha do Google compartilhada como banco de dados.",
+  "description": "Controle de despesas do casal (app Android, sem login) usando uma planilha do Google com Apps Script como banco de dados.",
   "type": "module",
   "scripts": {
     "start": "node tests/server.mjs 8080",
     "test": "node tests/e2e.mjs",
-    "icons": "node tools/make-icons.mjs"
+    "icons": "node tools/make-icons.mjs",
+    "android-icons": "node tools/make-android-icons.mjs"
   },
   "devDependencies": {
     "playwright": "^1.63.0"

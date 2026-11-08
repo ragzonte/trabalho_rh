@@ -1,22 +1,23 @@
 // Service worker: guarda os arquivos do app para abrir rápido e sem internet.
 // Os dados (planilha) nunca passam por aqui — vão direto para o Google.
-// A versão é trocada automaticamente a cada publicação (veja .github/workflows/pages.yml).
-const VERSION = 'dev';
+// No app Android não é usado: os arquivos já vêm dentro do APK.
+const VERSION = '2.0.0';
 const CACHE = `contas-a-dois-${VERSION}`;
 const ASSETS = [
   './',
   './index.html',
   './manifest.webmanifest',
   './css/app.css',
+  './js/api.js',
   './js/app.js',
-  './js/auth.js',
   './js/charts.js',
   './js/config.js',
   './js/db.js',
-  './js/fake-google.js',
+  './js/fake-sheets.js',
   './js/format.js',
-  './js/google.js',
+  './js/native.js',
   './js/stats.js',
+  './apps-script/Codigo.gs',
   './icons/icon.svg',
   './icons/icon-192.png',
   './icons/apple-touch-icon.png',

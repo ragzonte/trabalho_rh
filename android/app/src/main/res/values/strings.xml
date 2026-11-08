@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="appName">Contas a Dois</string>
+    <string name="app_name">Contas a Dois</string>
+    <string name="share_title">Enviar</string>
+    <string name="cannot_open">Não foi possível abrir o link</string>
 </resources>

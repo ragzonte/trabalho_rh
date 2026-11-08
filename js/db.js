@@ -1,93 +1,24 @@
-// Camada de dados: a planilha do Google é o banco de dados.
+// Camada de dados: a planilha (via script /exec) é o banco de dados.
 //
-// - Leitura: baixa as abas inteiras (é pouco dado para um casal) e guarda uma
-//   cópia local para o app abrir instantaneamente, mesmo sem internet.
-// - Escrita: toda alteração entra numa fila local ("outbox") e aparece na hora
-//   na tela. A fila é enviada para a planilha assim que houver conexão.
+// - Leitura: baixa tudo de uma vez (é pouco dado para um casal) e guarda uma
+//   cópia no celular para o app abrir na hora, mesmo sem internet.
+// - Escrita: cada alteração entra numa fila local e aparece na hora na tela.
+//   A fila é enviada em lote para a planilha assim que houver conexão.
+//   O script aplica tudo com trava, então os dois podem lançar ao mesmo tempo.
 
-import * as G from './google.js';
-import { CONFIG } from './config.js';
-import { normalizeDate, parseMoney, uid } from './format.js';
-
-export const TABS = {
-  tx: {
-    title: 'Lancamentos', id: 101,
-    header: ['id', 'data', 'tipo', 'valor', 'descricao', 'categoria', 'pessoa', 'criado_por', 'criado_em', 'atualizado_em'],
-  },
-  cat: { title: 'Categorias', id: 102, header: ['id', 'nome', 'tipo', 'icone'] },
-  mem: { title: 'Membros', id: 103, header: ['email', 'nome', 'entrou_em'] },
-  cfg: { title: 'Config', id: 104, header: ['chave', 'valor'] },
-};
-
-export const DEFAULT_CATEGORIES = [
-  ['🏠', 'Moradia', 'despesa'],
-  ['🛒', 'Mercado', 'despesa'],
-  ['🍽️', 'Restaurantes', 'despesa'],
-  ['🚗', 'Transporte', 'despesa'],
-  ['💡', 'Contas', 'despesa'],
-  ['💊', 'Saúde', 'despesa'],
-  ['🎉', 'Lazer', 'despesa'],
-  ['📚', 'Educação', 'despesa'],
-  ['🛍️', 'Compras', 'despesa'],
-  ['📦', 'Outros', 'despesa'],
-  ['💰', 'Salário', 'receita'],
-  ['✨', 'Extra', 'receita'],
-  ['📈', 'Rendimentos', 'receita'],
-  ['🎁', 'Outras receitas', 'receita'],
-].map(([icone, nome, tipo]) => ({ icone, nome, tipo }));
-
-const lastCol = (t) => String.fromCharCode(64 + t.header.length);
-const dataRange = (t) => `${t.title}!A2:${lastCol(t)}`;
-
-// Texto com apóstrofo inicial: o Sheets grava exatamente o texto (sem virar
-// fórmula, número ou data). O apóstrofo não faz parte do valor salvo.
-const txt = (s) => (s === undefined || s === null || s === '' ? '' : "'" + String(s));
-const str = (v) => (v === undefined || v === null ? '' : String(v)).trim();
-
-function txToRow(t) {
-  return [txt(t.id), t.data, t.tipo, Number(t.valor) || 0, txt(t.descricao), txt(t.categoria),
-    txt(t.pessoa), txt(t.criadoPor), txt(t.criadoEm), txt(t.atualizadoEm)];
-}
-function rowToTx(r) {
-  const id = str(r[0]);
-  const data = normalizeDate(r[1]);
-  if (!id || !data) return null;
-  return {
-    id, data,
-    tipo: str(r[2]).toLowerCase() === 'receita' ? 'receita' : 'despesa',
-    valor: Math.abs(parseMoney(r[3])),
-    descricao: str(r[4]),
-    categoria: str(r[5]),
-    pessoa: str(r[6]).toLowerCase(),
-    criadoPor: str(r[7]).toLowerCase(),
-    criadoEm: str(r[8]),
-    atualizadoEm: str(r[9]),
-  };
-}
-const catToRow = (c) => [txt(c.id), txt(c.nome), c.tipo, txt(c.icone)];
-function rowToCat(r) {
-  const id = str(r[0]);
-  const nome = str(r[1]);
-  if (!id || !nome) return null;
-  return { id, nome, tipo: str(r[2]).toLowerCase() === 'receita' ? 'receita' : 'despesa', icone: str(r[3]) || '🏷️' };
-}
-const memToRow = (m) => [txt(m.email), txt(m.nome), txt(m.entrouEm)];
-function rowToMem(r) {
-  const email = str(r[0]).toLowerCase();
-  return email ? { email, nome: str(r[1]), entrouEm: str(r[2]) } : null;
-}
-
-// ---------------- Estado observável ----------------
+import * as api from './api.js';
+import { uid } from './format.js';
 
 export const state = {
-  spaceId: null,
-  me: null, // { email, name, picture }
+  link: null,
+  me: null, // nome de quem usa este celular
   tx: [],
   cats: [],
   members: [],
-  ready: false, // já temos dados (do cache ou da planilha)
+  planilha: '', // endereço da planilha no Google Sheets
+  ready: false,
   syncing: false,
-  pending: 0, // alterações ainda não enviadas
+  pending: 0,
   offline: false,
   lastSync: 0,
 };
@@ -99,46 +30,55 @@ export function subscribe(fn) {
 }
 const emit = () => listeners.forEach((fn) => fn(state));
 
-const handlers = { onAuthNeeded() {}, onLostAccess() {}, onError() {} };
+const handlers = { onError() {} };
 export const setHandlers = (h) => Object.assign(handlers, h);
+
+let prefix = 'cad.';
+const K = (k) => `${prefix}${k}`;
+const readJSON = (k) => {
+  try { return JSON.parse(localStorage.getItem(K(k))); } catch { return null; }
+};
+const writeJSON = (k, v) => localStorage.setItem(K(k), JSON.stringify(v));
 
 let base = { tx: [], cats: [], members: [] };
 let outbox = [];
-let sheetIds = null;
+const saveOutbox = () => writeJSON('outbox', outbox);
 
-const readJSON = (k) => {
-  try { return JSON.parse(localStorage.getItem(k)); } catch { return null; }
-};
-const cacheKey = () => `cad.cache.${state.spaceId}`;
-const outboxKey = () => `cad.outbox.${state.spaceId}`;
-const saveCache = () => localStorage.setItem(cacheKey(), JSON.stringify(base));
-const saveOutbox = () => localStorage.setItem(outboxKey(), JSON.stringify(outbox));
+const sameName = (a, b) => String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
 
-export const localSpaceId = (email) => localStorage.getItem(`cad.space.${email}`);
-const rememberSpace = (email, id) => localStorage.setItem(`cad.space.${email}`, id);
-
-export function forgetSpace() {
-  if (state.me) localStorage.removeItem(`cad.space.${state.me.email}`);
-  if (state.spaceId) {
-    localStorage.removeItem(cacheKey());
-    localStorage.removeItem(outboxKey());
+/** Carrega o que está salvo no celular. `storagePrefix` separa a demonstração dos dados reais. */
+export function load(storagePrefix = 'cad.') {
+  prefix = storagePrefix;
+  state.link = localStorage.getItem(K('link'));
+  state.me = localStorage.getItem(K('eu'));
+  const cache = readJSON('cache');
+  if (cache?.base) {
+    base = cache.base;
+    state.planilha = cache.planilha || '';
+    state.lastSync = cache.lastSync || 0;
+    state.ready = true;
   }
-  Object.assign(state, { spaceId: null, tx: [], cats: [], members: [], ready: false, pending: 0 });
-  base = { tx: [], cats: [], members: [] };
-  outbox = [];
-  sheetIds = null;
-  memberChecked = false;
+  outbox = readJSON('outbox') || [];
+  recompute();
 }
 
-export const setMe = (me) => { state.me = me; };
+function setBase(data) {
+  base = { tx: data.lancamentos || [], cats: data.categorias || [], members: data.membros || [] };
+  state.planilha = data.planilha || '';
+  state.lastSync = Date.now();
+  state.ready = true;
+  writeJSON('cache', { base, planilha: state.planilha, lastSync: state.lastSync });
+  recompute();
+}
 
 function applyOp(d, op) {
-  switch (op.type) {
+  switch (op.acao) {
     case 'addTx':
       if (!d.tx.some((t) => t.id === op.tx.id)) d.tx.push(op.tx);
       break;
     case 'updateTx':
-      d.tx = d.tx.map((t) => (t.id === op.tx.id ? op.tx : t));
+      if (d.tx.some((t) => t.id === op.tx.id)) d.tx = d.tx.map((t) => (t.id === op.tx.id ? op.tx : t));
+      else d.tx.push(op.tx);
       break;
     case 'deleteTx':
       d.tx = d.tx.filter((t) => t.id !== op.id);
@@ -148,19 +88,26 @@ function applyOp(d, op) {
       break;
     case 'updateCat':
       d.cats = d.cats.map((c) => (c.id === op.cat.id ? op.cat : c));
-      if (op.oldName && op.oldName !== op.cat.nome) {
-        d.tx = d.tx.map((t) => (t.categoria === op.oldName && t.tipo === op.cat.tipo ? { ...t, categoria: op.cat.nome } : t));
+      if (op.nomeAntigo && op.nomeAntigo !== op.cat.nome) {
+        d.tx = d.tx.map((t) => (t.categoria === op.nomeAntigo && t.tipo === op.cat.tipo ? { ...t, categoria: op.cat.nome } : t));
       }
       break;
     case 'deleteCat':
       d.cats = d.cats.filter((c) => c.id !== op.id);
       break;
-    case 'upsertMember': {
-      const i = d.members.findIndex((m) => m.email === op.member.email);
-      if (i >= 0) d.members[i] = { ...d.members[i], ...op.member };
-      else d.members.push(op.member);
+    case 'addMembro':
+      if (!d.members.some((m) => sameName(m.nome, op.nome))) d.members.push({ nome: op.nome, entrouEm: op.entrouEm });
       break;
-    }
+    case 'renomearMembro':
+      if (!d.members.some((m) => sameName(m.nome, op.para))) {
+        d.members = d.members.map((m) => (sameName(m.nome, op.de) ? { ...m, nome: op.para } : m));
+      }
+      d.tx = d.tx.map((t) => ({
+        ...t,
+        pessoa: t.pessoa === op.de ? op.para : t.pessoa,
+        criadoPor: t.criadoPor === op.de ? op.para : t.criadoPor,
+      }));
+      break;
     default:
   }
 }
@@ -174,294 +121,103 @@ function recompute() {
   state.pending = outbox.length;
 }
 
-/** Carrega o cache local de uma planilha. Retorna true se havia cache. */
-export function useSpace(spaceId) {
-  state.spaceId = spaceId;
-  sheetIds = null;
-  memberChecked = false;
-  const cached = readJSON(cacheKey());
-  base = cached || { tx: [], cats: [], members: [] };
-  outbox = readJSON(outboxKey()) || [];
-  state.ready = !!cached;
+// ---------------- Conectar / identidade ----------------
+
+/** Testa o link e, se funcionar, passa a usar essa planilha. Lança NetError/ServerError. */
+export async function connect(link) {
+  const data = await api.getData(link);
+  if (!data.versao) throw new api.ServerError('Esse link não é do Contas a Dois.', { notOurs: true });
+  if (link !== state.link) {
+    outbox = [];
+    saveOutbox();
+    localStorage.removeItem(K('eu'));
+    state.me = null;
+  }
+  state.link = link;
+  localStorage.setItem(K('link'), link);
+  setBase(data);
+  state.offline = false;
+  emit();
+}
+
+/** Define quem usa este celular (cria o membro na planilha se for novo). */
+export function setMe(nome) {
+  const existing = state.members.find((m) => sameName(m.nome, nome));
+  const final = existing ? existing.nome : nome.trim();
+  state.me = final;
+  localStorage.setItem(K('eu'), final);
+  if (!existing) enqueue({ acao: 'addMembro', nome: final, entrouEm: new Date().toISOString() });
+  else emit();
+}
+
+export function forgetMe() {
+  state.me = null;
+  localStorage.removeItem(K('eu'));
+  emit();
+}
+
+export function renameMe(novo) {
+  const de = state.me;
+  const para = novo.trim();
+  if (!para || para === de) return;
+  state.me = para;
+  localStorage.setItem(K('eu'), para);
+  enqueue({ acao: 'renomearMembro', de, para });
+}
+
+export function disconnect() {
+  for (const k of ['link', 'eu', 'cache', 'outbox']) localStorage.removeItem(K(k));
+  base = { tx: [], cats: [], members: [] };
+  outbox = [];
+  Object.assign(state, { link: null, me: null, planilha: '', ready: false, pending: 0, lastSync: 0 });
   recompute();
   emit();
-  return !!cached;
-}
-
-// ---------------- Criar / entrar / descobrir ----------------
-
-async function loadSheetIds(spaceId) {
-  const meta = await G.sheetsMeta(spaceId);
-  const ids = {};
-  for (const s of meta.sheets || []) ids[s.properties.title] = s.properties.sheetId;
-  const missing = Object.values(TABS).filter((t) => t.title !== TABS.cfg.title && ids[t.title] === undefined);
-  if (missing.length) {
-    throw new G.ApiError(422, `A planilha não tem as abas esperadas (${missing.map((t) => t.title).join(', ')}).`);
-  }
-  return ids;
-}
-
-/** Confere se o usuário atual consegue abrir a planilha. */
-export async function checkAccess(spaceId) {
-  try {
-    await loadSheetIds(spaceId);
-    return { ok: true };
-  } catch (e) {
-    if (e instanceof G.ApiError && [403, 404].includes(e.status)) return { ok: false, reason: 'no-access' };
-    if (e instanceof G.ApiError && e.status === 422) return { ok: false, reason: 'invalid', message: e.message };
-    throw e;
-  }
-}
-
-async function rememberEverywhere(spaceId) {
-  rememberSpace(state.me.email, spaceId);
-  try { await G.writeAppConfig({ spreadsheetId: spaceId, salvoEm: new Date().toISOString() }); } catch { /* opcional */ }
-}
-
-/** Procura no Drive do usuário (pasta oculta do app) qual planilha ele usa. */
-export async function discoverSpace() {
-  let cfg;
-  try { cfg = await G.readAppConfig(); } catch (e) {
-    if (e instanceof G.AuthError || e instanceof G.NetError) throw e;
-    return null;
-  }
-  const id = cfg?.data?.spreadsheetId;
-  if (!id) return null;
-  const access = await checkAccess(id);
-  if (!access.ok) return null;
-  rememberSpace(state.me.email, id);
-  return id;
-}
-
-export async function createSpace({ myName }) {
-  const me = state.me;
-  const file = await G.createSpreadsheetFile(CONFIG.SPREADSHEET_TITLE, { contasADois: '1' });
-  const id = file.id;
-  const meta = await G.sheetsMeta(id);
-  const oldSheets = (meta.sheets || []).map((s) => s.properties.sheetId);
-  const tabs = Object.values(TABS);
-  const tx = TABS.tx.id;
-  await G.batchUpdate(id, [
-    {
-      updateSpreadsheetProperties: {
-        properties: { locale: 'pt_BR', timeZone: 'America/Sao_Paulo' },
-        fields: 'locale,timeZone',
-      },
-    },
-    ...tabs.map((t) => ({
-      addSheet: { properties: { sheetId: t.id, title: t.title, gridProperties: { frozenRowCount: 1 } } },
-    })),
-    ...oldSheets.map((sheetId) => ({ deleteSheet: { sheetId } })),
-    ...tabs.map((t) => ({
-      repeatCell: {
-        range: { sheetId: t.id, startRowIndex: 0, endRowIndex: 1 },
-        cell: { userEnteredFormat: { textFormat: { bold: true } } },
-        fields: 'userEnteredFormat.textFormat.bold',
-      },
-    })),
-    {
-      repeatCell: {
-        range: { sheetId: tx, startRowIndex: 1, startColumnIndex: 1, endColumnIndex: 2 },
-        cell: { userEnteredFormat: { numberFormat: { type: 'DATE', pattern: 'dd/mm/yyyy' } } },
-        fields: 'userEnteredFormat.numberFormat',
-      },
-    },
-    {
-      repeatCell: {
-        range: { sheetId: tx, startRowIndex: 1, startColumnIndex: 3, endColumnIndex: 4 },
-        cell: { userEnteredFormat: { numberFormat: { type: 'CURRENCY', pattern: '"R$" #,##0.00' } } },
-        fields: 'userEnteredFormat.numberFormat',
-      },
-    },
-  ]);
-  const now = new Date().toISOString();
-  const block = (t, rows) => ({ range: `${t.title}!A1:${lastCol(t)}${rows.length}`, values: rows });
-  await G.valuesBatchUpdate(id, [
-    block(TABS.tx, [TABS.tx.header]),
-    block(TABS.cat, [TABS.cat.header, ...DEFAULT_CATEGORIES.map((c) => catToRow({ ...c, id: uid() }))]),
-    block(TABS.mem, [TABS.mem.header, memToRow({ email: me.email, nome: myName, entrouEm: now })]),
-    block(TABS.cfg, [
-      TABS.cfg.header,
-      ['versao', 1],
-      ['criado_em', txt(now)],
-      ['criado_por', txt(me.email)],
-      ['aviso', txt('Não renomeie as abas nem a linha de títulos. Os dados podem ser editados à vontade.')],
-    ]),
-  ]);
-  await rememberEverywhere(id);
-  return id;
-}
-
-/** Entra numa planilha já compartilhada com este usuário. */
-export async function joinSpace(spaceId) {
-  const access = await checkAccess(spaceId);
-  if (!access.ok) return access;
-  await rememberEverywhere(spaceId);
-  return { ok: true };
-}
-
-export function invite(email) {
-  const msg = `${state.me?.name || 'Seu amor'} te convidou para o ${CONFIG.APP_NAME}. Abra o link do convite que te mandei e entre com esta conta Google.`;
-  return G.shareWith(state.spaceId, email.trim().toLowerCase(), msg);
 }
 
 // ---------------- Sincronização ----------------
 
-async function ensureSheetIds() {
-  if (!sheetIds) sheetIds = await loadSheetIds(state.spaceId);
-}
-
-async function findRow(tab, key) {
-  const r = await G.getValues(state.spaceId, `${tab.title}!A:A`);
-  const vals = r?.values || [];
-  const k = String(key).toLowerCase();
-  for (let i = 1; i < vals.length; i++) {
-    if (String(vals[i]?.[0] ?? '').trim().toLowerCase() === k) return i + 1;
-  }
-  return 0;
-}
-
-async function addRow(tab, op, key, row) {
-  // Se uma tentativa anterior caiu no meio, confere se a linha já foi gravada.
-  if (op.tries && (await findRow(tab, key))) return;
-  op.tries = (op.tries || 0) + 1;
-  saveOutbox();
-  await G.appendRows(state.spaceId, `${tab.title}!A:${lastCol(tab)}`, [row]);
-}
-
-async function updateRow(tab, key, row) {
-  const n = await findRow(tab, key);
-  if (!n) return false;
-  await G.updateRows(state.spaceId, `${tab.title}!A${n}:${lastCol(tab)}${n}`, [row]);
-  return true;
-}
-
-async function deleteRow(tab, key) {
-  const n = await findRow(tab, key);
-  if (!n) return;
-  await G.batchUpdate(state.spaceId, [{
-    deleteDimension: { range: { sheetId: sheetIds[tab.title], dimension: 'ROWS', startIndex: n - 1, endIndex: n } },
-  }]);
-}
-
-async function renameCategoryInTx(oldName, newName, tipo) {
-  const r = await G.getValues(state.spaceId, `${TABS.tx.title}!A2:F`);
-  const data = [];
-  (r?.values || []).forEach((row, i) => {
-    if (str(row[5]) === oldName && str(row[2]).toLowerCase() === tipo) {
-      data.push({ range: `${TABS.tx.title}!F${i + 2}`, values: [[txt(newName)]] });
-    }
-  });
-  if (data.length) await G.valuesBatchUpdate(state.spaceId, data);
-}
-
-async function execOp(op) {
-  switch (op.type) {
-    case 'addTx': return addRow(TABS.tx, op, op.tx.id, txToRow(op.tx));
-    case 'updateTx': return updateRow(TABS.tx, op.tx.id, txToRow(op.tx));
-    case 'deleteTx': return deleteRow(TABS.tx, op.id);
-    case 'addCat': return addRow(TABS.cat, op, op.cat.id, catToRow(op.cat));
-    case 'updateCat':
-      await updateRow(TABS.cat, op.cat.id, catToRow(op.cat));
-      if (op.oldName && op.oldName !== op.cat.nome) await renameCategoryInTx(op.oldName, op.cat.nome, op.cat.tipo);
-      return undefined;
-    case 'deleteCat': return deleteRow(TABS.cat, op.id);
-    case 'upsertMember':
-      if (!(await updateRow(TABS.mem, op.member.email, memToRow(op.member)))) {
-        await addRow(TABS.mem, op, op.member.email, memToRow(op.member));
-      }
-      return undefined;
-    default: return undefined;
-  }
-}
-
-async function flushAll() {
-  if (!outbox.length) return;
-  await ensureSheetIds();
-  while (outbox.length) {
-    const op = outbox[0];
-    try {
-      await execOp(op);
-    } catch (e) {
-      if (e instanceof G.ApiError && !e.transient) {
-        // Erro definitivo (ex.: linha inválida): descarta para não travar a fila.
-        outbox.shift();
-        saveOutbox();
-        handlers.onError(`Não foi possível salvar uma alteração: ${e.message}`);
-        continue;
-      }
-      throw e;
-    }
-    outbox.shift();
-    applyOp(base, op);
-    saveOutbox();
-    saveCache();
-  }
-}
-
-async function fetchAll() {
-  await ensureSheetIds();
-  const r = await G.batchGet(state.spaceId, [dataRange(TABS.tx), dataRange(TABS.cat), dataRange(TABS.mem)]);
-  const [tx = [], cats = [], mem = []] = (r?.valueRanges || []).map((v) => v.values || []);
-  base = {
-    tx: tx.map(rowToTx).filter(Boolean),
-    cats: cats.map(rowToCat).filter(Boolean),
-    members: mem.map(rowToMem).filter(Boolean),
-  };
-  saveCache();
-  state.lastSync = Date.now();
-  state.ready = true;
-}
-
+const BATCH = 100;
 let running = null;
-let rerun = false;
-let rerunFetch = false;
+let again = false;
 
 /**
- * Envia a fila de alterações e (opcionalmente) baixa os dados da planilha.
+ * Envia a fila (se houver) e traz os dados atualizados da planilha.
  * Nunca lança erro: problemas viram estado (offline) ou avisos.
  */
-export function sync({ fetch = true } = {}) {
-  if (!state.spaceId) return Promise.resolve();
+export function sync() {
+  if (!state.link) return Promise.resolve();
   if (running) {
-    rerun = true;
-    rerunFetch = rerunFetch || fetch;
+    again = true;
     return running;
   }
   running = (async () => {
-    let doFetch = fetch;
-    let fetched = false;
     state.syncing = true;
     emit();
     try {
       do {
-        rerun = false;
-        await flushAll();
-        if (doFetch) {
-          await fetchAll();
-          fetched = true;
+        again = false;
+        if (outbox.length) {
+          const batch = outbox.slice(0, BATCH);
+          const data = await api.sendOps(state.link, batch);
+          const sent = new Set(batch.map((o) => o.opId));
+          outbox = outbox.filter((o) => !sent.has(o.opId));
+          saveOutbox();
+          for (const r of data.rejeitadas || []) handlers.onError(`A planilha recusou uma alteração: ${r.erro}`);
+          setBase(data);
+          if (outbox.length) again = true;
+        } else {
+          setBase(await api.getData(state.link));
         }
-        doFetch = rerunFetch;
-        rerunFetch = false;
-      } while (rerun);
+      } while (again);
       state.offline = false;
     } catch (e) {
-      if (e instanceof G.NetError) state.offline = true;
-      else if (e instanceof G.AuthError) handlers.onAuthNeeded();
-      else if (e instanceof G.ApiError && [403, 404].includes(e.status)) handlers.onLostAccess();
-      else handlers.onError(e.message || 'Erro ao sincronizar');
+      if (e instanceof api.NetError) state.offline = true;
+      else handlers.onError(e.message || 'Erro ao falar com a planilha');
     } finally {
       recompute();
       state.syncing = false;
       running = null;
       emit();
-    }
-    if (fetched) ensureMember();
-    if (rerun) {
-      const f = rerunFetch;
-      rerun = false;
-      rerunFetch = false;
-      sync({ fetch: f });
     }
   })();
   return running;
@@ -473,19 +229,12 @@ function enqueue(op) {
   saveOutbox();
   recompute();
   emit();
-  sync({ fetch: false });
+  sync();
 }
 
-let memberChecked = false;
-function ensureMember() {
-  if (memberChecked || !state.me || !state.ready) return;
-  memberChecked = true;
-  if (!state.members.some((m) => m.email === state.me.email)) {
-    enqueue({
-      type: 'upsertMember',
-      member: { email: state.me.email, nome: state.me.name || state.me.email.split('@')[0], entrouEm: new Date().toISOString() },
-    });
-  }
+/** Ids de lançamentos com alteração ainda não enviada. */
+export function pendingTxIds() {
+  return new Set(outbox.filter((o) => o.tx).map((o) => o.tx.id));
 }
 
 // ---------------- Alterações (usadas pelas telas) ----------------
@@ -494,31 +243,18 @@ export function saveTx(data) {
   const now = new Date().toISOString();
   const existing = data.id && state.tx.find((t) => t.id === data.id);
   if (existing) {
-    enqueue({ type: 'updateTx', tx: { ...existing, ...data, atualizadoEm: now } });
+    enqueue({ acao: 'updateTx', tx: { ...existing, ...data, atualizadoEm: now } });
   } else {
-    enqueue({
-      type: 'addTx',
-      tx: { ...data, id: uid(), criadoPor: state.me.email, criadoEm: now, atualizadoEm: '' },
-    });
+    enqueue({ acao: 'addTx', tx: { ...data, id: uid(), criadoPor: state.me || '', criadoEm: now, atualizadoEm: '' } });
   }
 }
 
-export const deleteTx = (id) => enqueue({ type: 'deleteTx', id });
-
-/** Ids de lançamentos com alteração ainda não enviada para a planilha. */
-export function pendingTxIds() {
-  return new Set(outbox.filter((o) => o.tx).map((o) => o.tx.id));
-}
+export const deleteTx = (id) => enqueue({ acao: 'deleteTx', id });
 
 export function saveCat(data) {
   const existing = data.id && state.cats.find((c) => c.id === data.id);
-  if (existing) enqueue({ type: 'updateCat', cat: { ...existing, ...data }, oldName: existing.nome });
-  else enqueue({ type: 'addCat', cat: { ...data, id: uid() } });
+  if (existing) enqueue({ acao: 'updateCat', cat: { ...existing, ...data }, nomeAntigo: existing.nome });
+  else enqueue({ acao: 'addCat', cat: { ...data, id: uid() } });
 }
 
-export const deleteCat = (id) => enqueue({ type: 'deleteCat', id });
-
-export function setMyName(nome) {
-  const current = state.members.find((m) => m.email === state.me.email) || { email: state.me.email, entrouEm: new Date().toISOString() };
-  enqueue({ type: 'upsertMember', member: { ...current, nome } });
-}
+export const deleteCat = (id) => enqueue({ acao: 'deleteCat', id });

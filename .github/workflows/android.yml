@@ -1,4 +1,4 @@
-# Compila o app Android (APK) e, na branch principal do repositório, publica em Releases:
+# Compila o app Android (APK). Na branch principal do repositório, publica em:
 # https://github.com/ragzonte/trabalho_rh/releases/download/android/contas-a-dois.apk
 name: App Android
 
@@ -6,6 +6,11 @@ on:
   push:
     paths:
       - 'android/**'
+      - 'index.html'
+      - 'css/**'
+      - 'js/**'
+      - 'icons/**'
+      - 'apps-script/**'
       - '.github/workflows/android.yml'
   workflow_dispatch:
 
@@ -32,43 +37,28 @@ jobs:
           if [ -n "$KEYSTORE_B64" ]; then
             echo "$KEYSTORE_B64" | base64 -d > "$KS"
             PASS="$KEYSTORE_PASSWORD"
-            echo "KEY_KIND=fixa (secret ANDROID_KEYSTORE_BASE64)" >> "$GITHUB_ENV"
+            echo "::notice::APK assinado com a chave fixa (secret ANDROID_KEYSTORE_BASE64)."
           else
-            # Sem a secret, usa uma chave temporária: o APK funciona, mas cada versão
-            # precisa de desinstalar a anterior e o app mostra a barra de endereço.
+            # Sem a secret: chave temporária. O APK funciona, mas para instalar uma
+            # versão nova é preciso desinstalar a anterior (veja o README).
             PASS="tmp$(openssl rand -hex 12)"
             keytool -genkeypair -keystore "$KS" -alias contasadois -keyalg RSA -keysize 2048 \
               -validity 10000 -storepass "$PASS" -keypass "$PASS" -dname "CN=Contas a Dois"
-            echo "KEY_KIND=temporária (configure a secret para fixar)" >> "$GITHUB_ENV"
+            echo "::warning::APK assinado com chave temporária. Configure a secret ANDROID_KEYSTORE_BASE64 para as atualizações instalarem por cima."
           fi
           echo "::add-mask::$PASS"
-          FP=$(keytool -list -v -keystore "$KS" -alias contasadois -storepass "$PASS" | grep -m1 'SHA256:' | awk '{print $2}')
-          {
-            echo "ANDROID_KEYSTORE_PATH=$KS"
-            echo "ANDROID_KEYSTORE_PASSWORD=$PASS"
-            echo "FINGERPRINT=$FP"
-          } >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PATH=$KS" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
 
       - name: Compilar APK
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Preparar arquivos
+      - name: Conferir APK
         run: |
           mkdir out
           cp android/app/build/outputs/apk/release/app-release.apk out/contas-a-dois.apk
-          printf '[{\n  "relation": ["delegate_permission/common.handle_all_urls"],\n  "target": {\n    "namespace": "android_app",\n    "package_name": "io.github.ragzonte.contasadois",\n    "sha256_cert_fingerprints": ["%s"]\n  }\n}]\n' "$FINGERPRINT" > out/assetlinks.json
-          {
-            echo "### 📱 App Android"
-            echo ""
-            echo "- Chave de assinatura: **$KEY_KIND**"
-            echo "- Impressão digital SHA-256: \`$FINGERPRINT\`"
-            echo ""
-            echo "Conteúdo para \`https://ragzonte.github.io/.well-known/assetlinks.json\`:"
-            echo '```json'
-            cat out/assetlinks.json
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          unzip -l out/contas-a-dois.apk | grep -E "assets/www/(index.html|js/app.js|apps-script/Codigo.gs)"
           ls -la out
 
       - uses: actions/upload-artifact@v4
@@ -81,7 +71,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! gh release view android >/dev/null 2>&1; then
-            gh release create android --title "App Android" --notes "Baixe **contas-a-dois.apk** no celular Android e toque para instalar (permita instalar de fontes desconhecidas quando o Android pedir). O app se atualiza sozinho quando o site é atualizado; só baixe de novo se o README pedir."
+          NOTES="Baixe **contas-a-dois.apk** no celular Android e toque para instalar (permita instalar apps desta fonte quando o Android pedir). Depois é só colar o link da planilha do casal."
+          if gh release view android >/dev/null 2>&1; then
+            gh release edit android --title "App Android" --notes "$NOTES"
+            gh release delete-asset android assetlinks.json -y 2>/dev/null || true
+          else
+            gh release create android --title "App Android" --notes "$NOTES"
           fi
-          gh release upload android out/contas-a-dois.apk out/assetlinks.json --clobber
+          gh release upload android out/contas-a-dois.apk --clobber

@@ -1,17 +1,18 @@
-// Contas a Dois — app principal (telas, navegação e fluxo de login).
+// Contas a Dois — telas, navegação e fluxo de conexão com a planilha.
+// Sem login: o app fala com a planilha pelo link /exec do script da planilha.
 
 import { CONFIG } from './config.js';
-import * as auth from './auth.js';
-import * as G from './google.js';
+import * as api from './api.js';
 import * as db from './db.js';
 import * as S from './stats.js';
+import * as native from './native.js';
 import {
   brl, esc, monthLabel, dayLabel, currentMonth, addMonths, monthOf, todayISO, yesterdayISO,
-  maskCents, firstName, isEmail, timeLabel,
+  maskCents, timeLabel,
 } from './format.js';
 import { rankedBars, segmentedBar, columnsChart, initTooltips } from './charts.js';
 
-const VERSION = '1.0.0';
+const VERSION = '2.0.0';
 const $app = document.getElementById('app');
 const $sheet = document.getElementById('sheet-root');
 const $toast = document.getElementById('toast-root');
@@ -30,14 +31,11 @@ const ui = {
   chartTipo: 'despesa',
   sheetOpen: false,
 };
-let me = null;
-let pendingRenew = false;
-let installPrompt = null;
 
 // ---------------------------------------------------------------------------
 // Ícones
 // ---------------------------------------------------------------------------
-const icon = (d, extra = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}${extra}</svg>`;
+const icon = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
 const I = {
   home: icon('<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>'),
   list: icon('<path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"/>'),
@@ -45,7 +43,6 @@ const I = {
   more: icon('<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>'),
   plus: icon('<path d="M12 5v14M5 12h14"/>'),
 };
-const GOOGLE_G = `<svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>`;
 
 // ---------------------------------------------------------------------------
 // Utilidades de interface
@@ -63,198 +60,65 @@ function go(screen, data = {}) {
   render();
 }
 
-const inviteLink = (id) => `${auth.redirectUri()}?convite=${encodeURIComponent(id)}`;
-const sheetUrl = (id) => `https://docs.google.com/spreadsheets/d/${encodeURIComponent(id)}/edit`;
-
-/** Extrai o id da planilha de um link de convite, link do Sheets ou código puro. */
-function parseInvite(text) {
-  const s = String(text || '').trim();
-  const m = s.match(/convite=([\w-]+)/) || s.match(/\/d\/([\w-]{20,})/) || s.match(/^([\w-]{20,})$/);
-  return m ? m[1] : '';
-}
-
-function isStandalone() {
-  return matchMedia('(display-mode: standalone)').matches || navigator.standalone === true
-    || sessionStorage.getItem('cad.android') === '1'; // aberto pelo app Android (APK)
-}
-const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent)
-  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-const isAndroid = () => /android/i.test(navigator.userAgent);
-const apkLink = (label, cls = 'btn secondary') => (CONFIG.ANDROID_APK_URL
-  ? `<a class="${cls}" href="${esc(CONFIG.ANDROID_APK_URL)}" style="text-decoration:none">${label}</a>` : '');
-
-async function shareText(text, url) {
-  if (navigator.share) {
-    try {
-      await navigator.share({ title: CONFIG.APP_NAME, text, url });
-      return;
-    } catch (e) {
-      if (e?.name === 'AbortError') return;
-    }
-  }
-  await copy(url);
-}
-
-async function copy(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast('Link copiado ✓');
-  } catch {
-    window.prompt('Copie o link:', text);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Telas de entrada (login, configuração, convite)
-// ---------------------------------------------------------------------------
 const logo = '<img class="logo" src="icons/icon.svg" alt="">';
 
+function inviteText() {
+  const apk = CONFIG.APK_URL ? `\n\n1) Instale o app: ${CONFIG.APK_URL}` : '';
+  return `Vamos organizar nossas contas juntos no ${CONFIG.APP_NAME}! 💑${apk}\n${apk ? '2) ' : ''}Abra o app e cole este link:\n${db.state.link}`;
+}
+
+async function shareInvite() {
+  const r = await native.share(inviteText());
+  if (r === 'copied') toast('Convite copiado ✓ Cole no WhatsApp');
+  else if (r === 'failed') openInviteSheet();
+}
+
+// ---------------------------------------------------------------------------
+// Telas de entrada: conectar a planilha e escolher quem é você
+// ---------------------------------------------------------------------------
 function screenLoading() {
   return `<div class="welcome" style="text-align:center"><div class="spinner" style="margin:0 auto 16px"></div>
     <p class="lead">${esc(ui.data.text || 'Carregando…')}</p></div>`;
 }
 
-function screenLogin() {
-  const invite = localStorage.getItem('cad.invite');
+function screenConnect() {
   const err = ui.data.error;
-  return `<div class="welcome">
+  return `<form class="welcome" data-form="connect" novalidate>
     ${logo}
     <h1>${esc(CONFIG.APP_NAME)}</h1>
-    <p class="lead">As finanças do casal num lugar só. Cada um lança o que ganha e o que gasta — e vocês veem tudo juntos.</p>
-    ${invite ? '<div class="banner">💌 Você recebeu um convite! Entre com sua conta Google para participar.</div>' : ''}
-    ${err ? `<p class="error-text">${esc(err)}</p>` : ''}
-    <button class="btn google" data-action="login">${GOOGLE_G} Entrar com Google</button>
-    <p class="small">Os dados ficam numa planilha no Google Drive, compartilhada só entre vocês dois.</p>
-    <button class="link" data-action="demo">Ver uma demonstração</button>
-    ${isAndroid() && !isStandalone() && CONFIG.ANDROID_APK_URL
-      ? `<p class="small"><a href="${esc(CONFIG.ANDROID_APK_URL)}">🤖 Baixar o app Android</a></p>` : ''}
-  </div>`;
-}
-
-function screenNoConfig() {
-  return `<div class="welcome">
-    ${logo}
-    <h1>Quase lá!</h1>
-    <p class="lead">Falta configurar o login do Google deste app (uma vez só, por quem publicou o app).</p>
-    <div class="card"><ol class="steps">
-      <li>Crie um <b>ID do cliente OAuth</b> (tipo “Aplicativo da Web”) no Google Cloud.</li>
-      <li>Cole o ID em <code>js/config.js</code>.</li>
-      <li>Publique de novo. O passo a passo completo está no <b>README</b>.</li>
-    </ol></div>
-    <button class="btn" data-action="demo">Ver uma demonstração</button>
-  </div>`;
-}
-
-function screenScopes() {
-  return `<div class="welcome">
-    ${logo}
-    <h1>Falta uma permissão</h1>
-    <p class="lead">Para guardar os dados na planilha do casal, o app precisa de acesso às planilhas e aos arquivos que ele mesmo cria no seu Drive.</p>
-    <p class="hint" style="margin:0 0 20px">Na tela do Google, deixe <b>todas as caixas marcadas</b>.</p>
-    <button class="btn" data-action="login-consent">Tentar de novo</button>
-  </div>`;
-}
-
-function screenSetup() {
-  const pasted = ui.data.code || '';
-  return `<div class="welcome">
-    ${logo}
-    <h1>Olá, ${esc(firstName(me.name) || 'tudo bem')}! 👋</h1>
-    <p class="lead">Como vocês querem começar?</p>
-    <div class="card">
-      <h2>Sou o primeiro(a) a usar</h2>
-      <p class="hint" style="margin:0 0 14px">O app cria a planilha do casal no seu Google Drive. Depois é só mandar o convite.</p>
-      <button class="btn" data-action="go-create">Criar nosso espaço</button>
+    <p class="lead">As finanças do casal num lugar só. Cola o link da planilha de vocês e pronto, sem login.</p>
+    <label class="field"><span>Link da planilha do casal</span>
+      <div class="row"><input class="input" name="link" value="${esc(ui.data.link || '')}" autocomplete="off" autocapitalize="off" spellcheck="false"
+        placeholder="https://script.google.com/macros/s/…/exec">
+      <button class="btn secondary" type="button" data-action="paste-link" style="flex:0 0 auto;width:auto">Colar</button></div></label>
+    ${err ? `<p class="error-text">${err}</p>` : ''}
+    <button class="btn" type="submit">Conectar</button>
+    <div class="card" style="margin-top:22px">
+      <h2>Ainda não tem o link?</h2>
+      <p class="hint" style="margin:0 0 14px">Um de vocês cria a planilha uma vez (no computador, uns 3 minutos) e manda o link para o outro.</p>
+      <button class="btn secondary" type="button" data-action="open-guide">Ver como criar</button>
     </div>
-    <form class="card" data-form="join">
-      <h2>Recebi um convite</h2>
-      <label class="field"><span>Cole aqui o link ou o código do convite</span>
-        <input class="input" name="code" value="${esc(pasted)}" autocomplete="off" placeholder="https://…?convite=…"></label>
-      ${ui.data.joinError ? `<p class="error-text">${esc(ui.data.joinError)}</p>` : ''}
-      <button class="btn secondary" type="submit">Entrar no espaço</button>
-    </form>
-    <p class="small">Conectado como ${esc(me.email)} · <button class="link" data-action="switch-account">trocar de conta</button></p>
-  </div>`;
-}
-
-function screenCreate() {
-  return `<form class="welcome" data-form="create">
-    ${logo}
-    <h1>Nosso espaço</h1>
-    <p class="lead">Só duas perguntas rápidas.</p>
-    <label class="field"><span>Como você quer ser chamado(a)?</span>
-      <input class="input" name="name" required maxlength="40" value="${esc(firstName(me.name))}" autocomplete="given-name"></label>
-    <label class="field"><span>E-mail Google do seu amor (opcional, dá para fazer depois)</span>
-      <input class="input" name="partner" type="email" inputmode="email" autocomplete="off" placeholder="nome@gmail.com"></label>
-    <p class="hint">Vamos liberar o acesso à planilha para esse e-mail.</p>
-    ${ui.data.error ? `<p class="error-text">${esc(ui.data.error)}</p>` : ''}
-    <button class="btn" type="submit">Criar planilha</button>
-    <button class="btn secondary" type="button" data-action="go-setup">Voltar</button>
+    <button class="link" type="button" data-action="demo">Ver uma demonstração</button>
   </form>`;
 }
 
-function inviteBlock({ shared = [], error = '' } = {}) {
-  const link = inviteLink(db.state.spaceId);
-  return `
-    <ol class="steps">
-      <li>Libere o acesso digitando o <b>e-mail Google</b> dele(a).</li>
-      <li>Envie o <b>link do convite</b> (WhatsApp, por exemplo).</li>
-      <li>Ele(a) abre o link, entra com o Google e pronto! 💑</li>
-    </ol>
-    ${shared.map((e) => `<div class="banner">✓ Acesso liberado para <b>${esc(e)}</b></div>`).join('')}
-    <form data-form="invite">
-      <label class="field"><span>E-mail Google do seu amor</span>
-        <div class="row"><input class="input" name="email" type="email" inputmode="email" autocomplete="off" placeholder="nome@gmail.com" required>
-        <button class="btn" type="submit" style="flex:0 0 auto;width:auto">Liberar</button></div></label>
-      ${error ? `<p class="error-text">${esc(error)}</p>` : ''}
-    </form>
-    <div class="linkbox"><span style="flex:1">${esc(link)}</span></div>
-    <button class="btn" data-action="share-invite">Enviar link do convite</button>
-    <button class="btn secondary" data-action="copy-invite">Copiar link</button>`;
-}
-
-function screenCreated() {
-  return `<div class="welcome">
-    <div style="font-size:56px">🎉</div>
-    <h1>Tudo pronto!</h1>
-    <p class="lead">Agora convide seu amor para lançar junto com você.</p>
-    <div class="card" id="invite-card">${inviteBlock(ui.data)}</div>
-    <button class="btn secondary" data-action="start">Começar a usar</button>
-  </div>`;
-}
-
-function screenNoAccess() {
-  const invalid = ui.data.reason === 'invalid';
-  return `<div class="welcome">
-    <div style="font-size:56px">🔒</div>
-    <h1>${invalid ? 'Planilha diferente' : 'Ainda sem acesso'}</h1>
-    ${invalid
-      ? `<p class="lead">${esc(ui.data.message || 'Essa planilha não é do Contas a Dois.')}</p>`
-      : `<p class="lead">A planilha do convite ainda não foi compartilhada com <b>${esc(me.email)}</b>.</p>
-         <div class="card"><p style="margin:0">Peça para quem te convidou abrir o app em <b>Ajustes → Convidar</b> e liberar exatamente este e-mail. Depois toque em “Tentar de novo”.</p></div>`}
-    <button class="btn" data-action="retry-join">Tentar de novo</button>
-    <button class="btn secondary" data-action="switch-account">Entrar com outra conta</button>
-    <button class="btn secondary" data-action="cancel-invite">Voltar</button>
-  </div>`;
-}
-
-function screenLost() {
-  return `<div class="welcome">
-    <div style="font-size:56px">🔒</div>
-    <h1>Sem acesso à planilha</h1>
-    <p class="lead">Não conseguimos abrir a planilha do casal com <b>${esc(me.email)}</b>. Ela pode ter sido apagada ou o compartilhamento removido.</p>
-    <button class="btn" data-action="retry-open">Tentar de novo</button>
-    <button class="btn secondary" data-action="forget-space">Usar outra planilha</button>
-  </div>`;
-}
-
-function screenError() {
-  return `<div class="welcome">
-    <div style="font-size:56px">${ui.data.offline ? '📡' : '⚠️'}</div>
-    <h1>${ui.data.offline ? 'Sem conexão' : 'Algo deu errado'}</h1>
-    <p class="lead">${esc(ui.data.message || 'Verifique a internet e tente de novo.')}</p>
-    <button class="btn" data-action="reload">Tentar de novo</button>
-  </div>`;
+function screenWho() {
+  const members = db.state.members;
+  return `<form class="welcome" data-form="who" novalidate>
+    ${logo}
+    <h1>Quem é você?</h1>
+    <p class="lead">Cada um escolhe o próprio nome. Os lançamentos ficam marcados com quem ganhou ou gastou.</p>
+    ${members.length ? `<div class="card" style="padding-top:4px;padding-bottom:4px"><ul class="list">
+      ${S.people(db.state).filter((p) => members.some((m) => m.nome === p.nome)).map((p) => `<li><button type="button" class="list-item" data-action="pick-me" data-name="${esc(p.nome)}">
+        <span class="avatar" style="box-shadow:0 0 0 2px ${p.color}">${esc(p.nome.charAt(0).toUpperCase())}</span>
+        <span class="grow"><b>${esc(p.nome)}</b></span><span class="chev">Sou eu ›</span></button></li>`).join('')}
+    </ul></div>` : ''}
+    <label class="field"><span>${members.length ? 'Ou, se for novo(a) aqui, digite seu nome' : 'Seu nome'}</span>
+      <input class="input" name="nome" maxlength="40" autocomplete="given-name" placeholder="Ex.: Ana"></label>
+    ${ui.data.error ? `<p class="error-text">${esc(ui.data.error)}</p>` : ''}
+    <button class="btn" type="submit">Entrar</button>
+    <button class="link" type="button" data-action="disconnect" style="margin-top:16px">Usar outro link</button>
+  </form>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -325,23 +189,6 @@ function txRow(t, list, pending) {
   </button></li>`;
 }
 
-function installBanner() {
-  if (DEMO || isStandalone() || localStorage.getItem('cad.installDismissed')) return '';
-  if (!installPrompt && !isIOS() && !isAndroid()) return '';
-  let how;
-  if (installPrompt) {
-    how = '<button class="btn" data-action="install" style="margin-top:10px">Instalar agora</button>'
-      + (isAndroid() ? `<div style="margin-top:10px">${apkLink('ou baixe o app Android (APK)')}</div>` : '');
-  } else if (isAndroid()) {
-    how = `<div style="margin-top:10px">${apkLink('Baixar o app Android', 'btn')}</div>`;
-  } else {
-    how = '<p style="margin:6px 0 0">No iPhone: toque em <b>Compartilhar</b> <span aria-hidden="true">⬆️</span> e depois em <b>Adicionar à Tela de Início</b>.</p>';
-  }
-  return `<div class="card"><div class="card-head"><h2>📲 Instale o app</h2>
-    <button class="link" data-action="dismiss-install">Agora não</button></div>
-    <p class="hint" style="margin:0">Abre mais rápido e funciona como um app normal.</p>${how}</div>`;
-}
-
 const VIEWS = {
   inicio() {
     const st = db.state;
@@ -369,14 +216,14 @@ const VIEWS = {
       <div class="people">${persons.map((p) => `
         <div class="person">
           <i class="mdot" style="background:${p.person.color}"></i>
-          <span class="name">${esc(p.person.label)}${p.person.email === me.email ? ' <small style="color:var(--ink-muted);font-weight:400">(você)</small>' : ''}</span>
+          <span class="name">${esc(p.person.label)}${p.person.nome === db.state.me ? ' <small style="color:var(--ink-muted);font-weight:400">(você)</small>' : ''}</span>
           <span class="bal">${brl(p.saldo)}</span>
           <span class="sub"><span>Ganhou ${brl(p.receitas)}</span><span>Gastou ${brl(p.despesas)}</span></span>
         </div>`).join('')}
       </div>
       ${t.despesas > 0 && persons.length > 1 ? `<div style="font-size:13px;color:var(--ink-2);margin-bottom:6px">Quem pagou as despesas</div>
         ${segmentedBar(persons.map((p) => ({ label: p.person.label, valor: p.despesas, color: p.person.color })), { label: 'Despesas' })}` : ''}
-      ${solo ? '<button class="btn secondary" data-action="open-invite" style="margin-top:4px">💌 Convidar meu amor</button>' : ''}
+      ${solo ? '<button class="btn secondary" data-action="open-invite" style="margin-top:4px">💌 Mandar o link para meu amor</button>' : ''}
     </section>`;
 
     const catCard = cats.length ? `<section class="card">
@@ -390,7 +237,7 @@ const VIEWS = {
     </section>` : `<section class="card empty"><div class="big">📝</div>
       Nada lançado em ${mName} ainda.<br>Toque no <b>+</b> para adicionar um salário ou uma despesa.</section>`;
 
-    return installBanner() + hero + peopleCard + catCard + recentCard;
+    return hero + peopleCard + catCard + recentCard;
   },
 
   extrato() {
@@ -404,7 +251,7 @@ const VIEWS = {
       ${chip('tipo', '', 'Tudo')}${chip('tipo', 'despesa', 'Despesas')}${chip('tipo', 'receita', 'Receitas')}
     </div>
     <div class="chips">
-      ${chip('person', '', 'Todos')}${list.map((p) => chip('person', p.email, p.label, `<i class="mdot" style="background:${p.color}"></i>`)).join('')}
+      ${chip('person', '', 'Todos')}${list.map((p) => chip('person', p.nome, p.label, `<i class="mdot" style="background:${p.color}"></i>`)).join('')}
     </div>`;
     if (!monthTx.length) {
       return `${filters}<div class="empty"><div class="big">🔍</div>Nenhum lançamento aqui.</div>`;
@@ -439,7 +286,7 @@ const VIEWS = {
     const persons = S.byPerson(allTx, list);
 
     return `
-      <div class="chips">${chip('', 'Todos')}${list.map((p) => chip(p.email, p.label, `<i class="mdot" style="background:${p.color}"></i>`)).join('')}</div>
+      <div class="chips">${chip('', 'Todos')}${list.map((p) => chip(p.nome, p.label, `<i class="mdot" style="background:${p.color}"></i>`)).join('')}</div>
 
       <section class="card">
         <h2>Receitas e despesas <small>· últimos 6 meses</small></h2>
@@ -474,27 +321,25 @@ const VIEWS = {
     const st = db.state;
     const list = S.people(st);
     const last = st.lastSync ? `Atualizado às ${timeLabel(st.lastSync)}` : 'Ainda não sincronizado';
-    const avatar = (p) => (p.email === me.email && me.picture
-      ? `<span class="avatar" style="box-shadow:0 0 0 2px ${p.color}"><img src="${esc(me.picture)}" alt="" referrerpolicy="no-referrer"></span>`
-      : `<span class="avatar" style="box-shadow:0 0 0 2px ${p.color}">${esc(p.label.charAt(0).toUpperCase())}</span>`);
+    const avatar = (p) => `<span class="avatar" style="box-shadow:0 0 0 2px ${p.color}">${esc(p.label.charAt(0).toUpperCase())}</span>`;
     return `
       <div class="section-title">Vocês</div>
       <section class="card" style="padding-top:4px;padding-bottom:4px"><ul class="list">
-        ${list.map((p) => `<li><button class="list-item" ${p.email === me.email ? 'data-action="edit-name"' : 'disabled'}>
+        ${list.map((p) => `<li><button class="list-item" ${p.nome === st.me ? 'data-action="edit-name"' : 'disabled'}>
           ${avatar(p)}
-          <span class="grow"><b>${esc(p.label)}</b>${p.email === me.email ? ' (você)' : ''}<div class="sub">${esc(p.email)}</div></span>
-          ${p.email === me.email ? '<span class="chev">Editar</span>' : ''}
+          <span class="grow"><b>${esc(p.label)}</b>${p.nome === st.me ? ' (você)' : ''}</span>
+          ${p.nome === st.me ? '<span class="chev">Mudar nome</span>' : ''}
         </button></li>`).join('')}
         <li><button class="list-item" data-action="open-invite"><span class="avatar">💌</span>
-          <span class="grow"><b>Convidar</b><div class="sub">Liberar acesso e enviar o link</div></span><span class="chev">›</span></button></li>
+          <span class="grow"><b>Mandar o link para meu amor</b><div class="sub">É só ele(a) instalar o app e colar o link</div></span><span class="chev">›</span></button></li>
       </ul></section>
 
       <div class="section-title">Organização</div>
       <section class="card" style="padding-top:4px;padding-bottom:4px"><ul class="list">
         <li><button class="list-item" data-action="open-cats"><span class="avatar">🏷️</span>
           <span class="grow"><b>Categorias</b><div class="sub">${st.cats.length} categorias · criar, editar e remover</div></span><span class="chev">›</span></button></li>
-        <li><a class="list-item" href="${DEMO ? '#' : sheetUrl(st.spaceId)}" target="_blank" rel="noopener" ${DEMO ? 'data-action="demo-sheet"' : ''} style="text-decoration:none">
-          <span class="avatar">📊</span><span class="grow"><b>Abrir a planilha</b><div class="sub">Ver e editar os dados no Google Sheets</div></span><span class="chev">↗</span></a></li>
+        ${st.planilha ? `<li><button class="list-item" data-action="open-planilha"><span class="avatar">📊</span>
+          <span class="grow"><b>Abrir a planilha</b><div class="sub">Ver e editar os dados no Google Sheets</div></span><span class="chev">↗</span></button></li>` : ''}
       </ul></section>
 
       <div class="section-title">Sincronização</div>
@@ -503,14 +348,12 @@ const VIEWS = {
         <button class="btn secondary" data-action="sync">Sincronizar agora</button>
       </section>
 
-      <div class="section-title">Conta</div>
+      <div class="section-title">Este celular</div>
       <section class="card">
-        <p style="margin:0 0 12px">Conectado como <b>${esc(me.email)}</b></p>
-        ${!isStandalone() && (installPrompt || isIOS()) ? '<button class="btn secondary" data-action="install">📲 Instalar o app</button>' : ''}
-        ${!isStandalone() && isAndroid() && !DEMO ? `<div style="margin-bottom:10px">${apkLink('🤖 Baixar o app Android (APK)')}</div>` : ''}
+        <p style="margin:0 0 12px">Você está como <b>${esc(st.me || '—')}</b>.</p>
+        <button class="btn secondary" data-action="not-me">Não sou ${esc(st.me || 'eu')}</button>
         ${DEMO ? '<button class="btn secondary" data-action="exit-demo">Sair da demonstração</button>'
-          : `<button class="btn secondary" data-action="signout">Sair da conta</button>
-             <button class="btn danger" data-action="forget-space">Desconectar deste aparelho</button>`}
+          : '<button class="btn danger" data-action="disconnect">Desconectar deste celular</button>'}
       </section>
       <p class="hint" style="text-align:center;margin-top:18px">${esc(CONFIG.APP_NAME)} · versão ${VERSION}</p>`;
   },
@@ -544,7 +387,6 @@ function finishClose() {
   ui.sheetOpen = false;
   $sheet.innerHTML = '';
   render();
-  if (pendingRenew) renewAuth();
 }
 
 window.addEventListener('popstate', () => { if (ui.sheetOpen) finishClose(); });
@@ -564,11 +406,11 @@ function openTxSheet(id, draft) {
     cents: t ? Math.round(t.valor * 100) : 0,
     descricao: t?.descricao || '',
     categoria: t?.categoria || '',
-    pessoa: t?.pessoa || me.email,
+    pessoa: t?.pessoa || db.state.me,
     data: t?.data || defaultDate(),
   };
   const list = S.people(db.state);
-  if (!list.some((p) => p.email === me.email)) list.unshift({ email: me.email, label: firstName(me.name) || 'Eu', color: 'var(--c-mem1)' });
+  if (db.state.me && !list.some((p) => p.nome === db.state.me)) list.unshift({ nome: db.state.me, label: db.state.me, color: 'var(--c-mem1)' });
 
   const catGrid = () => {
     const cats = db.state.cats.filter((c) => c.tipo === f.tipo);
@@ -587,7 +429,7 @@ function openTxSheet(id, draft) {
     <label class="field"><span>Descrição (opcional)</span>
       <input class="input" name="descricao" maxlength="80" value="${esc(f.descricao)}" placeholder="Ex.: Aluguel, padaria, salário…" autocomplete="off"></label>
     <div class="field"><span>Categoria</span><div class="catgrid" id="catgrid">${catGrid()}</div></div>
-    <div class="field"><span>Quem</span><div class="chips" id="who">${list.map((p) => `<button type="button" class="chip" data-who="${esc(p.email)}" aria-pressed="${p.email === f.pessoa}"><i class="mdot" style="background:${p.color}"></i>${esc(p.label)}</button>`).join('')}</div></div>
+    <div class="field"><span>Quem</span><div class="chips" id="who">${list.map((p) => `<button type="button" class="chip" data-who="${esc(p.nome)}" aria-pressed="${p.nome === f.pessoa}"><i class="mdot" style="background:${p.color}"></i>${esc(p.label)}</button>`).join('')}</div></div>
     <div class="field"><span>Data</span>
       <div class="row" style="align-items:center">
         <input class="input" type="date" name="data" value="${esc(f.data)}" required style="flex:1.4">
@@ -775,89 +617,99 @@ function openCatsSheet() {
   });
 }
 
-// ----- Nome e convite -----
+// ----- Nome, convite e guia -----
 function openNameSheet() {
-  const mine = db.state.members.find((m) => m.email === me.email);
-  openSheet('Seu nome', `<form data-form="name">
+  openSheet('Seu nome', `<form data-form="name" novalidate>
     <label class="field"><span>Como você aparece para o casal</span>
-      <input class="input" name="nome" maxlength="40" required value="${esc(mine?.nome || firstName(me.name))}"></label>
+      <input class="input" name="nome" maxlength="40" required value="${esc(db.state.me || '')}"></label>
+    <p class="hint">Os seus lançamentos antigos passam a usar o nome novo.</p>
+    <p class="error-text" id="name-error" hidden></p>
     <button class="btn" type="submit">Salvar</button></form>`, (root) => {
     const form = root.querySelector('form');
+    const err = root.querySelector('#name-error');
     form.nome.focus();
     form.addEventListener('submit', (e) => {
       e.preventDefault();
-      const nome = form.nome.value.trim();
+      const nome = form.nome.value.trim().replace(/\s+/g, ' ');
       if (!nome) return;
-      db.setMyName(nome);
-      me = { ...me, name: nome };
-      if (!DEMO) auth.setUser(me);
+      const taken = db.state.members.some((m) => m.nome !== db.state.me && m.nome.toLowerCase() === nome.toLowerCase());
+      if (taken) { err.textContent = 'Já tem alguém com esse nome.'; err.hidden = false; return; }
+      db.renameMe(nome);
       closeSheet();
       toast('Nome atualizado ✓');
     });
   });
 }
 
-function openInviteSheet(data = {}) {
-  openSheet('Convidar meu amor', inviteBlock(data));
+function openInviteSheet() {
+  openSheet('Mandar o link', `
+    <ol class="steps">
+      <li>Seu amor instala o app${CONFIG.APK_URL ? ' (o link para baixar vai junto na mensagem)' : ''}.</li>
+      <li>Abre o app e cola este link.</li>
+      <li>Escolhe “Quem é você?” e pronto! 💑</li>
+    </ol>
+    <div class="linkbox"><span style="flex:1">${esc(db.state.link)}</span></div>
+    <button class="btn" data-action="share-invite">Enviar pelo WhatsApp…</button>
+    <button class="btn secondary" data-action="copy-invite">Copiar só o link</button>
+    <p class="hint" style="margin-top:14px">🔒 Quem tiver este link consegue ver e editar as contas. Mande só para o seu amor.</p>`);
 }
 
-async function submitInvite(form, rerender) {
-  const email = form.email.value.trim().toLowerCase();
-  const shared = ui.inviteShared || [];
-  if (!isEmail(email)) { rerender({ shared, error: 'Digite um e-mail válido.' }); return; }
-  const btn = form.querySelector('button[type=submit]');
-  btn.disabled = true;
-  btn.textContent = '…';
-  try {
-    await db.invite(email);
-    ui.inviteShared = [...new Set([...shared, email])];
-    rerender({ shared: ui.inviteShared });
-    toast('Acesso liberado ✓ Agora envie o link.');
-  } catch (e) {
-    let error = 'Não foi possível liberar o acesso. Tente de novo.';
-    if (e instanceof G.NetError) error = 'Sem conexão. Tente de novo quando estiver online.';
-    else if (e instanceof G.AuthError) { renewAuth(); return; } else if (e instanceof G.ApiError && [403, 404].includes(e.status)) {
-      error = 'Só quem criou a planilha consegue convidar pelo app. Peça para essa pessoa liberar, ou compartilhe a planilha direto no Google Sheets.';
-    } else if (e instanceof G.ApiError && e.status === 400) {
-      error = 'O Google não aceitou esse e-mail. Confira se é uma conta Google.';
-    }
-    rerender({ shared, error });
-  }
+let codeCache = '';
+async function scriptCode() {
+  if (!codeCache) codeCache = await (await fetch('apps-script/Codigo.gs')).text();
+  return codeCache;
+}
+
+function openGuideSheet() {
+  openSheet('Criar a planilha do casal', `
+    <p class="hint" style="margin:0 0 12px">Faça uma vez só, num computador (no celular o Google não mostra essas opções).</p>
+    <ol class="steps">
+      <li>Abra <b>sheets.new</b> no navegador: cria uma planilha nova no seu Google Drive. Dê um nome, por exemplo <i>Contas a Dois</i>.</li>
+      <li>No menu da planilha, clique em <b>Extensões → Apps Script</b>.</li>
+      <li>Apague o que estiver lá, cole o <b>código do app</b> (botões abaixo) e salve 💾.</li>
+      <li>Clique em <b>Implantar → Nova implantação</b>. Na engrenagem ⚙️, escolha <b>App da Web</b> e deixe:
+        <br>• Executar como: <b>Eu</b>
+        <br>• Quem pode acessar: <b>Qualquer pessoa</b></li>
+      <li>Clique em <b>Implantar → Autorizar acesso</b> e escolha sua conta. Se aparecer “O Google não verificou este app”, clique em <b>Avançado → Acessar</b> (é o seu próprio script).</li>
+      <li>Copie o <b>URL do app da Web</b> (termina em <b>/exec</b>), mande para o celular de vocês dois e cole no app.</li>
+    </ol>
+    <button class="btn" data-action="share-code">Enviar o código para o computador</button>
+    <button class="btn secondary" data-action="copy-code">Copiar o código</button>
+    <p class="hint" style="margin-top:12px">“Enviar” abre o WhatsApp ou o e-mail: mande para você mesmo e abra no computador.</p>`);
 }
 
 // ---------------------------------------------------------------------------
 // Ações (cliques)
 // ---------------------------------------------------------------------------
 const actions = {
-  login: () => auth.signIn(),
-  'login-consent': () => auth.signIn({ consent: true }),
-  demo: () => { localStorage.setItem('cad.demo', '1'); location.href = `${auth.redirectUri()}?demo`; },
+  'paste-link': async () => {
+    const text = await native.readClipboard();
+    const input = document.querySelector('form[data-form="connect"] input[name="link"]');
+    if (text && input) input.value = text.trim();
+    else toast('Não consegui ler a área de transferência. Toque e segure no campo para colar.');
+  },
+  'open-guide': () => openGuideSheet(),
+  'share-code': async () => {
+    const r = await native.share(await scriptCode());
+    if (r === 'copied') toast('Código copiado ✓');
+  },
+  'copy-code': async () => toast((await native.copy(await scriptCode())) ? 'Código copiado ✓' : 'Não foi possível copiar'),
+  demo: () => { localStorage.setItem('cad.demo', '1'); location.reload(); },
   'exit-demo': () => {
-    Object.keys(localStorage).filter((k) => k.startsWith('cad.')).forEach((k) => localStorage.removeItem(k));
-    location.href = auth.redirectUri();
+    Object.keys(localStorage).filter((k) => k.startsWith('cad.demo')).forEach((k) => localStorage.removeItem(k));
+    location.replace(location.pathname);
   },
-  'demo-sheet': (el, e) => { e.preventDefault(); toast('Na demonstração não há planilha real.'); },
-  reload: () => location.reload(),
-  'switch-account': () => { auth.signOut(); auth.signIn(); },
-  signout: () => {
-    db.forgetSpace();
-    auth.signOut();
-    go('login');
+  'pick-me': (el) => enterAs(el.dataset.name),
+  'not-me': () => { db.forgetMe(); go('who'); },
+  disconnect: () => {
+    if (ui.screen === 'main' && !window.confirm('Desconectar este celular da planilha? Os dados continuam salvos na planilha.')) return;
+    db.disconnect();
+    go('connect');
   },
-  'forget-space': () => {
-    if (ui.screen === 'main' && !window.confirm('Desconectar este aparelho da planilha? Os dados continuam salvos na planilha.')) return;
-    db.forgetSpace();
-    go('setup');
-  },
-  'go-create': () => go('create'),
-  'go-setup': () => go('setup'),
-  start: () => { ui.tab = 'inicio'; go('main'); },
-  'retry-join': () => joinFlow(ui.data.id),
-  'cancel-invite': () => { localStorage.removeItem('cad.invite'); enterSpace(); },
-  'retry-open': () => openSpace(db.state.spaceId || db.localSpaceId(me.email)),
-  'share-invite': () => shareText('Vamos organizar nossas contas juntos? Abra o link e entre com sua conta Google:', inviteLink(db.state.spaceId)),
-  'copy-invite': () => copy(inviteLink(db.state.spaceId)),
-  'open-invite': () => openInviteSheet({ shared: ui.inviteShared || [] }),
+  'open-invite': () => openInviteSheet(),
+  'share-invite': () => shareInvite(),
+  'copy-invite': async () => toast((await native.copy(db.state.link)) ? 'Link copiado ✓' : 'Não foi possível copiar'),
+  'open-planilha': () => (DEMO ? toast('Na demonstração não há planilha de verdade.') : native.openExternal(db.state.planilha)),
   'open-cats': () => openCatsSheet(),
   'edit-name': () => openNameSheet(),
   'close-sheet': () => closeSheet(),
@@ -869,21 +721,6 @@ const actions = {
   add: () => openTxSheet(),
   'edit-tx': (el) => openTxSheet(el.dataset.id),
   sync: () => db.sync(),
-  install: async () => {
-    if (installPrompt) {
-      installPrompt.prompt();
-      await installPrompt.userChoice.catch(() => null);
-      installPrompt = null;
-      render();
-    } else {
-      openSheet('Instalar no iPhone', `<ol class="steps">
-        <li>Abra este app no <b>Safari</b>.</li>
-        <li>Toque em <b>Compartilhar</b> (o quadrado com a seta para cima).</li>
-        <li>Escolha <b>Adicionar à Tela de Início</b>.</li></ol>
-        <button class="btn" data-action="close-sheet">Entendi</button>`);
-    }
-  },
-  'dismiss-install': () => { localStorage.setItem('cad.installDismissed', '1'); render(); },
 };
 
 document.addEventListener('click', (e) => {
@@ -893,28 +730,18 @@ document.addEventListener('click', (e) => {
   if (fn) fn(el, e);
 });
 
-document.addEventListener('submit', async (e) => {
+document.addEventListener('submit', (e) => {
   const form = e.target.closest('form[data-form]');
   if (!form) return;
   const kind = form.dataset.form;
-  if (kind === 'tx' || kind === 'cat' || kind === 'name') return; // tratados na própria folha
-  e.preventDefault();
-  if (kind === 'create') {
-    const name = form.name.value.trim();
-    const partner = form.partner.value.trim().toLowerCase();
-    if (!name) return;
-    if (partner && !isEmail(partner)) { go('create', { error: 'O e-mail do seu amor parece incompleto.' }); return; }
-    createFlow(name, partner);
-  } else if (kind === 'join') {
-    const id = parseInvite(form.code.value);
-    if (!id) { go('setup', { code: form.code.value, joinError: 'Não reconheci esse link. Cole o link inteiro que você recebeu.' }); return; }
-    joinFlow(id);
-  } else if (kind === 'invite') {
-    const inSheet = !!form.closest('.sheet');
-    await submitInvite(form, (data) => {
-      if (inSheet) openInviteSheet(data);
-      else { ui.data = { ...ui.data, ...data }; render(); }
-    });
+  if (kind === 'connect') {
+    e.preventDefault();
+    connectFlow(form.link.value);
+  } else if (kind === 'who') {
+    e.preventDefault();
+    const nome = form.nome.value.trim().replace(/\s+/g, ' ');
+    if (!nome) { go('who', { error: 'Digite seu nome ou escolha na lista.' }); return; }
+    enterAs(nome);
   }
 });
 
@@ -923,15 +750,8 @@ document.addEventListener('submit', async (e) => {
 // ---------------------------------------------------------------------------
 const SCREENS = {
   loading: screenLoading,
-  login: screenLogin,
-  noconfig: screenNoConfig,
-  scopes: screenScopes,
-  setup: screenSetup,
-  create: screenCreate,
-  created: screenCreated,
-  noaccess: screenNoAccess,
-  lost: screenLost,
-  error: screenError,
+  connect: screenConnect,
+  who: screenWho,
   main: screenMain,
 };
 
@@ -943,203 +763,105 @@ function render() {
 }
 
 db.subscribe(() => { if (ui.screen === 'main') render(); });
+db.setHandlers({ onError: (msg) => toast(msg, 4500) });
 
 // ---------------------------------------------------------------------------
 // Fluxos
 // ---------------------------------------------------------------------------
-function handleFatal(e) {
-  if (e instanceof G.AuthError) { renewAuth(); return; }
-  if (e instanceof G.NetError) { go('error', { offline: true }); return; }
-  go('error', { message: e?.message });
-}
+const LINK_ERRORS = {
+  planilha: 'Esse é o link da <b>planilha</b>. O Google não deixa gravar nela só com esse link. '
+    + 'Use o link do <b>script da planilha</b>, que termina em <b>/exec</b> — veja “Ver como criar”.',
+  dev: 'Esse é o link de <b>teste</b> (termina em /dev). Use o link da implantação, que termina em <b>/exec</b>.',
+  invalido: 'Não reconheci esse link. Ele começa com <b>https://script.google.com/macros/s/</b> e termina em <b>/exec</b>.',
+};
 
-function openSpace(id) {
-  db.useSpace(id);
-  go('main');
-  db.sync();
-}
-
-async function createFlow(name, partner) {
-  go('loading', { text: 'Criando a planilha do casal…' });
+async function connectFlow(text) {
+  const parsed = api.parseLink(text);
+  if (parsed.error) { go('connect', { link: text, error: LINK_ERRORS[parsed.error] }); return; }
+  go('loading', { text: 'Conectando à planilha…' });
   try {
-    await db.createSpace({ myName: name });
-    db.useSpace(db.localSpaceId(me.email));
-    db.sync();
-    let shared = [];
-    let error = '';
-    if (partner) {
-      try {
-        await db.invite(partner);
-        shared = [partner];
-      } catch {
-        error = 'A planilha foi criada, mas não conseguimos liberar o acesso para esse e-mail. Tente de novo abaixo.';
-      }
+    await db.connect(parsed.url);
+  } catch (e) {
+    let error = esc(e.message);
+    if (e instanceof api.NetError) {
+      error = navigator.onLine === false
+        ? 'Sem internet. Conecte-se e tente de novo.'
+        : 'Não consegui falar com a planilha. Confira se, na implantação, <b>Quem pode acessar</b> está como <b>Qualquer pessoa</b> e se o link termina em <b>/exec</b>.';
+    } else if (e instanceof api.ServerError && e.notOurs) {
+      error = 'Esse link não respondeu como o Contas a Dois. Confira se colou o código do app no Apps Script, salvou e implantou como <b>App da Web</b>.';
+    } else if (e instanceof api.ServerError) {
+      error = `A planilha respondeu com erro: ${esc(e.message)}`;
     }
-    ui.inviteShared = shared;
-    go('created', { shared, error });
-  } catch (e) {
-    if (e instanceof G.ApiError) go('create', { error: `Não foi possível criar a planilha: ${e.message}` });
-    else handleFatal(e);
-  }
-}
-
-async function joinFlow(id) {
-  go('loading', { text: 'Entrando no espaço do casal…' });
-  try {
-    const r = await db.joinSpace(id);
-    if (!r.ok) { go('noaccess', { id, ...r }); return; }
-    localStorage.removeItem('cad.invite');
-    openSpace(id);
-    toast('Pronto! Vocês estão conectados 💑', 3500);
-  } catch (e) {
-    handleFatal(e);
-  }
-}
-
-async function enterSpace() {
-  const invite = localStorage.getItem('cad.invite');
-  let id = db.localSpaceId(me.email);
-  if (invite && invite !== id) { joinFlow(invite); return; }
-  if (invite) localStorage.removeItem('cad.invite');
-  if (id) { openSpace(id); return; }
-  go('loading', { text: 'Procurando seus dados…' });
-  try {
-    id = await db.discoverSpace();
-  } catch (e) {
-    handleFatal(e);
+    go('connect', { link: text, error });
     return;
   }
-  if (id) openSpace(id);
-  else go('setup');
+  go('who');
 }
 
-/** Renova o login sem mostrar nada (volta em ~1s). Espera fechar o formulário aberto. */
-function renewAuth() {
-  if (DEMO) return;
-  if (ui.sheetOpen) { pendingRenew = true; return; }
-  pendingRenew = false;
-  const now = Date.now();
-  const hist = JSON.parse(sessionStorage.getItem('cad.renews') || '[]').filter((t) => now - t < 120_000);
-  if (hist.length >= 2) {
-    // Evita ficar em loop se algo estiver errado com o login.
-    sessionStorage.removeItem('cad.renews');
-    auth.clearToken();
-    go('login', { error: 'Sua sessão expirou. Entre de novo, por favor.' });
-    return;
-  }
-  sessionStorage.setItem('cad.renews', JSON.stringify([...hist, now]));
-  auth.clearToken();
-  auth.signIn({ silent: true });
+function enterAs(nome) {
+  db.setMe(nome);
+  ui.tab = 'inicio';
+  go('main');
+  toast(`Oi, ${db.state.me}! 👋`);
+  if (db.state.members.length < 2) setTimeout(() => toast('Agora mande o link para o seu amor em Ajustes 💌', 4000), 2800);
 }
 
-db.setHandlers({
-  onAuthNeeded: renewAuth,
-  onLostAccess: () => go('lost'),
-  onError: (msg) => toast(msg, 4000),
-});
-
-/** Lê e limpa da URL o convite (?convite=) e a marca do app Android (?origem=android). */
-function captureParams() {
-  const code = params.get('convite');
-  const origem = params.get('origem');
-  if (!code && !origem) return;
-  if (code) {
-    const id = parseInvite(`convite=${code}`);
-    if (id) localStorage.setItem('cad.invite', id);
+async function setupDemo() {
+  const code = await scriptCode();
+  const { createScriptServer, seedDemo } = await import('./fake-sheets.js');
+  const fresh = !localStorage.getItem('cad.demo.sheets');
+  const server = createScriptServer(code, { storage: localStorage, key: 'cad.demo.sheets' });
+  if (fresh) {
+    server.get({ acao: 'dados' });
+    seedDemo(server);
+    localStorage.setItem('cad.demo.link', 'https://script.google.com/macros/s/DEMONSTRACAO-contas-a-dois/exec');
+    localStorage.setItem('cad.demo.eu', 'Ana');
   }
-  if (origem === 'android') sessionStorage.setItem('cad.android', '1');
-  params.delete('convite');
-  params.delete('origem');
-  const qs = params.toString();
-  history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : ''));
-}
-
-async function startDemo() {
-  const { createFakeGoogle, seedDemo } = await import('./fake-google.js');
-  const fake = createFakeGoogle({ storage: localStorage, key: 'cad.demo.db' });
-  me = { email: 'ana@demo.casal', name: 'Ana', picture: '' };
-  G.configure({ fetch: fake.fetch, getToken: () => `demo:${me.email}` });
-  db.setMe(me);
-  let id = db.localSpaceId(me.email);
-  if (!id) {
-    go('loading', { text: 'Preparando a demonstração…' });
-    id = await db.createSpace({ myName: 'Ana' });
-    seedDemo(fake, id);
-  }
-  openSpace(id);
+  api.setTransport(async (url, { method, body }) => {
+    await new Promise((r) => setTimeout(r, 150));
+    const res = method === 'POST' ? server.post(body) : server.get({ acao: 'dados' });
+    const json = JSON.parse(res.body);
+    if (!json.ok) throw new api.ServerError(json.erro);
+    return json;
+  });
 }
 
 async function boot() {
-  captureParams();
   initTooltips();
-  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  if (!native.isAndroidApp && 'serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
   }
-  window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault();
-    installPrompt = e;
-    if (ui.screen === 'main') render();
-  });
-
-  if (DEMO) { await startDemo(); return; }
-  if (!CONFIG.GOOGLE_CLIENT_ID) { go('noconfig'); return; }
-
-  let back = auth.consumeRedirect();
-  // Voltou para uma página antiga do Google pelo botão "voltar": ignora se já estamos logados.
-  if (back?.error === 'state_mismatch' && auth.getToken() && auth.getUser()) back = null;
-  if (back?.error) {
-    const quiet = ['interaction_required', 'login_required', 'consent_required', 'account_selection_required'];
-    const msg = quiet.includes(back.error) ? ''
-      : back.error === 'access_denied' ? 'O login foi cancelado. Tente de novo quando quiser.'
-        : 'Não foi possível entrar. Tente de novo.';
-    go('login', { error: msg });
+  if (DEMO) await setupDemo();
+  db.load(DEMO ? 'cad.demo.' : 'cad.');
+  const st = db.state;
+  if (!st.link) { go('connect'); return; }
+  if (!st.me) {
+    if (!st.ready) {
+      go('loading', { text: 'Conectando à planilha…' });
+      try { await db.connect(st.link); } catch { /* mostra a lista do cache, se houver */ }
+    }
+    go('who');
     return;
   }
-  if (back?.ok && back.missingScopes.length) { go('scopes'); return; }
-
-  if (!auth.getToken()) {
-    if (auth.getUser() && !auth.silentTried()) {
-      go('loading', { text: 'Entrando…' });
-      auth.signIn({ silent: true });
-      return;
-    }
-    go('login');
-    return;
-  }
-
-  G.configure({ getToken: () => auth.getToken(0) });
-  me = auth.getUser();
-  if (!me || back?.ok) {
-    go('loading', { text: 'Entrando…' });
-    try {
-      const info = await G.userInfo();
-      me = { email: String(info.email).toLowerCase(), name: info.name || info.given_name || '', picture: info.picture || '' };
-      auth.setUser(me);
-    } catch (e) {
-      handleFatal(e);
-      return;
-    }
-  }
-  db.setMe(me);
-  await enterSpace();
+  go('main');
+  db.sync();
 }
 
 // Mantém os dados atualizados: ao voltar para o app, ao reconectar e a cada 2 min.
 let lastVisibleSync = Date.now();
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible' || ui.screen !== 'main') return;
-  if (!DEMO && !auth.getToken(10 * 60_000) && !ui.sheetOpen) { renewAuth(); return; }
-  if (Date.now() - lastVisibleSync > 10_000) {
+  if (Date.now() - lastVisibleSync > 5_000) {
     lastVisibleSync = Date.now();
     db.sync();
   }
 });
 window.addEventListener('online', () => { if (ui.screen === 'main') db.sync(); });
 setInterval(() => {
-  if (document.visibilityState === 'visible' && ui.screen === 'main' && (DEMO || auth.getToken(3 * 60_000))) db.sync();
+  if (document.visibilityState === 'visible' && ui.screen === 'main') db.sync();
 }, 120_000);
 
 boot().catch((e) => {
   console.error(e);
-  go('error', { message: e?.message });
+  go('connect', { error: `Erro ao abrir: ${esc(e?.message || e)}` });
 });

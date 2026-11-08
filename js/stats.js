@@ -1,25 +1,25 @@
 // Cálculos para o painel e os gráficos.
 
-import { addMonths, monthOf, firstName } from './format.js';
+import { addMonths, monthOf } from './format.js';
 
 // Cores fixas por pessoa (segue a pessoa, nunca a posição no ranking).
 const MEMBER_SLOTS = ['--c-mem1', '--c-mem2', '--c-mem3', '--c-mem4'];
 
-/** Lista de pessoas: membros da planilha + quem aparece em lançamentos antigos. */
+/** Lista de pessoas: membros da planilha + nomes que aparecem em lançamentos antigos. */
 export function people(state) {
-  const list = state.members.map((m) => ({ ...m }));
+  const list = state.members.map((m) => ({ nome: m.nome }));
   for (const t of state.tx) {
-    if (t.pessoa && !list.some((p) => p.email === t.pessoa)) list.push({ email: t.pessoa, nome: '' });
+    if (t.pessoa && !list.some((p) => p.nome === t.pessoa)) list.push({ nome: t.pessoa });
   }
   return list.map((p, i) => ({
     ...p,
-    label: firstName(p.nome) || p.email.split('@')[0],
+    label: p.nome,
     color: `var(${MEMBER_SLOTS[i % MEMBER_SLOTS.length]})`,
   }));
 }
 
-export const personOf = (list, email) =>
-  list.find((p) => p.email === email) || { email, label: email ? email.split('@')[0] : '—', color: 'var(--ink-muted)' };
+export const personOf = (list, nome) =>
+  list.find((p) => p.nome === nome) || { nome, label: nome || '—', color: 'var(--ink-muted)' };
 
 export function filterTx(tx, { month, person, tipo } = {}) {
   return tx.filter((t) => (!month || monthOf(t.data) === month)
@@ -38,7 +38,7 @@ export function totals(tx) {
 }
 
 export function byPerson(tx, list) {
-  return list.map((p) => ({ person: p, ...totals(tx.filter((t) => t.pessoa === p.email)) }));
+  return list.map((p) => ({ person: p, ...totals(tx.filter((t) => t.pessoa === p.nome)) }));
 }
 
 export function byCategory(tx, cats, tipo) {

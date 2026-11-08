@@ -2,38 +2,33 @@ plugins {
     id 'com.android.application'
 }
 
-// ⚙️ Endereço do app na web (o mesmo do GitHub Pages). Mude aqui se publicar em outro lugar.
-def webHost = 'ragzonte.github.io'
-def webPath = '/trabalho_rh/'
+// O app web (index.html, js, css...) vai inteiro dentro do APK: não precisa de site.
+def webAssetsDir = layout.buildDirectory.dir('generated/web').get().asFile
+def copyWeb = tasks.register('copyWeb', Sync) {
+    from(rootProject.file('..')) {
+        include 'index.html', 'manifest.webmanifest', 'css/**', 'js/**', 'icons/**', 'apps-script/**'
+    }
+    into new File(webAssetsDir, 'www')
+}
+tasks.named('preBuild') { dependsOn copyWeb }
 
-// Assinatura: o workflow do GitHub passa a chave por variáveis de ambiente.
-def keystorePath = System.getenv('ANDROID_KEYSTORE_PATH')
 def buildNumber = (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
 
 android {
-    namespace 'io.github.ragzonte.contasadois'
+    namespace 'com.contasadois.app'
     compileSdk 35
 
     defaultConfig {
-        applicationId 'io.github.ragzonte.contasadois'
-        minSdk 21
-        targetSdk 35
+        applicationId 'com.contasadois.app'
+        minSdk 24
+        targetSdk 34
         versionCode buildNumber
-        versionName "1.0.${buildNumber}"
-
-        manifestPlaceholders = [
-            hostName  : webHost,
-            pathPrefix: webPath.replaceAll('/$', ''),
-        ]
-        resValue 'string', 'launchUrl', "https://${webHost}${webPath}?origem=android"
-        resValue 'string', 'webManifestUrl', "https://${webHost}${webPath}manifest.webmanifest"
-        resValue 'string', 'providerAuthority', 'io.github.ragzonte.contasadois.fileprovider'
-        // Liga o app ao site (Digital Asset Links): sem barra de endereço e abrindo os links de convite.
-        resValue 'string', 'assetStatements',
-            '[{ \\"relation\\": [\\"delegate_permission/common.handle_all_urls\\"], ' +
-            '\\"target\\": {\\"namespace\\": \\"web\\", \\"site\\": \\"https://' + webHost + '\\"}}]'
+        versionName "2.0.${buildNumber}"
     }
 
+    // Assinatura: o workflow do GitHub passa a chave por variáveis de ambiente
+    // (nunca deixe a chave no repositório).
+    def keystorePath = System.getenv('ANDROID_KEYSTORE_PATH')
     signingConfigs {
         release {
             if (keystorePath) {
@@ -52,6 +47,12 @@ android {
         }
     }
 
+    sourceSets {
+        main {
+            assets.srcDirs += [webAssetsDir]
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
@@ -63,6 +64,5 @@ android {
 }
 
 dependencies {
-    // Abre o app web em tela cheia usando o Chrome do celular (Trusted Web Activity).
-    implementation 'com.google.androidbrowserhelper:androidbrowserhelper:2.5.0'
+    implementation 'androidx.webkit:webkit:1.12.1'
 }
