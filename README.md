@@ -20,9 +20,13 @@ um ganhou e gastou, para onde foi o dinheiro e a evolução dos últimos meses.
 
 ## Como o casal usa
 
-1. **Abrir o link do app no celular** e instalar:
-   - **Android (Chrome):** aparece “Instalar app” (ou menu ⋮ → *Instalar app*).
-   - **iPhone (Safari):** botão *Compartilhar* → *Adicionar à Tela de Início*.
+1. **Instalar o app no celular:**
+   - **Android:** baixe o APK em
+     [`contas-a-dois.apk`](https://github.com/ragzonte/trabalho_rh/releases/download/android/contas-a-dois.apk)
+     e toque para instalar (o Android pede para permitir “instalar apps desta fonte”).
+     Também dá para abrir o site no Chrome e tocar em *Instalar app*. As duas opções
+     viram um app de verdade no celular.
+   - **iPhone (Safari):** abra o site e toque em *Compartilhar* → *Adicionar à Tela de Início*.
 2. **Quem chegar primeiro** toca em *Entrar com Google* → *Criar nosso espaço*, informa
    o e-mail Google do parceiro(a) e o app cria a planilha e já libera o acesso.
 3. Na tela seguinte, toque em **Enviar link do convite** (WhatsApp, por exemplo).
@@ -82,6 +86,47 @@ export const CONFIG = {
 
 Faça commit e push na `main`. Pronto! (O ID do cliente não é segredo: pode ficar no código.)
 
+### 4. App Android (APK)
+
+O app Android fica na pasta `android/`. É uma **Trusted Web Activity**: um APK de
+verdade que abre o app em tela cheia usando o Chrome do celular. Por isso o login
+com Google funciona igual, e **toda melhoria publicada no site chega no app sem
+reinstalar**.
+
+O workflow `App Android` compila o APK sozinho. A cada push na `main` que mexa em
+`android/`, ele publica em **Releases → App Android** (link fixo para baixar:
+`https://github.com/ragzonte/trabalho_rh/releases/download/android/contas-a-dois.apk`).
+Para gerar na hora: aba **Actions → App Android → Run workflow**.
+
+Duas configurações opcionais (recomendadas) deixam o app perfeito:
+
+**a) Chave de assinatura fixa.** Sem ela, cada APK sai com uma chave temporária, e
+para atualizar o APK é preciso desinstalar o anterior (os dados ficam na planilha,
+nada se perde). Para fixar, num computador com Java:
+
+```bash
+keytool -genkeypair -keystore contas-a-dois.jks -alias contasadois -keyalg RSA \
+  -keysize 2048 -validity 10000 -dname "CN=Contas a Dois"
+base64 -w0 contas-a-dois.jks   # no macOS: base64 -i contas-a-dois.jks
+```
+
+Em **Settings → Secrets and variables → Actions**, crie
+`ANDROID_KEYSTORE_BASE64` (o texto do `base64`) e `ANDROID_KEYSTORE_PASSWORD`
+(a senha que você escolheu). Guarde o arquivo `.jks` num lugar seguro e **não** o
+coloque no repositório.
+
+**b) Tela cheia e convites abrindo direto no app.** O Android só tira a barra de
+endereço depois de confirmar que o site é seu, lendo o arquivo
+`https://ragzonte.github.io/.well-known/assetlinks.json`, que fica na raiz do domínio:
+
+1. Crie um repositório **público** chamado `ragzonte.github.io`.
+2. Adicione um arquivo vazio `.nojekyll` e o arquivo `.well-known/assetlinks.json`
+   com o conteúdo que o workflow mostra no resumo da execução (também anexado em
+   Releases como `assetlinks.json`). Ele depende da chave do item (a).
+3. Em *Settings → Pages* desse repositório, publique a branch `main`.
+
+Sem isso o app funciona normalmente, só que com uma barrinha com o endereço no topo.
+
 ---
 
 ## A planilha
@@ -134,6 +179,7 @@ demonstração.
 ### Estrutura
 
 ```
+android/              app Android (Trusted Web Activity, sem código nativo)
 index.html            página única do app
 manifest.webmanifest  dados para instalar como app
 sw.js                 service worker (abre offline)

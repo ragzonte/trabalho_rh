@@ -26,8 +26,8 @@ const ok = (msg) => console.log(`  ✓ ${++step}. ${msg}`);
 const shot = (page, name) => (process.env.SHOTS ? page.screenshot({ path: `${process.env.SHOTS}/${name}.png` }) : null);
 
 /** Cria um "aparelho" (contexto do navegador) logado como `email`. */
-async function device(email, { signedIn = true } = {}) {
-  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
+async function device(email, { signedIn = true, userAgent } = {}) {
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block', userAgent });
   const dev = { ctx, email, offline: false, googleSession: signedIn, authCalls: [] };
   await ctx.route('**/js/config.js', (r) => r.fulfill({ body: configJs, contentType: 'text/javascript' }));
   await ctx.route('https://accounts.google.com/**', (route) => {
@@ -250,6 +250,23 @@ try {
   await beto.page.goto(BASE);
   await beto.page.waitForSelector('[data-action="login"]');
   ok('Reabrir o app: entra direto; sem sessão Google, mostra o botão de login');
+
+  // ---------------------------------------------------------------- Android
+  const ANDROID_UA = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Mobile Safari/537.36';
+  const droid = await device('ana@gmail.com', { userAgent: ANDROID_UA });
+  await droid.page.goto(BASE);
+  assert.ok(await droid.page.isVisible('a:has-text("Baixar o app Android")'), 'link do APK no navegador do Android');
+  await droid.page.click('[data-action="login"]');
+  await droid.page.waitForSelector('.hero');
+  assert.ok(await droid.page.isVisible('text=Instale o app'), 'sugere instalar no navegador');
+  const app = await droid.ctx.newPage();
+  await app.goto(`${BASE}?origem=android`);
+  await app.waitForSelector('.hero');
+  assert.equal(new URL(app.url()).search, '', 'limpa ?origem da URL');
+  assert.ok(!(await app.isVisible('text=Instale o app')), 'dentro do app não sugere instalar');
+  await app.click('[data-tab="ajustes"]');
+  assert.ok(!(await app.isVisible('text=Baixar o app Android')));
+  ok('Android: navegador oferece o APK; aberto pelo app, some a sugestão de instalar');
 
   console.log(`\nTudo certo: ${step} cenários passaram.`);
 } catch (e) {

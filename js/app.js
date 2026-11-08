@@ -74,10 +74,14 @@ function parseInvite(text) {
 }
 
 function isStandalone() {
-  return matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  return matchMedia('(display-mode: standalone)').matches || navigator.standalone === true
+    || sessionStorage.getItem('cad.android') === '1'; // aberto pelo app Android (APK)
 }
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isAndroid = () => /android/i.test(navigator.userAgent);
+const apkLink = (label, cls = 'btn secondary') => (CONFIG.ANDROID_APK_URL
+  ? `<a class="${cls}" href="${esc(CONFIG.ANDROID_APK_URL)}" style="text-decoration:none">${label}</a>` : '');
 
 async function shareText(text, url) {
   if (navigator.share) {
@@ -122,6 +126,8 @@ function screenLogin() {
     <button class="btn google" data-action="login">${GOOGLE_G} Entrar com Google</button>
     <p class="small">Os dados ficam numa planilha no Google Drive, compartilhada só entre vocês dois.</p>
     <button class="link" data-action="demo">Ver uma demonstração</button>
+    ${isAndroid() && !isStandalone() && CONFIG.ANDROID_APK_URL
+      ? `<p class="small"><a href="${esc(CONFIG.ANDROID_APK_URL)}">🤖 Baixar o app Android</a></p>` : ''}
   </div>`;
 }
 
@@ -320,11 +326,17 @@ function txRow(t, list, pending) {
 }
 
 function installBanner() {
-  if (isStandalone() || localStorage.getItem('cad.installDismissed')) return '';
-  if (!installPrompt && !isIOS()) return '';
-  const how = installPrompt
-    ? '<button class="btn" data-action="install" style="margin-top:10px">Instalar agora</button>'
-    : '<p style="margin:6px 0 0">No iPhone: toque em <b>Compartilhar</b> <span aria-hidden="true">⬆️</span> e depois em <b>Adicionar à Tela de Início</b>.</p>';
+  if (DEMO || isStandalone() || localStorage.getItem('cad.installDismissed')) return '';
+  if (!installPrompt && !isIOS() && !isAndroid()) return '';
+  let how;
+  if (installPrompt) {
+    how = '<button class="btn" data-action="install" style="margin-top:10px">Instalar agora</button>'
+      + (isAndroid() ? `<div style="margin-top:10px">${apkLink('ou baixe o app Android (APK)')}</div>` : '');
+  } else if (isAndroid()) {
+    how = `<div style="margin-top:10px">${apkLink('Baixar o app Android', 'btn')}</div>`;
+  } else {
+    how = '<p style="margin:6px 0 0">No iPhone: toque em <b>Compartilhar</b> <span aria-hidden="true">⬆️</span> e depois em <b>Adicionar à Tela de Início</b>.</p>';
+  }
   return `<div class="card"><div class="card-head"><h2>📲 Instale o app</h2>
     <button class="link" data-action="dismiss-install">Agora não</button></div>
     <p class="hint" style="margin:0">Abre mais rápido e funciona como um app normal.</p>${how}</div>`;
@@ -495,6 +507,7 @@ const VIEWS = {
       <section class="card">
         <p style="margin:0 0 12px">Conectado como <b>${esc(me.email)}</b></p>
         ${!isStandalone() && (installPrompt || isIOS()) ? '<button class="btn secondary" data-action="install">📲 Instalar o app</button>' : ''}
+        ${!isStandalone() && isAndroid() && !DEMO ? `<div style="margin-bottom:10px">${apkLink('🤖 Baixar o app Android (APK)')}</div>` : ''}
         ${DEMO ? '<button class="btn secondary" data-action="exit-demo">Sair da demonstração</button>'
           : `<button class="btn secondary" data-action="signout">Sair da conta</button>
              <button class="btn danger" data-action="forget-space">Desconectar deste aparelho</button>`}
@@ -1025,12 +1038,18 @@ db.setHandlers({
   onError: (msg) => toast(msg, 4000),
 });
 
-function captureInvite() {
+/** Lê e limpa da URL o convite (?convite=) e a marca do app Android (?origem=android). */
+function captureParams() {
   const code = params.get('convite');
-  if (!code) return;
-  const id = parseInvite(`convite=${code}`);
-  if (id) localStorage.setItem('cad.invite', id);
+  const origem = params.get('origem');
+  if (!code && !origem) return;
+  if (code) {
+    const id = parseInvite(`convite=${code}`);
+    if (id) localStorage.setItem('cad.invite', id);
+  }
+  if (origem === 'android') sessionStorage.setItem('cad.android', '1');
   params.delete('convite');
+  params.delete('origem');
   const qs = params.toString();
   history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : ''));
 }
@@ -1051,7 +1070,7 @@ async function startDemo() {
 }
 
 async function boot() {
-  captureInvite();
+  captureParams();
   initTooltips();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('./sw.js').catch(() => {});

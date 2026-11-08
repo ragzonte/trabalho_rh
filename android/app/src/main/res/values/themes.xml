@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tela transparente enquanto o Chrome abre o app (a abertura é a imagem de splash). -->
+    <style name="Theme.ContasADois" parent="@android:style/Theme.Translucent.NoTitleBar" />
+</resources>

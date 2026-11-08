@@ -8,4 +8,6 @@ export const CONFIG = {
   GOOGLE_CLIENT_ID: '',
   APP_NAME: 'Contas a Dois',
   SPREADSHEET_TITLE: 'Contas a Dois — planilha do casal',
+  // APK do app Android (gerado pelo workflow .github/workflows/android.yml).
+  ANDROID_APK_URL: 'https://github.com/ragzonte/trabalho_rh/releases/download/android/contas-a-dois.apk',
 };
