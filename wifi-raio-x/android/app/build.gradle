@@ -1,0 +1,89 @@
+plugins {
+    id 'com.android.application'
+}
+
+// A interface (pasta ../app: HTML, CSS, JS e dados) vai inteira dentro do APK, em assets/www.
+def webAssetsDir = layout.buildDirectory.dir('generated/web').get().asFile
+def copyWeb = tasks.register('copyWeb', Sync) {
+    from(rootProject.file('../app'))
+    into new File(webAssetsDir, 'www')
+}
+tasks.named('preBuild') { dependsOn copyWeb }
+
+def buildNumber = (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
+
+android {
+    namespace 'com.wifiraiox.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.wifiraiox.app'
+        minSdk 24
+        targetSdk 34
+        versionCode buildNumber
+        versionName "1.0.${buildNumber}"
+    }
+
+    // Assinatura: a chave chega por variáveis de ambiente (nunca fica no repositório).
+    def keystorePath = System.getenv('ANDROID_KEYSTORE_PATH')
+    signingConfigs {
+        release {
+            if (keystorePath) {
+                storeFile file(keystorePath)
+                storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('ANDROID_KEY_ALIAS') ?: 'contasadois'
+                keyPassword System.getenv('ANDROID_KEY_PASSWORD') ?: System.getenv('ANDROID_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (keystorePath) signingConfig signingConfigs.release
+        }
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs += [webAssetsDir]
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            all {
+                // Os testes Robolectric rodam o código nativo contra vários níveis de API.
+                maxHeapSize = '2g'
+                testLogging { events 'failed'; exceptionFormat 'full' }
+            }
+        }
+    }
+
+    lint {
+        // Chamar API nova sem checar a versão e esquecer permissão quebram o app no celular: tratamos como erro.
+        error 'NewApi', 'MissingPermission', 'InlinedApi'
+        abortOnError true
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'androidx.core:core:1.13.1'
+
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+    testImplementation 'androidx.test:core:1.6.1'
+    testImplementation 'org.json:json:20240303'
+}

@@ -1,0 +1,14 @@
+{
+  "name": "wifi-raio-x",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WiFi Raio-X: analisador de Wi-Fi para Android (melhor rede, melhor canal, diagnóstico) com mapa 3D do ambiente feito só com o sinal do Wi-Fi.",
+  "type": "module",
+  "scripts": {
+    "start": "node tools/serve.mjs 8090",
+    "test": "node --test tests/",
+    "test:e2e": "node tests/e2e/run.mjs",
+    "oui": "node tools/build-oui.mjs",
+    "vendor": "node tools/vendor.mjs"
+  }
+}
