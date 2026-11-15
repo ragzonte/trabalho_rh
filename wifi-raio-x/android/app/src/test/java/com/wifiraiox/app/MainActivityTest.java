@@ -412,11 +412,17 @@ public class MainActivityTest extends AllSdks {
         assertEquals("nem a tela presa ligada", 0, activity.getWindow().getAttributes().flags & keepOn);
 
         // pedidos de outros arquivos (scripts, imagens) não contam como página nova
-        bridge.callAsync(4, "requestPermission", "{}");
+        bridge.callAsync(4, "requestPermission", "{}"); // pega carona no diálogo que continua aberto
         Fixtures.idle();
         client.shouldInterceptRequest(activity.webView(), request("https://appassets.androidplatform.net/assets/www/js/bridge.js", false));
         Fixtures.idle();
         assertEquals(1, bridge.pendingCalls());
+
+        // o usuário responde ao diálogo: quem recebe é a página nova
+        Fixtures.grantLocation();
+        activity.onRequestPermissionsResult(Permissions.REQUEST_LOCATION, new String[] {Fixtures.FINE, Fixtures.COARSE}, new int[] {0, 0});
+        Fixtures.idle();
+        assertEquals(0, bridge.pendingCalls());
     }
 
     // ------------------------------------------------------------ manifesto

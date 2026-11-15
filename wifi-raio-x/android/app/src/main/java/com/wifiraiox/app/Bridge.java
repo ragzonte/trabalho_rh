@@ -429,7 +429,7 @@ public final class Bridge implements Emitter {
         rssi.unwatch();
         Sys.runOnMain(main, () -> {
             rtt.cancelAll();
-            permissions.flush();
+            permissions.dropWaiters();
             Window window = activity.getWindow();
             if (window != null) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         });

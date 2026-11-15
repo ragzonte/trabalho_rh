@@ -150,6 +150,14 @@ final class Permissions {
         return true;
     }
 
+    /**
+     * A página foi recarregada: quem esperava a resposta não existe mais. O diálogo do Android pode
+     * continuar aberto; um pedido da página nova pega carona nele.
+     */
+    void dropWaiters() {
+        locationWaiters.clear();
+    }
+
     /** A Activity está morrendo: ninguém pode ficar esperando uma resposta que não virá. */
     void flush() {
         locationInFlight = false;

@@ -722,6 +722,7 @@ function emLinear(P, X, iters, stages) {
   const Jyy = new Float64Array(N);
   const hx = new Float64Array(N);
   const hy = new Float64Array(N);
+  const temperLin = P.opt.temperLin ?? 1;
   const eStep = () => {
     // Informação de cada nó: J = sum g g'/var, h = sum g (v - b)/var.
     for (let a = 0; a < N; a++) {
@@ -732,7 +733,7 @@ function emLinear(P, X, iters, stages) {
       let h1 = 0;
       for (const o of obs[a]) {
         const k = o.k;
-        const w = o.imp ? 1 / (psi[k] + IMPUTE_VAR) : o.cnt / psi[k];
+        const w = (o.imp ? 1 / (psi[k] + IMPUTE_VAR) : o.cnt / psi[k]) * temperLin;
         const r = o.v - b[k][fIdx[a]];
         jxx += w * g[k][0] * g[k][0];
         jxy += w * g[k][0] * g[k][1];
@@ -912,12 +913,14 @@ function fieldStage(P, lin, opt, stages) {
   const hx = new Float64Array(N);
   const hy = new Float64Array(N);
   let info = '';
+  const fz = {};
   for (let it = 0; it < opt.iters; it++) {
     const frac = opt.iters > 1 ? it / (opt.iters - 1) : 1;
-    const sigma = opt.sigma0 * (opt.sigma1 / opt.sigma0) ** Math.min(1, frac * 1.5); // base larga -> estreita
+    const sigma = P.opt.freeze ? opt.sigma1 : opt.sigma0 * (opt.sigma1 / opt.sigma0) ** Math.min(1, frac * 1.5); // base larga -> estreita
     // --- grade de centros por andar ---
-    const centres = []; // {x, y, f}
-    for (let f = 0; f < F; f++) {
+    const frozen = P.opt.freeze && it > 0;
+    const centres = frozen ? fz.centres : []; // {x, y, f}
+    for (let f = 0; f < F && !frozen; f++) {
       let minX = Infinity;
       let maxX = -Infinity;
       let minY = Infinity;
@@ -988,8 +991,8 @@ function fieldStage(P, lin, opt, stages) {
     const L = cholesky(A, M);
     if (!L) break;
     // Pesos de cada rádio.
-    const Wt = new Array(U);
-    for (let u = 0; u < U; u++) {
+    const Wt = frozen ? fz.Wt : new Array(U);
+    for (let u = 0; u < U && !frozen; u++) {
       const rhs = new Float64Array(M);
       for (let a = 0; a < N; a++) {
         const row = Phi[a];
@@ -997,6 +1000,10 @@ function fieldStage(P, lin, opt, stages) {
         for (let p = 0; p < M; p++) if (row[p] !== 0) rhs[p] += wy * row[p];
       }
       Wt[u] = cholSolve(L, rhs, M);
+    }
+    if (P.opt.freeze && it === 0) {
+      fz.centres = centres;
+      fz.Wt = Wt;
     }
     // Alavanca de cada nó e a correção "sem mim" do gradiente.
     const lev = new Float64Array(N);
@@ -1012,9 +1019,9 @@ function fieldStage(P, lin, opt, stages) {
         sx += Px[a][p] * ua[p];
         sy += Py[a][p] * ua[p];
       }
-      lev[a] = Math.min(0.9, W[a] * h);
-      vx[a] = W[a] * sx;
-      vy[a] = W[a] * sy;
+      lev[a] = frozen ? 0 : Math.min(0.9, W[a] * h);
+      vx[a] = frozen ? 0 : W[a] * sx;
+      vy[a] = frozen ? 0 : W[a] * sy;
     }
     // --- resíduos, ruído por rádio (validação cruzada), imputação ---
     const pred = new Array(N);

@@ -179,11 +179,12 @@
 //   keepAwake       {on}                        -> {ok:true}          mantém a tela ligada durante o mapeamento
 //   vibrate         {ms}                        -> {ok:true}
 //   setBars         {color, dark}               -> {ok:true}          cor (#rrggbb) das barras do sistema; dark = fundo escuro (ícones claros)
-//   share           {title, text}               -> {ok:true}
+//   share           {title, text}               -> {ok:boolean}
 //   saveFile        {name, mime, text|base64}   -> {ok:boolean}       abre o "compartilhar/salvar" do Android com o arquivo
 //   cancel          {op}                        -> {ok:true}          op: 'ping' | 'lan' | 'speed'
 // A requestPermission {}                        -> Status
 // A scan            {}                          -> {accepted:boolean, reason?:string}  (o resultado chega no evento 'scan')
+//                                                 reason: 'no-permission' | 'location-off' | 'wifi-off' | 'throttled' | 'failed'
 // A rtt             {bssids:string[]}           -> {results: RttResult[]}
 // A ping            {host, count, timeoutMs}    -> PingSummary        (emite 'ping' a cada resposta)
 // A lanScan         {}                          -> {devices: LanDevice[]}  (emite 'lan' a cada aparelho e 'lanProgress' {done,total})
@@ -192,6 +193,7 @@
 //
 // Eventos: 'scan' ScanEvent · 'rssi' RssiSample · 'status' Status · 'connection' Connection
 //          'ping' PingReply · 'lan' LanDevice · 'lanProgress' {done:number,total:number} · 'speed' SpeedProgress
+//          'sim' {t,x,y,z,floor,room,heading,moving,mode,world}  (só no simulador: onde está a pessoa virtual)
 // ---------------------------------------------------------------------------
 
 const listeners = new Map(); // nome do evento -> Set<função>

@@ -338,7 +338,32 @@ function legacyCopy(text) {
  */
 
 /**
+ * Evento extra 'sim' (só o simulador emite), 4 vezes por segundo de relógio: onde a pessoa
+ * virtual está de verdade. É o que a demonstração desenha por cima do mapa.
+ * @typedef {Object} SimEvent
+ * @property {number} t        segundos simulados desde que o simulador nasceu
+ * @property {number} x        metros, nas coordenadas do mundo (sim.world)
+ * @property {number} y
+ * @property {number} z        altura do celular (andar * 2,8 + 1,2; varia na escada)
+ * @property {number} floor
+ * @property {string|null} room   nome do cômodo, ou null (escada, soleira)
+ * @property {number} heading  para onde a pessoa está virada (rad, 0 = +x)
+ * @property {boolean} moving
+ * @property {'auto'|'still'|'manual'} mode
+ * @property {string} world    id do mundo ('apartamento', 'sobrado'...)
+ */
+
+/**
  * Cria o simulador.
+ *
+ * Controles (`sim`, também em currentSim()):
+ *   world, worldId, seed, speed, network, device   leitura
+ *   now() -> segundos simulados · truth() -> SimEvent · state() · link() -> rádio conectado
+ *   setState({wifi, location, permission, throttle, permissionReply}) -> Status
+ *   setSpeed(k) · loadWorld(id, seed?) · dispose()
+ *   walker.mode · walker.setMode(m) · walker.goTo(x, y, floor?) · walker.setFloor(f)
+ *   walker.teleport(x, y, floor?) · walker.position()
+ *
  * @param {SimOptions} options
  * @returns {{call:(method:string, args?:object)=>any, callAsync:(method:string, args?:object)=>Promise<any>,
  *            dispose:()=>void, sim:object}}

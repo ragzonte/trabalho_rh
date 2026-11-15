@@ -603,6 +603,7 @@ function buildModel(prep, cfg) {
     M, oNode, oRad, oFloor, oY, oW,
     C: cNode.length, cNode: Int32Array.from(cNode), cRad: Int32Array.from(cRad),
     zFloor, radDev, p0Ref, edges, triples: prep.triples, nodeFloor: prep.nodeFloor,
+    sigA: new Float64Array(RA).fill(cfg.sigma),
     known: prep.known || [],
   };
 }
@@ -614,8 +615,7 @@ function costAndGrad(model, cfg, theta, grad) {
   const { P, RA, DA, NF, oA, oR, p0Index, M, oNode, oRad, oFloor, oY, oW, C, cNode, cRad, zFloor, radDev, p0Ref, edges, nodeFloor } = model;
   if (grad) grad.fill(0);
   let cost = 0;
-  const sigma = cfg.sigma;
-  const kHuber = cfg.huber * sigma;
+  const sigA = model.sigA;
   const eps2 = NEAR_M * NEAR_M;
 
   // --- leituras ---
@@ -634,14 +634,16 @@ function costAndGrad(model, cfg, theta, grad) {
     const ip = p0Index[a * NF + oFloor[m]];
     const e = oY[m] - (theta[ip] - 10 * n * L - al * d);
     const ae = Math.abs(e);
-    const w = oW[m] / (sigma * sigma);
+    const sg = sigA[a];
+    const w = oW[m] / (sg * sg);
+    const kH = cfg.huber * sg;
     let ge; // d custo / d e
-    if (ae <= kHuber) {
+    if (ae <= kH) {
       cost += 0.5 * w * e * e;
       ge = w * e;
     } else {
-      cost += w * kHuber * (ae - 0.5 * kHuber);
-      ge = w * kHuber * (e > 0 ? 1 : -1);
+      cost += w * kH * (ae - 0.5 * kH);
+      ge = w * kH * (e > 0 ? 1 : -1);
     }
     if (grad) {
       // d pred / d q = -(5n/ln10)/q - alpha/(2d);  d custo / d pred = -ge
@@ -659,7 +661,6 @@ function costAndGrad(model, cfg, theta, grad) {
 
   // --- "não ouvi": o previsto não pode ficar muito acima do limiar de detecção ---
   if (C > 0) {
-    const wc = cfg.censor / (sigma * sigma);
     for (let c = 0; c < C; c++) {
       const i = cNode[c];
       const a = cRad[c];
@@ -676,13 +677,16 @@ function costAndGrad(model, cfg, theta, grad) {
       const ip = p0Index[a * NF + f];
       const e = theta[ip] - 10 * n * L - al * d - DETECT_DBM; // > 0 = devia ter aparecido
       if (e <= 0) continue;
+      const sg = sigA[a];
+      const wcA = cfg.censor / (sg * sg);
+      const kH = cfg.huber * sg;
       let ge;
-      if (e <= kHuber) {
-        cost += 0.5 * wc * e * e;
-        ge = wc * e;
+      if (e <= kH) {
+        cost += 0.5 * wcA * e * e;
+        ge = wcA * e;
       } else {
-        cost += wc * kHuber * (e - 0.5 * kHuber);
-        ge = wc * kHuber;
+        cost += wcA * kH * (e - 0.5 * kH);
+        ge = wcA * kH;
       }
       if (grad) {
         // aqui e = pred - limiar: d custo / d pred = +ge
@@ -1504,6 +1508,19 @@ function fieldSigmas(model, cfg, theta, grid, field, exclude) {
   return out;
 }
 
+/**
+ * Peso de cada rádio no ajuste geométrico: quem a curva explica bem (vizinho distante, sem
+ * paredes no meio do caminho andado) vale mais que quem ela explica mal. O peso MÉDIO fica o
+ * de cfg.sigma, para não mexer no equilíbrio com o prior de passo.
+ */
+function updateRadioWeights(model, cfg, theta) {
+  const raw = radioSigmas(model, cfg, theta);
+  let inv = 0;
+  for (let a = 0; a < model.RA; a++) inv += Math.pow(raw[a], -2 * cfg.radioWeights);
+  const norm = Math.sqrt(inv / Math.max(1, model.RA)); // sigma efetivo = cfg.sigma · raw^g · norm
+  for (let a = 0; a < model.RA; a++) model.sigA[a] = cfg.sigma * Math.pow(raw[a], cfg.radioWeights) * norm;
+}
+
 /** Resíduo típico de cada rádio (dB) com as posições atuais: dá o peso de cada um. */
 function radioSigmas(model, cfg, theta) {
   const { RA, NF, oA, oR, p0Index, M, oNode, oRad, oFloor, oY, zFloor, radDev } = model;
@@ -1660,6 +1677,61 @@ function combineEvidence(ev, cfg) {
   return weight > 0 ? { factor: Math.exp(sum / weight), sd: 1 / Math.sqrt(weight) } : null;
 }
 
+/**
+ * Alinha cada membro do conjunto ao primeiro (rotação, espelho e translação) e tira a média dos
+ * nós; os roteadores vêm do primeiro membro. O tamanho final é a média dos tamanhos.
+ */
+function averageMembers(model, members, out) {
+  const { P } = model;
+  const ref = members[0];
+  const a0 = cloudRadius(ref, P);
+  out.set(ref);
+  const acc = new Float64Array(2 * P);
+  let size = 0;
+  for (const th of members) {
+    const c = cloudRadius(th, P);
+    size += c.r;
+    // Procrustes fechado (números complexos), com e sem espelho.
+    let a = 0;
+    let b = 0;
+    let am = 0;
+    let bm = 0;
+    for (let i = 0; i < P; i++) {
+      const px = th[2 * i] - c.mx;
+      const py = th[2 * i + 1] - c.my;
+      const qx = ref[2 * i] - a0.mx;
+      const qy = ref[2 * i + 1] - a0.my;
+      a += px * qx + py * qy;
+      b += px * qy - py * qx;
+      am += px * qx - py * qy;
+      bm += px * qy + py * qx;
+    }
+    const mirror = Math.hypot(am, bm) > Math.hypot(a, b);
+    const ang = mirror ? Math.atan2(bm, am) : Math.atan2(b, a);
+    const cs = Math.cos(ang);
+    const sn = Math.sin(ang);
+    const m = mirror ? -1 : 1;
+    for (let i = 0; i < P; i++) {
+      const px = th[2 * i] - c.mx;
+      const py = (th[2 * i + 1] - c.my) * m;
+      acc[2 * i] += cs * px - sn * py;
+      acc[2 * i + 1] += sn * px + cs * py;
+    }
+  }
+  const K = members.length;
+  for (let i = 0; i < P; i++) {
+    out[2 * i] = acc[2 * i] / K + a0.mx;
+    out[2 * i + 1] = acc[2 * i + 1] / K + a0.my;
+  }
+  // A média encolhe (os erros se cancelam): devolve o tamanho médio dos membros.
+  const now_ = cloudRadius(out, P);
+  const k = now_.r > 1e-9 ? size / K / now_.r : 1;
+  for (let i = 0; i < P; i++) {
+    out[2 * i] = now_.mx + k * (out[2 * i] - now_.mx);
+    out[2 * i + 1] = now_.my + k * (out[2 * i + 1] - now_.my);
+  }
+}
+
 /** Raio quadrático médio dos nós em torno do centro. */
 function cloudRadius(theta, P) {
   let mx = 0;
@@ -1683,6 +1755,7 @@ const DEFAULT_CFG = {
   minObs: 5, // leituras para um rádio entrar no ajuste
   sigma: 6, // dB: ruído + corpo + sombra que a curva não explica
   huber: 1.5,
+  radioWeights: 0, // 0 = todos iguais; 1 = peso pelo resíduo de cada rádio
   deviceCorr: 0, // correlação entre os erros das faixas de um mesmo aparelho
   censor: 0.5, // peso do "não ouvi"
   censorMinObs: 8,
@@ -1709,6 +1782,8 @@ const DEFAULT_CFG = {
   farSigma: 60,
   maxIter: 300,
   rounds: 3,
+  ensemble: 1,
+  ensembleNoise: 1.0, // m de ruído na partida de cada membro
   // HMM
   emissionWeight: 1,
   sigmaMin: 3.5,
@@ -1741,6 +1816,9 @@ const DEFAULT_CFG = {
   evHopSd: 0.5,
   sizeWeight: 400,
   minStepEdges: 10, // abaixo disto a caminhada não ancora a escala
+  turnCorrection: 1, // 0 desliga a correção de tortuosidade
+  turnKappa: 0.5,
+  turnTop: 1.5,
   lagShift: 0,
   emRounds: 0,
   emUpdateQ: 0,
@@ -1872,13 +1950,39 @@ function solveInner(survey, options) {
   };
   let res = { f: Infinity, iter: 0 };
   const notes = [];
-  for (let round = 0; round < cfg.rounds; round++) {
+  const runSlam = (th, rounds) => {
+    for (let round = 0; round < rounds; round++) {
+      for (let i = 0; i < model.size; i++) u[i] = th[i] / scale[i];
+      res = lbfgs(fg, u, { maxIter: cfg.maxIter, deadline, memory: 10 });
+      for (let i = 0; i < model.size; i++) th[i] = u[i] * scale[i];
+      const sc = scaleSearch(model, cfg, th);
+      notes.push(`r${round}:${res.f.toFixed(0)}/${res.iter}/s${sc.toFixed(2)}`);
+      if (cfg.radioWeights > 0) updateRadioWeights(model, cfg, th);
+      if (now() > deadline) break;
+    }
+    return res.f;
+  };
+  runSlam(theta, cfg.rounds);
+  if (cfg.ensemble > 1 && !warm) {
+    // Conjunto: o ajuste tem um platô largo de soluções equivalentes; partidas diferentes caem
+    // em pontos diferentes dele, e a média (depois de alinhar) fica mais perto do meio.
+    const rng = makeRng((options.seed ?? 1) * 7919 + 13);
+    const gauss = () => Math.sqrt(-2 * Math.log(1 - rng())) * Math.cos(2 * Math.PI * rng());
+    const members = [Float64Array.from(theta)];
+    for (let k = 1; k < cfg.ensemble && now() < deadline; k++) {
+      const th = new Float64Array(model.size);
+      for (let i = 0; i < 2 * P; i++) th[i] = X0[i] + cfg.ensembleNoise * gauss();
+      initDevices(prep, model, cfg, th);
+      runSlam(th, cfg.rounds);
+      members.push(th);
+    }
+    averageMembers(model, members, theta);
+    // Curvas e roteadores reajustados às posições médias.
+    cfg.freezeNodes = 1;
     for (let i = 0; i < model.size; i++) u[i] = theta[i] / scale[i];
-    res = lbfgs(fg, u, { maxIter: cfg.maxIter, deadline, memory: 10 });
+    lbfgs(fg, u, { maxIter: cfg.maxIter, deadline, memory: 10 });
     for (let i = 0; i < model.size; i++) theta[i] = u[i] * scale[i];
-    const sc = scaleSearch(model, cfg, theta);
-    notes.push(`r${round}:${res.f.toFixed(0)}/${res.iter}/s${sc.toFixed(2)}`);
-    if (now() > deadline) break;
+    cfg.freezeNodes = 0;
   }
   // --- escala: sem caminhada contínua, vem dos indícios (tempo andando, física, espaçamento) ---
   let stepEdges = 0;
@@ -1901,7 +2005,17 @@ function solveInner(survey, options) {
       if (now() > deadline) break;
     }
   }
-  const sizeAfterSlam = cloudRadius(theta, P).r;
+  let sizeAfterSlam = cloudRadius(theta, P).r;
+  if (anchored && model.known.length === 0 && cfg.turnCorrection > 0) {
+    // Casa pequena obriga a virar antes de completar um passo: a corda entre duas varreduras
+    // encolhe em relação ao caminho andado (passeio aleatório: corda ~ raiz do caminho). O prior
+    // de passo não sabe disso; corrige-se o tamanho final pela razão casa/passo.
+    const rho = sizeAfterSlam / (cfg.pace * 3.5);
+    const x = cfg.turnKappa * rho;
+    const k = clamp(cfg.turnTop * Math.sqrt(x / (1 + x)), 0.7, 1.4);
+    sizeAfterSlam *= 1 + cfg.turnCorrection * (k - 1);
+    notes.push(`turn:x${k.toFixed(2)}`);
+  }
   snapshot('slam');
   progress(0.6, 'ajuste');
 

@@ -32,6 +32,10 @@ const DEFAULTS = {
   motionPad: 0,
   targetRadius: 0,
   springW: 0,
+  orderW: 0,
+  orderHop: 1.0,
+  labelW: 0,
+  labelRadius: 1.2,
   springSigma: 0.25,
   springShort: 0.5,
   outer: 4,
@@ -45,6 +49,12 @@ const DEFAULTS = {
   nDefault: 2.5,
   apDz: 0.6,
   farPenalty: 0.02,
+  physW: 0.3,
+  physN: 2.2,
+  physQ: 0.85,
+  physP0: -41, // dBm a 1 m em 2,4 GHz (típico, já com um pouco de obstrução)
+  physMinPeak: -52,
+  physDamp: 0.7,
 };
 
 export function solve(survey, options = {}) {
@@ -161,6 +171,22 @@ function prepare(survey) {
   for (let q = 0; q < M * R; q++) if (cnt[q] > 0) F[q] = sum[q] / cnt[q];
   all.sort((p, q) => p - q);
   const floorLevel = all.length ? all[Math.floor(all.length * 0.03)] : -90; // limiar de detecção observado
+  // Grupos de cômodo: nós com o mesmo nome (dado pelo usuário) no mesmo andar.
+  const groupIndex = new Map();
+  const groups = [];
+  const groupOf = new Int32Array(M).fill(-1);
+  nodes.forEach((n, a) => {
+    if (!n.label) return;
+    const key = `${n.floor}|${String(n.label).trim().toLowerCase()}`;
+    let g = groupIndex.get(key);
+    if (g === undefined) {
+      g = groups.length;
+      groupIndex.set(key, g);
+      groups.push([]);
+    }
+    groups[g].push(a);
+    groupOf[a] = g;
+  });
   // Andares e média de cada rádio por andar.
   const floorList = [...new Set(nodes.map((n) => n.floor))].sort((p, q) => p - q);
   const NF = floorList.length;
@@ -181,7 +207,7 @@ function prepare(survey) {
       floorMean[k * NF + f] = c ? s / c : floorLevel;
     }
   }
-  return { scans, nodes, nodeOfScan, radios, idRadio, R, M, F, cnt, floorLevel, floorList, floorIdx, floorNodes, floorMean };
+  return { scans, nodes, nodeOfScan, radios, idRadio, R, M, F, cnt, floorLevel, floorList, floorIdx, floorNodes, floorMean, groups, groupOf };
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +643,7 @@ function motionEdges(data) {
     const [texp, tmax] = movingTime(scans[i - 1], scans[i]);
     if (!(tmax > 0)) continue;
     // Só as arestas curtas dizem algo sobre a distância percorrida.
-    edges.push({ a, b, texp, tmax, informative: tmax <= 8 });
+    edges.push({ a, b, texp, tmax, informative: tmax <= 8, spots: !!(scans[i - 1].still && scans[i].still) });
   }
   return edges;
 }
@@ -648,6 +674,35 @@ function radiusOf(X) {
   let s = 0;
   for (let a = 0; a < n; a++) s += (X[2 * a] - cx) ** 2 + (X[2 * a + 1] - cy) ** 2;
   return Math.sqrt(s / n);
+}
+
+// Escala pela física: o nível a 1 m de um roteador típico é conhecido a poucos dB (potência de
+// transmissão regulamentada, perda no espaço livre a 1 m, antena do celular). Para os rádios fortes
+// (roteadores dentro da área levantada), compara o p0 implícito no mapa com o típico.
+function physScale(data, X, model, P) {
+  const { M, R, F, floorIdx } = data;
+  const n = P.physN;
+  const ks = [];
+  const vals = [];
+  for (let k = 0; k < R; k++) {
+    vals.length = 0;
+    let mx = -Infinity;
+    for (let a = 0; a < M; a++) {
+      const v = F[a * R + k];
+      if (Number.isNaN(v) || floorIdx[a] !== model.apFloor[k]) continue;
+      if (v > mx) mx = v;
+      const d2 = (X[2 * a] - model.ax[k]) ** 2 + (X[2 * a + 1] - model.ay[k]) ** 2 + P.apDz * P.apDz;
+      vals.push(v + 5 * n * Math.log10(Math.max(0.25, d2)));
+    }
+    if (vals.length < 8 || mx < P.physMinPeak) continue;
+    vals.sort((p, q) => p - q);
+    const p0 = vals[Math.floor(P.physQ * (vals.length - 1))];
+    const nominal = P.physP0 - 20 * Math.log10(data.radios[k].band === 0 ? 1 : 2.11); // 5 GHz: ~6,5 dB a mais de perda a 1 m
+    ks.push(Math.pow(10, (nominal - p0) / (10 * n)));
+  }
+  if (!ks.length) return null;
+  ks.sort((p, q) => p - q);
+  return ks[ks.length >> 1];
 }
 
 function rescale(data, X, diss, P) {
@@ -1009,13 +1064,66 @@ function refineFields(data, X0, P, dbg, diss) {
         c += 0.5 * w * ex * ex;
         f += (w * ex) / sd / d;
       }
+      if (P.orderW > 0 && !e.informative && e.spots) {
+        // Entre pontos marcados com muito tempo no meio o relógio não mede nada, mas quem marca
+        // pontos vai de um para o vizinho: o salto costuma ser curto perto do tamanho do mapa.
+        const ex = d / hopScale;
+        c += 0.5 * P.orderW * ex * ex;
+        f += P.orderW / (hopScale * hopScale);
+      }
       G[2 * e.a] += f * dx;
       G[2 * e.a + 1] += f * dy;
       G[2 * e.b] -= f * dx;
       G[2 * e.b + 1] -= f * dy;
     }
+    // Cômodos: pontos com o mesmo nome ficam juntos (raio proporcional à fração de pontos do cômodo)
+    // e mais perto do centro do próprio cômodo que do centro dos outros.
+    if (P.labelW > 0 && data.groups.length) {
+      const ng = data.groups.length;
+      for (let g = 0; g < ng; g++) {
+        const list = data.groups[g];
+        let gx = 0;
+        let gy = 0;
+        for (const a of list) {
+          gx += X[2 * a];
+          gy += X[2 * a + 1];
+        }
+        gcx[g] = gx / list.length;
+        gcy[g] = gy / list.length;
+      }
+      for (let g = 0; g < ng; g++) {
+        const list = data.groups[g];
+        if (list.length < 2) continue;
+        const rg = roomScale * Math.sqrt(list.length / M);
+        // Gradiente exato: o centro depende de todos os membros.
+        let sgx = 0;
+        let sgy = 0;
+        for (const a of list) {
+          const dx = X[2 * a] - gcx[g];
+          const dy = X[2 * a + 1] - gcy[g];
+          const d = Math.sqrt(dx * dx + dy * dy) + 1e-9;
+          if (d > rg) {
+            const ex = (d - rg) / rg;
+            c += 0.5 * P.labelW * ex * ex;
+            const f = (P.labelW * ex) / rg / d;
+            G[2 * a] += f * dx;
+            G[2 * a + 1] += f * dy;
+            sgx += f * dx;
+            sgy += f * dy;
+          }
+        }
+        for (const a of list) {
+          G[2 * a] -= sgx / list.length;
+          G[2 * a + 1] -= sgy / list.length;
+        }
+      }
+    }
     return c;
   };
+  let hopScale = 1;
+  let roomScale = 1;
+  const gcx = new Float64Array(data.groups.length);
+  const gcy = new Float64Array(data.groups.length);
   let X = Float64Array.from(X0);
   const hist = [];
   const radius0 = radiusOf(X);
@@ -1024,6 +1132,10 @@ function refineFields(data, X0, P, dbg, diss) {
     const frac = P.outer > 1 ? Math.min(1, o / Math.max(1, P.outer - 1 - P.hHold)) : 1;
     const h = P.hStart > 0 ? P.hStart * Math.pow(P.h / P.hStart, frac) : P.h;
     inv2h2 = 1 / (2 * h * h);
+    const rmsRadius = radiusOf(X);
+    // Salto típico entre vizinhos: raio do disco equivalente / raiz do número de pontos.
+    hopScale = Math.max(0.3, P.orderHop * rmsRadius * Math.SQRT2 * Math.sqrt(Math.PI / M));
+    roomScale = P.labelRadius * rmsRadius * Math.SQRT2;
     if (P.meanMode) model = fitApModels(data, X, P, model);
     if (P.gradCheck && o === 0) {
       const G = new Float64Array(2 * M);
@@ -1040,7 +1152,19 @@ function refineFields(data, X0, P, dbg, diss) {
       dbg.gradCheck = out;
     }
     const r = lbfgs(cost, X, P.inner);
-    X = rescale(data, r.x, diss, { ...P, keepRadius: radius0 });
+    X = r.x;
+    // Escala: passo de quem anda (quando há) combinado com a física; sem nenhum dos dois, mantém o tamanho.
+    let kStep = P.targetRadius > 0 ? null : stepScale(data, X, P);
+    let kPhys = model && P.physW > 0 && !(P.targetRadius > 0) ? physScale(data, X, model, P) : null;
+    if (kPhys != null) kPhys = Math.max(0.4, Math.min(2.5, kPhys));
+    let kk;
+    if (P.targetRadius > 0) kk = P.targetRadius / Math.max(1e-9, radiusOf(X));
+    else if (kStep != null && kPhys != null) kk = Math.pow(kStep, 1 - P.physW) * Math.pow(kPhys, P.physW);
+    else if (kStep != null) kk = kStep;
+    else if (kPhys != null) kk = Math.pow(kPhys, P.physDamp); // amortecido: a posição do roteador ainda está mudando
+    else kk = radius0 / Math.max(1e-9, radiusOf(X));
+    for (let q = 0; q < X.length; q++) X[q] *= kk;
+    dbg.scale = { kStep, kPhys, kk };
     hist.push(r.f);
   }
   if (P.meanMode) model = fitApModels(data, X, P, model);

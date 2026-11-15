@@ -323,9 +323,22 @@ test('bloqueios ao vivo: aparecem quando o status piora, trocam entre si e somem
 test('"Permitir" pede a permissão; negar de novo mantém o bloqueio, aceitar libera', T, async () => {
   await withApp(env, { params: { ...FAST, permission: 'denied', permissionReply: 'denied' } }, async ({ page }) => {
     await page.waitForSelector('.gate[data-gate="permission"]');
+    // o pedido demora (o "usuário" lê o diálogo do Android): espera a resposta chegar antes de seguir
+    const answered = page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const off = window.__wrx.app.bridge.on('status', (status) => {
+            off();
+            resolve(status.permission);
+          });
+          setTimeout(() => resolve('sem evento'), 5000);
+        }),
+    );
     await page.click('.gate .btn--primary');
+    await answered;
     await settle(page);
-    assert.equal(await page.locator('.gate').count(), 1, 'o usuário negou: continua bloqueado');
+    assert.equal(await appState(page, (s) => s.status.permission), 'denied');
+    assert.equal(await page.locator('.gate[data-gate="permission"]').count(), 1, 'o usuário negou: continua bloqueado');
     await simState(page, { permissionReply: 'granted' });
     await page.click('.gate .btn--primary');
     await page.locator('.gate').waitFor({ state: 'detached' });
@@ -759,6 +772,9 @@ for (const [name, size] of Object.entries(VIEWPORTS)) {
         const left = metrics.screen.x;
         const right = metrics.vw - metrics.screen.right;
         assert.ok(Math.abs(left - right) <= 2, 'e fica centralizado');
+        const titleX = await page.evaluate(() => document.querySelector('.topbar__title').getBoundingClientRect().left);
+        const cardX = await page.evaluate(() => document.querySelector('.view .card, .view .banner, .view .empty').getBoundingClientRect().left);
+        assert.ok(Math.abs(titleX - (metrics.screen.x + 16)) <= 2, `o título (${titleX}) alinha com a coluna do conteúdo (${cardX})`);
       } else if (name !== 'landscape') {
         assert.ok(metrics.screen.w >= metrics.vw - 2, 'no celular o conteúdo usa a largura toda');
       }
@@ -766,17 +782,24 @@ for (const [name, size] of Object.entries(VIEWPORTS)) {
   });
 }
 
-test('no celular mais estreito a pílula encurta nas sub-telas para o título caber', T, async () => {
-  await withApp(env, { params: FAST, viewport: 'small', route: '/ferramentas/ajustes' }, async ({ page }) => {
-    assert.equal(await page.locator('.pill__short').isVisible(), true);
-    assert.equal(await page.locator('.pill__full').isVisible(), false);
-    const fits = await page.evaluate(() => {
+test('no celular mais estreito a pílula encurta para o título caber inteiro', T, async () => {
+  const titleFits = (page) =>
+    page.evaluate(() => {
       const t = document.querySelector('.topbar__title');
       return t.scrollWidth <= t.clientWidth + 1;
     });
-    assert.equal(fits, true, 'o título "Ajustes" aparece inteiro');
-    await goto(page, '/ferramentas');
-    assert.equal(await page.locator('.pill__full').isVisible(), true);
+  await withApp(env, { params: FAST, viewport: 'small', route: '/ferramentas/ajustes' }, async ({ page }) => {
+    assert.equal(await page.locator('.pill__short').isVisible(), true);
+    assert.equal(await page.locator('.pill__full').isVisible(), false);
+    assert.equal(await titleFits(page), true, 'o título "Ajustes" aparece inteiro');
+    for (const tab of TABS) {
+      await goto(page, tab.route);
+      assert.equal(await titleFits(page), true, `o título "${tab.title}" aparece inteiro em 360 px`);
+    }
+  });
+  await withApp(env, { params: FAST, viewport: 'phone', route: '/ferramentas' }, async ({ page }) => {
+    assert.equal(await page.locator('.pill__full').isVisible(), true, 'em 412 px cabe a palavra inteira');
+    assert.equal(await titleFits(page), true);
   });
 });
 

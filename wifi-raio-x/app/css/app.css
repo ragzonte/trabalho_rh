@@ -346,7 +346,9 @@ canvas {
   align-items: center;
   gap: 2px;
   height: calc(var(--topbar-h) + var(--safe-t));
-  padding: var(--safe-t) calc(4px + var(--safe-r)) 0 calc(4px + var(--safe-l));
+  /* em telas largas o título e os botões se alinham com a coluna do conteúdo */
+  padding: var(--safe-t) max(calc(4px + var(--safe-r)), calc((100% - var(--content-max)) / 2 + 6px)) 0
+    max(calc(4px + var(--safe-l)), calc((100% - var(--content-max)) / 2 + 4px));
   background: var(--bg);
   border-bottom: 1px solid transparent;
   transition: border-color var(--dur) var(--ease);
@@ -371,7 +373,8 @@ canvas {
   border-radius: var(--r-md);
 }
 
-.topbar__back + .topbar__heading {
+/* só quando a seta está à vista: escondida, o título alinha com a margem do conteúdo */
+.topbar__back:not([hidden]) + .topbar__heading {
   padding-left: 4px;
 }
 
@@ -464,11 +467,12 @@ canvas {
   display: none;
 }
 
+/* nos celulares mais estreitos a pílula encurta para o título caber inteiro */
 @media (max-width: 400px) {
-  .topbar[data-sub] .pill__full {
+  .pill__full {
     display: none;
   }
-  .topbar[data-sub] .pill__short {
+  .pill__short {
     display: inline;
   }
 }
@@ -580,7 +584,7 @@ canvas {
   }
   .topbar {
     --topbar-h: 48px;
-    padding-left: 4px;
+    padding-left: max(4px, calc((100% - var(--content-max)) / 2 + 4px));
   }
   .view {
     padding-left: 0;
