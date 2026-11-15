@@ -994,7 +994,8 @@ test('exportar: planilha e JSON saem por bridge.saveFile, com fórmulas neutrali
     // --- planilha
     await page.locator('.seg__opt', { hasText: 'Planilha' }).click();
     await page.waitForFunction(() => document.querySelector('.view > .screen').dataset.format === 'csv');
-    assert.match(await page.textContent('.exp-preview__name'), /^wifi-raio-x-redes-\d{8}-\d{4}\.csv$/);
+    // (no navegador os dados são sempre os da casa virtual: o arquivo leva "demonstracao" no nome)
+    assert.match(await page.textContent('.exp-preview__name'), /^wifi-raio-x-redes-demonstracao-\d{8}-\d{4}\.csv$/);
     assert.match(await page.textContent('.exp-preview__size'), /^[\d,]+ (bytes|kB)$/);
     const csvPreview = await page.textContent('.exp-preview__text');
     assert.ok(csvPreview.startsWith('Nome da rede (SSID);BSSID;Fabricante;Sinal (dBm);'));
@@ -1002,10 +1003,10 @@ test('exportar: planilha e JSON saem por bridge.saveFile, com fórmulas neutrali
     await shot(page, 'tools-a-exportar-csv');
 
     const [download] = await Promise.all([page.waitForEvent('download'), page.locator('.exp-actions .btn', { hasText: 'Salvar arquivo' }).click()]);
-    assert.match(download.suggestedFilename(), /^wifi-raio-x-redes-\d{8}-\d{4}\.csv$/);
+    assert.match(download.suggestedFilename(), /^wifi-raio-x-redes-demonstracao-\d{8}-\d{4}\.csv$/);
     await waitToast(page, /Na demonstração o arquivo é baixado pelo navegador/);
     const csv = await simEval(page, (sim) => sim.device.lastFile);
-    assert.match(csv.name, /^wifi-raio-x-redes-\d{8}-\d{4}\.csv$/);
+    assert.match(csv.name, /^wifi-raio-x-redes-demonstracao-\d{8}-\d{4}\.csv$/);
     assert.equal(csv.mime, 'text/csv');
     assert.equal(csv.text.startsWith(BOM), true, 'o arquivo começa com a marca UTF-8 (acentos certos no Excel)');
     const rows = csv.text.slice(1).split('\r\n');

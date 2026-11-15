@@ -272,7 +272,7 @@ function actionRows(ctx, ap) {
 }
 
 /** A linha "Esta rede é minha" (a estrela que decide de quem o app fala quando diz "seu roteador"). */
-function ownRow(ctx, { ssid, hidden }) {
+function ownRow(ctx, { ssid, hidden, favorite, aps }) {
   if (hidden || !ssid) {
     return h(
       'div.card.card--flush',
@@ -281,13 +281,20 @@ function ownRow(ctx, { ssid, hidden }) {
     );
   }
   const on = ctx.store.isFavorite(ssid);
+  // O nome está marcado, mas esta rede não foi aceita como do usuário: é aberta e existe uma
+  // protegida com o mesmo nome (ou a segurança dela é outra que a da rede em uso). Veja o store.
+  const accepted = Array.isArray(aps) ? aps.some((a) => a.favorite) : favorite !== false;
   return h(
     'div.card.card--flush.ap-own',
-    { key: 'own', dataset: { on: on ? '1' : '0' } },
+    { key: 'own', dataset: { on: on ? '1' : '0', accepted: on && !accepted ? '0' : '1' } },
     switchRow({
-      icon: on ? 'star-filled' : 'star',
+      icon: on && accepted ? 'star-filled' : 'star',
       title: 'Esta rede é minha',
-      subtitle: on ? 'O app fala desta rede quando diz “seu roteador”.' : 'Marque para as dicas de canal e de sinal serem sobre ela.',
+      subtitle: on
+        ? accepted
+          ? 'O app fala desta rede quando diz “seu roteador”.'
+          : 'O nome está marcado como seu, mas a segurança desta rede é diferente da sua. O app não a trata como sua: pode ser outro aparelho usando o mesmo nome.'
+        : 'Marque para as dicas de canal e de sinal serem sobre ela.',
       checked: on,
       onChange: (checked) => {
         ctx.store.setFavorite(ssid, checked);

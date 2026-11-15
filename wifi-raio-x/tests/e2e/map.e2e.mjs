@@ -340,7 +340,7 @@ test('fluxo completo: demonstração automática -> prévia -> resultado -> salv
     await page.click(SHARE);
     await page.locator('.map-actions .row', { hasText: 'Arquivo do mapa' }).click();
     const exported = (await waitDevice(page, (d) => /\.json$/.test((d.file || {}).name || ''), 'o arquivo do mapa')).file;
-    assert.equal(exported.name, 'meu-ape.wifi-raio-x.json');
+    assert.equal(exported.name, 'demonstracao-meu-ape.wifi-raio-x.json', 'mapa da casa virtual: o arquivo diz que é demonstração');
     assert.equal(exported.mime, 'application/json');
     const fileData = JSON.parse(exported.text);
     assert.equal(fileData.format, 'wifi-raio-x.mapa');

@@ -12,7 +12,7 @@
 // console.error, alert(), violação de CSP ou recurso que não carregou.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startEnv, withApp, goto, settle, waitForScreen, waitForScans, horizontalOverflow } from './helpers.mjs';
+import { startEnv, withApp, goto, settle, waitForScreen, waitForScans, horizontalOverflow, simEval } from './helpers.mjs';
 import { installFakeNative, REAL_BSSID, REAL_NEIGHBOUR_BSSID } from './fake-native.mjs';
 
 const T = { timeout: 180_000 };
@@ -77,6 +77,17 @@ const storedDraft = (page) =>
     return { demo: draft.demo, scans: draft.summary ? draft.summary.scans : null, bssids: [...ids].filter((x) => typeof x === 'string') };
   });
 
+/** Espera (perguntando de tempos em tempos) uma condição que depende do armazenamento do app. */
+async function until(check, what, timeout = 30_000) {
+  const t0 = Date.now();
+  for (;;) {
+    const got = await check();
+    if (got) return got;
+    if (Date.now() - t0 > timeout) throw new Error(`esperei demais por: ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
 const hasReal = (draft) => draft.bssids.includes(REAL_BSSID) || draft.bssids.includes(REAL_NEIGHBOUR_BSSID);
 
 // ---------------------------------------------------------------------------
@@ -91,13 +102,7 @@ test('rascunho da demonstração não continua com o Wi-Fi de verdade (nem o con
     await setDemo(page, true);
     await startSurvey(page, 3);
     await goto(page, '/redes');
-    await page.waitForFunction(async () => {
-      const { openMapStore } = await import('./js/mapping/storage.js');
-      const store = await openMapStore();
-      const draft = await store.draft.load();
-      store.close();
-      return !!draft;
-    });
+    await until(async () => !!(await storedDraft(page)), 'o rascunho ser gravado');
     const before = await storedDraft(page);
     assert.equal(before.demo, true, 'o rascunho guarda de onde veio');
     assert.ok(before.scans >= 3);
@@ -404,5 +409,211 @@ test('privacidade: nenhuma tela diz que o teste de velocidade é a única coisa 
     await settle(page);
     const lan = await page.evaluate(() => document.body.innerText);
     assert.doesNotMatch(lan, /Nada sai do celular|conversa só com/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// security-07 / security-12: mapa importado e mapa da demonstração
+// ---------------------------------------------------------------------------
+
+const SHARE = '[aria-label="Compartilhar ou exportar o mapa"]';
+
+/** Um mapa pronto no armazenamento do app, feito de um levantamento simulado. */
+const seedMap = (page, { name, demo }) =>
+  page.evaluate(
+    async (o) => {
+      const { presetWorld } = await import('./js/sim/presets.js');
+      const { planWalk, simulateSurvey } = await import('./js/sim/walk.js');
+      const { createMapEngine } = await import('./js/mapping/engine.js');
+      const { openMapStore } = await import('./js/mapping/storage.js');
+      const w = presetWorld('kitnet', 1);
+      const { survey } = simulateSurvey(w, planWalk(w, { kind: 'spots' }), { labelRate: 1 });
+      const own = w.aps.filter((a) => a.own).map((a) => a.bssid);
+      const engine = createMapEngine();
+      const out = await engine.run(survey, { own });
+      engine.dispose();
+      const store = await openMapStore();
+      const id = await store.put({ name: o.name, survey, solution: out.solution, own, stats: { areaM2: out.model.quality.areaM2, level: out.model.quality.level }, demo: o.demo });
+      const file = await store.exportMap(id);
+      store.close();
+      return { id, file };
+    },
+    { name, demo },
+  );
+
+const waitDevice = async (page, test, what) => {
+  const t0 = Date.now();
+  for (;;) {
+    const got = await simEval(page, (sim) => ({ file: sim.device.lastFile, share: sim.device.lastShare }));
+    if (test(got)) return got;
+    if (Date.now() - t0 > 30_000) throw new Error(`o celular não recebeu ${what}`);
+    await page.waitForTimeout(150);
+  }
+};
+
+test('mapa da demonstração renomeado: o texto, a imagem e o arquivo compartilhados dizem que é demonstração', T, async () => {
+  await withApp(env, { params: { speed: 10 }, route: '/mapa' }, async ({ page }) => {
+    const { id } = await seedMap(page, { name: 'Minha casa de verdade', demo: true });
+    await goto(page, `/mapa/ver/${id}`);
+    await page.waitForSelector('.mrs:not([hidden]) .mrs__stage canvas', { timeout: 120_000 });
+    await settle(page);
+
+    await page.click(SHARE);
+    await page.locator('.map-actions .row', { hasText: 'Resumo em texto' }).click();
+    const { share } = await waitDevice(page, (d) => !!d.share, 'o resumo do mapa');
+    assert.match(share.text, /Minha casa de verdade/);
+    assert.match(share.text, /Mapa de demonstração \(casa virtual, dados simulados\)/);
+
+    await page.click(SHARE);
+    await page.locator('.map-actions .row', { hasText: 'Imagem do mapa' }).click();
+    const image = (await waitDevice(page, (d) => /\.png$/.test((d.file || {}).name || ''), 'a imagem do mapa')).file;
+    assert.equal(image.name, 'demonstracao-minha-casa-de-verdade.png');
+
+    await page.click(SHARE);
+    await page.locator('.map-actions .row', { hasText: 'Arquivo do mapa' }).click();
+    const file = (await waitDevice(page, (d) => /\.json$/.test((d.file || {}).name || ''), 'o arquivo do mapa')).file;
+    assert.equal(file.name, 'demonstracao-minha-casa-de-verdade.wifi-raio-x.json');
+    assert.equal(JSON.parse(file.text).map.demo, true);
+    assert.equal('thumb' in JSON.parse(file.text).map, false, 'a miniatura não viaja no arquivo');
+  });
+});
+
+test('mapa importado: a imagem que vem no arquivo não é usada; a miniatura é refeita aqui ao abrir o mapa', T, async () => {
+  await withApp(env, { params: { speed: 10 }, route: '/mapa' }, async ({ page }) => {
+    const seeded = await seedMap(page, { name: 'Casa do vizinho', demo: false });
+    // o arquivo chega com uma "miniatura" escolhida por quem mandou: um PNG de 12000 x 12000 em poucos bytes
+    const file = JSON.parse(seeded.file);
+    const ihdr = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0x2e, 0xe0, 0, 0, 0x2e, 0xe0, 1, 0, 0, 0, 0]);
+    file.map.thumb = `data:image/png;base64,${ihdr.toString('base64')}`;
+    file.map.name = 'Mapa recebido';
+    const id = await page.evaluate(async (text) => {
+      const { openMapStore } = await import('./js/mapping/storage.js');
+      const store = await openMapStore();
+      const out = await store.importMap(text);
+      store.close();
+      return out;
+    }, JSON.stringify(file));
+
+    await goto(page, '/redes');
+    await goto(page, '/mapa');
+    const card = page.locator(`.mlib-map:has([data-map-id="${id}"])`);
+    await card.waitFor();
+    assert.equal(await card.locator('.mlib-map__thumb img').count(), 0, 'sem a imagem do arquivo: o cartão mostra o ícone do app');
+
+    // abrir o mapa faz a miniatura deste aparelho (384 x 288), sem mexer na data do mapa
+    const before = await page.evaluate(async (mapId) => {
+      const { openMapStore } = await import('./js/mapping/storage.js');
+      const store = await openMapStore();
+      const rec = await store.get(mapId);
+      store.close();
+      return rec.updatedAt;
+    }, id);
+    await page.click(`[data-map-id="${id}"]`);
+    await page.waitForSelector('.mrs:not([hidden]) .mrs__stage canvas', { timeout: 120_000 });
+    await until(
+      () =>
+        page.evaluate(async (mapId) => {
+          const { openMapStore } = await import('./js/mapping/storage.js');
+          const store = await openMapStore();
+          const rec = await store.get(mapId);
+          store.close();
+          return !!rec.thumb;
+        }, id),
+      'a miniatura refeita',
+    );
+    const after = await page.evaluate(async (mapId) => {
+      const { openMapStore } = await import('./js/mapping/storage.js');
+      const store = await openMapStore();
+      const rec = await store.get(mapId);
+      store.close();
+      const img = new Image();
+      img.src = rec.thumb;
+      await img.decode();
+      return { updatedAt: rec.updatedAt, width: img.naturalWidth, height: img.naturalHeight, kind: rec.thumb.slice(0, 16) };
+    }, id);
+    assert.equal(after.updatedAt, before, 'a data do mapa não muda por causa da miniatura');
+    assert.deepEqual([after.width, after.height], [384, 288]);
+    assert.match(after.kind, /^data:image\/(webp|jpeg)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// security-03 / security-10: quem se passa pela rede do usuário
+// ---------------------------------------------------------------------------
+
+test('BSSID do roteador clonado e rede aberta com o nome da minha: o app não fala delas como "a sua rede"', T, async () => {
+  await withApp(env, { params: { speed: 1, walk: 'still' }, route: '/redes' }, async ({ page }) => {
+    await waitForScans(page, 1);
+    const conn = await page.evaluate(() => {
+      const c = window.__wrx.app.store.get().connection;
+      return { ssid: c.ssid, bssid: c.bssid };
+    });
+    const scanOnce = async () => {
+      const seq = await page.evaluate(() => window.__wrx.app.store.get().scan.seq);
+      await page.evaluate(() => window.__wrx.app.scanLoop.scanNow());
+      await page.waitForFunction((n) => window.__wrx.app.store.get().scan.seq > n, seq, { timeout: 30_000 });
+      await settle(page);
+    };
+
+    // 1) um aparelho por perto transmite "Free_WiFi", aberta, com o BSSID do roteador em uso; é a entrada que chega
+    await page.evaluate((bssid) => {
+      const { store } = window.__wrx.app;
+      window.__realIngest = store.ingestScan;
+      store.ingestScan = function (ev) {
+        const aps = (ev.aps || []).map((ap) => (ap.bssid === bssid ? { ...ap, ssid: 'Free_WiFi', capabilities: '[ESS]', frequency: 2462, level: -30, channelWidth: 0, centerFreq0: 0, ies: undefined } : ap));
+        return window.__realIngest.call(store, { ...ev, aps });
+      };
+    }, conn.bssid);
+    await scanOnce();
+    let state = await page.evaluate(() => {
+      const { store } = window.__wrx.app;
+      return { connected: store.connectedAp() && store.connectedAp().ssid, names: store.get().aps.map((a) => a.ssid), clone: store.get().clone };
+    });
+    assert.equal(state.connected, null, 'o clone não vira a rede em uso');
+    assert.ok(!state.names.includes('Free_WiFi'), 'nem entra na lista com o endereço do roteador do usuário');
+    assert.deepEqual(state.clone, { bssid: conn.bssid, ssids: ['Free_WiFi'] });
+    // o cartão continua falando da rede de verdade, sem o alarme de "rede aberta"
+    assert.equal(await page.textContent('.net-conn__name .ssid'), conn.ssid);
+    const card = (await page.textContent('.net-conn')).replace(/\s+/g, ' ');
+    assert.doesNotMatch(card, /Rede aberta|Free_WiFi/);
+    assert.equal(await page.getAttribute('.net-insight', 'data-insight'), 'bssid-clone');
+    assert.match(await page.textContent('.net-insight'), /usa o endereço do seu roteador/);
+    assert.equal(await page.locator('.net-list .net-row', { hasText: 'Free_WiFi' }).count(), 0);
+    // no diagnóstico completo, o aviso explica
+    await goto(page, '/melhor');
+    await page.waitForFunction(() => /mesmo endereço \(BSSID\)/.test(document.querySelector('.view').textContent));
+    assert.doesNotMatch(await viewText(page), /Rede aberta: sem senha/);
+
+    // 2) outro aparelho anuncia o NOME da minha rede (marcada como minha), sem senha e mais forte
+    await page.evaluate((ssid) => {
+      const { store } = window.__wrx.app;
+      store.setFavorite(ssid, true);
+      store.ingestScan = function (ev) {
+        const twin = { bssid: '02:13:37:00:00:01', ssid, level: -30, frequency: 2412, channelWidth: 0, centerFreq0: 0, centerFreq1: 0, capabilities: '[ESS]', ageMs: 20, wifiStandard: 4 };
+        return window.__realIngest.call(store, { ...ev, aps: (ev.aps || []).concat([twin]) });
+      };
+    }, conn.ssid);
+    await goto(page, '/redes');
+    await scanOnce();
+    state = await page.evaluate(() => {
+      const { store } = window.__wrx.app;
+      const twin = store.apById('02:13:37:00:00:01');
+      const mine = store.connectedAp();
+      return { clone: store.get().clone, twin: twin && { favorite: twin.favorite, own: twin.own }, mine: mine && { ssid: mine.ssid, favorite: mine.favorite, own: mine.own } };
+    });
+    assert.equal(state.clone, null, 'com o roteador de verdade de volta, o aviso do clone some');
+    assert.deepEqual(state.twin, { favorite: false, own: false }, 'a gêmea aberta não é "minha"');
+    assert.deepEqual(state.mine, { ssid: conn.ssid, favorite: true, own: true });
+    assert.equal(await page.getAttribute('.net-insight', 'data-insight'), 'open-twin');
+    assert.match(await page.textContent('.net-insight'), /rede aberta com o mesmo nome da sua/);
+    // na lista: a linha da gêmea aberta existe, sem a estrela de "minha rede"
+    const twinRow = page.locator('.net-list .net-row', { hasText: 'Aberta' }).filter({ hasText: conn.ssid });
+    assert.equal(await twinRow.count(), 1);
+    assert.equal(await twinRow.locator('[aria-label="Minha rede"]').count(), 0);
+    // e o painel dela diz por que não conta como minha
+    await twinRow.click();
+    await page.waitForSelector('.ap-own');
+    assert.equal(await page.getAttribute('.ap-own', 'data-accepted'), '0');
+    assert.match(await page.textContent('.ap-own'), /não a trata como sua/);
   });
 });

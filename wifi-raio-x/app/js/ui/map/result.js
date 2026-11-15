@@ -312,6 +312,8 @@ export async function mountResult(root, env, { id }) {
   const focusNet = () => netByKey(V.show) || S.model.networks.find((n) => n.own) || S.model.networks[0] || null;
   const fieldsFor = (key) => S.model.floors.map((_, i) => heatField(S.model, i, key));
   const displayName = () => S.name || (S.demo ? 'Casa virtual' : 'Mapa novo');
+  /** Arquivos de um mapa da casa virtual levam "demonstracao" no nome (o mapa pode ter sido renomeado). */
+  const demoPrefix = () => (S.demo ? 'demonstracao-' : '');
 
   // --- visualizador --------------------------------------------------------
 
@@ -478,9 +480,11 @@ export async function mountResult(root, env, { id }) {
     if (!viewer) return;
     try {
       const raw = await viewer.snapshot();
-      const blob = await composeShareImage(raw, { name: displayName(), subtitle: 'Mapa aproximado, feito só com o sinal do Wi-Fi · WiFi Raio-X', dark: store.get().theme === 'dark' }).catch(() => raw);
+      // mapa da casa virtual: a imagem (e o nome do arquivo) dizem que é demonstração
+      const subtitle = S.demo ? 'Demonstração: mapa de uma casa virtual · WiFi Raio-X' : 'Mapa aproximado, feito só com o sinal do Wi-Fi · WiFi Raio-X';
+      const blob = await composeShareImage(raw, { name: displayName(), subtitle, dark: store.get().theme === 'dark' }).catch(() => raw);
       const base64 = await blobToBase64(blob);
-      const res = await bridge.saveFile({ name: `${fileSlug(displayName())}.png`, mime: 'image/png', base64 });
+      const res = await bridge.saveFile({ name: `${demoPrefix()}${fileSlug(displayName())}.png`, mime: 'image/png', base64 });
       if (res && res.ok === false) throw new Error('recusado');
       if (env.isDemo()) toast('Imagem do mapa gerada.');
     } catch (err) {
@@ -496,7 +500,7 @@ export async function mountResult(root, env, { id }) {
     }
     try {
       const text = await storage.exportMap(S.id);
-      const res = await bridge.saveFile({ name: `${fileSlug(displayName())}.wifi-raio-x.json`, mime: 'application/json', text });
+      const res = await bridge.saveFile({ name: `${demoPrefix()}${fileSlug(displayName())}.wifi-raio-x.json`, mime: 'application/json', text });
       if (res && res.ok === false) throw new Error('recusado');
       if (env.isDemo()) toast('Arquivo do mapa gerado.');
     } catch (err) {
@@ -508,7 +512,8 @@ export async function mountResult(root, env, { id }) {
   async function shareText() {
     try {
       const lines = describeMap(S.model);
-      const res = await bridge.share(displayName(), `${displayName()}\n\n${lines.join('\n')}\n\nFeito com o WiFi Raio-X.`);
+      const origin = S.demo ? 'Mapa de demonstração (casa virtual, dados simulados).\n\n' : '';
+      const res = await bridge.share(displayName(), `${displayName()}\n\n${origin}${lines.join('\n')}\n\nFeito com o WiFi Raio-X.`);
       if (res && res.ok === false) throw new Error('recusado');
     } catch {
       toast('Não foi possível compartilhar agora.');

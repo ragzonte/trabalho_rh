@@ -148,6 +148,22 @@ export const RECORDER_LIMITS = Object.freeze({
   resumeGapS: 30,
   maxScans: 4000,
   maxReadingsPerScan: 400,
+  /**
+   * BSSIDs diferentes no levantamento. Uma casa ou um prédio têm dezenas ou poucas centenas; quem
+   * passa disto é uma enxurrada de redes que aparecem uma vez e somem (alguém por perto
+   * transmitindo redes falsas com endereços sorteados). Cada uma entraria no cálculo do mapa, que
+   * passaria de décimos de segundo para minutos, sem dizer nada sobre o lugar. Então:
+   *  - acima de `pruneApsAbove` BSSIDs, os ouvidos numa única varredura ficam fora do levantamento
+   *    (toSurvey, e portanto das prévias, do mapa final e do rascunho);
+   *  - o levantamento nunca leva mais de `maxAps` (ficam os ouvidos em mais varreduras);
+   *  - acima de `compactAbove` BSSIDs na memória, o gravador esquece de vez os de uma varredura só
+   *    (menos os das últimas `compactKeepScans` varreduras, que ainda podem voltar a ser ouvidos).
+   * Num levantamento comum nada disso entra em ação.
+   */
+  pruneApsAbove: 600,
+  maxAps: 1500,
+  compactAbove: 4000,
+  compactKeepScans: 3,
   maxTrack: 30_000,
   maxRtt: 20_000,
   maxKnownDistances: 50,
@@ -561,7 +577,20 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     if (byId.size === 0) return false;
 
     // do mais forte para o mais fraco (a ordem não diz nada sobre o lugar)
-    const list = [...byId.values()].sort((a, b) => b.rssi - a.rssi || (a.id < b.id ? -1 : 1)).slice(0, L.maxReadingsPerScan);
+    const byStrength = (a, b) => b.rssi - a.rssi || (a.id < b.id ? -1 : 1);
+    let list = [...byId.values()].sort(byStrength);
+    if (list.length > L.maxReadingsPerScan) {
+      // Lista maior que o teto: ficam primeiro as redes que o gravador (ou o app) já conhece. Só
+      // pelo sinal, uma enxurrada de redes falsas fortes tiraria da varredura os roteadores de verdade.
+      const familiar = new Set();
+      if (isObj(context) && Array.isArray(context.aps)) {
+        for (const ap of context.aps) {
+          if (isObj(ap) && typeof ap.bssid === 'string' && (ap.own === true || ap.connected === true || ap.favorite === true || ap.seenCount >= 2)) familiar.add(ap.bssid);
+        }
+      }
+      const known = (r) => meta.has(r.id) || familiar.has(r.id);
+      list = [...list.filter(known), ...list.filter((r) => !known(r))].slice(0, L.maxReadingsPerScan).sort(byStrength);
+    }
     const signature = list.map((r) => `${r.id}${r.rssi}`).join(',');
     // A mesma lista de novo? Uma varredura nova sempre traz alguma leitura ouvida depois da
     // lista anterior. (Sem idades, só dá para comparar o conteúdo.)
@@ -597,8 +626,60 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
 
     scans.push(scan);
     scanInfo.push({ at: when.real, seg: segment });
+    if (meta.size > L.compactAbove) compact();
     emit('scan');
     return true;
+  }
+
+  /**
+   * Com BSSIDs demais (veja RECORDER_LIMITS.pruneApsAbove), quais ficam no levantamento: os do
+   * sinal conectado e do RTT, e os ouvidos em pelo menos duas varreduras (os mais ouvidos primeiro,
+   * até `maxAps`). null = todos ficam (o caso de sempre).
+   * @returns {Set<string>|null}
+   */
+  function apsToKeep() {
+    const count = new Map(); // BSSID -> em quantas varreduras foi ouvido
+    for (const s of scans) for (const r of s.readings) count.set(r.id, (count.get(r.id) || 0) + 1);
+    if (count.size <= L.pruneApsAbove) return null;
+    const keep = new Set();
+    for (const q of track) keep.add(q.id);
+    for (const q of rtt) keep.add(q.id);
+    const often = [];
+    for (const [id, n] of count) if (n >= 2 && !keep.has(id)) often.push([id, n]);
+    often.sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+    for (const [id] of often) {
+      if (keep.size >= L.maxAps) break;
+      keep.add(id);
+    }
+    return keep;
+  }
+
+  /** As leituras de uma varredura que ficam; sem nenhuma rede conhecida, as 3 mais fortes (uma varredura não fica vazia). */
+  function keptReadings(readings, keep) {
+    if (!keep) return readings;
+    const kept = readings.filter((r) => keep.has(r.id));
+    return kept.length ? kept : readings.slice(0, 3);
+  }
+
+  /**
+   * Memória: esquece de vez as leituras dos BSSIDs ouvidos numa única varredura (e os dados
+   * deles), menos nas últimas varreduras. Só roda numa enxurrada de redes (compactAbove).
+   */
+  function compact() {
+    const keep = apsToKeep();
+    if (!keep) return;
+    const recent = scans.length - L.compactKeepScans;
+    const alive = new Set(keep);
+    for (let i = 0; i < scans.length; i++) {
+      if (i < recent) scans[i].readings = keptReadings(scans[i].readings, keep);
+      for (const r of scans[i].readings) alive.add(r.id);
+    }
+    for (const id of [...meta.keys()]) if (!alive.has(id)) meta.delete(id);
+    for (const id of [...seenIn.keys()]) if (!alive.has(id)) seenIn.delete(id);
+    for (const key of [...together.keys()]) {
+      const [a, b] = key.split('|');
+      if (!alive.has(a) || !alive.has(b)) together.delete(key);
+    }
   }
 
   /** @param {import('../bridge.js').RssiSample} sample */
@@ -962,10 +1043,13 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
       const m = meta.get(id);
       aps[id] = { ssid: m ? m.ssid : '', freq: m ? m.freq : 0, device: devices.get(id) || id };
     };
+    // enxurrada de redes ouvidas uma vez só: elas ficam fora do levantamento (veja apsToKeep)
+    const keep = apsToKeep();
     const outScans = scans.map((s) => {
-      const copy = { t: s.t, floor: s.floor, still: s.still, spot: s.spot, readings: s.readings.map((r) => ({ ...r })) };
+      const readings = keptReadings(s.readings, keep);
+      const copy = { t: s.t, floor: s.floor, still: s.still, spot: s.spot, readings: readings.map((r) => ({ ...r })) };
       if (s.label) copy.label = s.label;
-      for (const r of s.readings) add(r.id);
+      for (const r of readings) add(r.id);
       return copy;
     });
     for (const q of track) if (meta.has(q.id)) add(q.id);
@@ -982,6 +1066,9 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
 
   function toJSON() {
     tick();
+    const survey = toSurvey();
+    const pruned = Object.keys(survey.aps).length < meta.size;
+    const inSurvey = (id) => !pruned || Object.prototype.hasOwnProperty.call(survey.aps, id);
     return {
       kind: SNAPSHOT_KIND,
       v: SNAPSHOT_VERSION,
@@ -996,10 +1083,14 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
       currentSpot,
       spots: [...spots.values()].map((s) => ({ ...s })),
       segs: scanInfo.map((i) => i.seg),
-      survey: toSurvey(),
+      survey,
       // dados de rádios que só apareceram no sinal conectado e os votos do agrupamento por aparelho
-      meta: Object.fromEntries(meta),
-      votes: { seen: Object.fromEntries(seenIn), together: Object.fromEntries(together) },
+      // (só dos BSSIDs que ficaram no levantamento: o rascunho não cresce com redes ouvidas uma vez só)
+      meta: Object.fromEntries([...meta].filter(([id]) => inSurvey(id))),
+      votes: {
+        seen: Object.fromEntries([...seenIn].filter(([id]) => inSurvey(id))),
+        together: Object.fromEntries([...together].filter(([key]) => key.split('|').every(inSurvey))),
+      },
     };
   }
 

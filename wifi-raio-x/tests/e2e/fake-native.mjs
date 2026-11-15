@@ -15,7 +15,6 @@
 //   window.__fake.speedCalls             quantos testes de velocidade o "celular" rodou
 //   window.__fake.systemScan(extra?)     o Android entrega uma busca por conta própria (evento 'scan')
 //   window.__fake.rssi(dbm)              o Android manda uma leitura do sinal conectado (evento 'rssi')
-//   window.__fake.pickFile               arquivo que o seletor do Android devolveria (não usado pelo WebView de teste)
 
 export const REAL_BSSID = 'd8:c6:78:11:22:30';
 export const REAL_SSID = 'MinhaCasaReal';

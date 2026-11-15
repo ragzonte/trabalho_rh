@@ -1592,3 +1592,102 @@ test('piloto: sem simulador não começa; pedido de varredura que falha não o d
   assert.equal(s.sim.speed, 1);
   s.backend.dispose();
 });
+
+// ---------------------------------------------------------------------------
+// Enxurrada de redes falsas durante o levantamento (BSSIDs que aparecem uma vez e somem)
+// ---------------------------------------------------------------------------
+
+/** `count` redes falsas da varredura `round`, com endereços que nunca se repetem. */
+const fakeAps = (round, count, level = -60) =>
+  Array.from({ length: count }, (_, i) => ap(`02:13:${hex(round >> 8)}:${hex(round)}:${hex(i >> 8)}:${hex(i)}`, level - (i % 20), { ssid: `FREE ${round}-${i}`, frequency: i % 2 ? 5180 : 2412 }));
+/** Oito roteadores de verdade, ouvidos em toda varredura, com o sinal mudando como quem anda. */
+const steadyAps = (i) => Array.from({ length: 8 }, (_, k) => ap(mac(k + 1), -48 - k * 4 - Math.abs(((i * (k + 2)) % 20) - 10) * 2, { frequency: 2412 + (k % 3) * 25, ssid: `Casa ${k}` }));
+
+test('enxurrada de redes de uma varredura só: o levantamento não cresce com elas e continua resolvendo depressa', async () => {
+  const { solveQuick } = await import('../app/js/mapping/solver.js');
+  const { rec, clock } = started();
+  const SCANS = 120;
+  for (let i = 0; i < SCANS; i++) {
+    clock.advance(3000);
+    assert.equal(rec.onScan(scanEvent(clock, [...steadyAps(i), ...fakeAps(i, 300)])), true);
+  }
+  const survey = rec.toSurvey();
+  assert.deepEqual(validateSurvey(survey), []);
+  assert.deepEqual(surveyProblems(survey), []);
+  assert.equal(survey.scans.length, SCANS, 'nenhuma varredura se perde');
+  const ids = Object.keys(survey.aps);
+  assert.ok(ids.length <= 50, `${ids.length} BSSIDs no levantamento (entraram 36.000 falsos)`);
+  for (let k = 1; k <= 8; k++) assert.ok(ids.includes(mac(k)), `roteador ${k} ficou`);
+  for (const scan of survey.scans) {
+    assert.equal(scan.readings.filter((r) => !r.id.startsWith('02:13:')).length, 8, 'os 8 roteadores de verdade em toda varredura');
+    for (const r of scan.readings) assert.ok(survey.aps[r.id], 'toda leitura tem a rede descrita em aps');
+  }
+
+  // o cálculo da prévia volta a ser coisa de décimos de segundo (com as falsas levava dezenas de segundos)
+  const t0 = performance.now();
+  const solution = solveQuick(survey);
+  const ms = performance.now() - t0;
+  assert.equal(solution.points.length, SCANS);
+  assert.ok(ms < 5000, `solveQuick levou ${Math.round(ms)} ms`);
+
+  // o rascunho também não incha: nem as leituras, nem os dados guardados de cada BSSID
+  const snapshot = rec.toJSON();
+  const size = JSON.stringify(snapshot).length;
+  assert.ok(size < 400_000, `rascunho com ${size} caracteres`);
+  assert.ok(Object.keys(snapshot.meta).length <= 50);
+  assert.ok(Object.keys(snapshot.votes.seen).length <= 50);
+  // e continua sendo retomado como era
+  const again = recorderFromJSON(snapshot, { now: clock.now });
+  assert.deepEqual(again.toSurvey(), survey);
+});
+
+test('lista maior que o teto de leituras: as redes já conhecidas ficam, mesmo com falsas mais fortes', () => {
+  const { rec, clock } = started();
+  const N = RECORDER_LIMITS.maxReadingsPerScan + 200;
+  for (let i = 0; i < 12; i++) {
+    clock.advance(3000);
+    // roteadores de verdade a partir de -48 dBm; 600 falsas novas por varredura, todas a -30 dBm ou mais
+    const store = steadyAps(i).map((a) => ({ bssid: a.bssid, ssid: a.ssid, seenCount: 5, own: false }));
+    assert.equal(rec.onScan(scanEvent(clock, [...fakeAps(i, N, -22), ...steadyAps(i)]), { aps: store }), true);
+  }
+  const survey = rec.toSurvey();
+  for (const scan of survey.scans) {
+    const real = scan.readings.filter((r) => !r.id.startsWith('02:13:'));
+    assert.equal(real.length, 8, 'nenhum roteador de verdade foi empurrado para fora pelo teto');
+  }
+  // mesmo já na PRIMEIRA varredura, quando o gravador ainda não conhecia ninguém (o app conhecia)
+  assert.equal(survey.scans[0].readings.filter((r) => !r.id.startsWith('02:13:')).length, 8);
+});
+
+test('levantamento comum: nada é podado (BSSID ouvido uma vez só continua no levantamento)', () => {
+  const { rec, clock } = started();
+  for (let i = 0; i < 30; i++) {
+    clock.advance(3000);
+    // 5 roteadores + 10 redes que só aparecem nesta varredura: 305 BSSIDs no total, abaixo do corte
+    rec.onScan(scanEvent(clock, [...walkingAps(i), ...fakeAps(i, 10)]));
+  }
+  const survey = rec.toSurvey();
+  assert.equal(Object.keys(survey.aps).length, 5 + 30 * 10);
+  for (const scan of survey.scans) assert.equal(scan.readings.length, 15);
+  assert.equal(Object.keys(rec.toJSON().meta).length, 305);
+});
+
+test('enxurrada longa: o gravador esquece as redes de uma varredura só (a memória não cresce sem fim)', () => {
+  const { rec, clock } = started();
+  const PER = 390;
+  const SCANS = 40; // 15.600 BSSIDs falsos: bem acima de compactAbove
+  for (let i = 0; i < SCANS; i++) {
+    clock.advance(3000);
+    rec.onScan(scanEvent(clock, [...steadyAps(i), ...fakeAps(i, PER)]));
+  }
+  const st = rec.stats();
+  assert.equal(st.scans, SCANS);
+  assert.ok(st.aps <= 8 + (RECORDER_LIMITS.compactKeepScans + 12) * PER, `${st.aps} BSSIDs na memória depois de ${SCANS * PER} falsos`);
+  const survey = rec.toSurvey();
+  assert.deepEqual(validateSurvey(survey), []);
+  assert.ok(Object.keys(survey.aps).length <= 50);
+  for (const scan of survey.scans) assert.equal(scan.readings.filter((r) => !r.id.startsWith('02:13:')).length, 8);
+  // desfazer a última leitura continua funcionando
+  assert.ok(rec.undoLastScan());
+  assert.equal(rec.toSurvey().scans.length, SCANS - 1);
+});

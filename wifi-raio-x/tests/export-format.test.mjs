@@ -521,3 +521,61 @@ describe('arquivo e prévia', () => {
     assert.equal(previewOf('a\nb\nc', 0).shown, 1, 'pelo menos uma linha');
   });
 });
+
+describe('revisão de segurança: nomes hostis e origem dos dados', () => {
+  const FORGED = 'Casa" · -41 dBm · WPA3 · "'; // 26 caracteres: cabe num SSID
+  const net = (name, more = {}) => ({ name, hidden: false, bestRssi: -80, bands: ['2.4'], channels: [1], security: 'Aberta', radios: 1, ...more });
+
+  test('relatório: aspas no nome da rede não fecham as aspas do relatório (campos forjados)', () => {
+    const text = buildReport({ generatedAt: Date.now(), connection: null, networks: [net('Vizinho'), net(FORGED)] });
+    const line = text.split('\n').find((l) => l.startsWith(' 2. '));
+    assert.ok(line, text);
+    // um único par de aspas na linha: o nome inteiro (com os "campos" falsos) fica dentro dele
+    assert.equal(line.split('"').length - 1, 2, line);
+    assert.match(line, /^ 2\. "[^"]*" · -80 dBm \(fraco\) · 2,4 GHz canal 1 · Aberta$/);
+    assert.ok(line.startsWith(` 2. "Casa' · -41 dBm · WPA3 · '" · -80 dBm`), line);
+    // aspas tipográficas e angulares também
+    for (const name of ['Casa” · WPA3 · “x', 'Casa» · WPA3 · «x', 'Casa„ · WPA3 · ‟x', 'Casa＂ · WPA3 · ＂x']) {
+      const row = buildReport({ generatedAt: Date.now(), connection: null, networks: [net(name)] }).split('\n').find((l) => l.startsWith(' 1. '));
+      assert.match(row, /^ 1\. "Casa' · WPA3 · 'x" · -80 dBm/, row);
+    }
+  });
+
+  test('relatório: nome com aspas não forja uma nota no ranking nem a rede conectada', () => {
+    const text = buildReport({
+      generatedAt: Date.now(),
+      connection: { ssid: 'Minha" (canal 1, 2,4 GHz)\u2028Rede: "outra', bssid: 'aa:bb:cc:dd:ee:ff', rssi: -50 },
+      ranking: [
+        { name: 'Casa": nota 99 de 100 (minha) "x', score: 12, estMbps: 3 },
+        { name: 'Honesta', score: 80, estMbps: 100, mine: true },
+      ],
+      networks: [],
+    });
+    const first = text.split('\n').find((l) => l.startsWith('1. '));
+    assert.equal(first.split('"').length - 1, 2, first);
+    assert.match(first, /^1\. "[^"]*": nota 12 de 100, cerca de 3 Mb\/s$/);
+    assert.equal(text.split('\n').filter((l) => /": nota \d+ de 100/.test(l)).length, 2, 'uma nota por linha do ranking');
+    const conn = text.split('\n').find((l) => l.startsWith('Rede: '));
+    assert.equal(conn.split('"').length - 1, 2, conn);
+    assert.equal(text.split('\n').filter((l) => l.startsWith('Rede: ')).length, 1);
+  });
+
+  test('relatório: nomes comuns saem como sempre (apóstrofo, acento e ponto do meio ficam)', () => {
+    const text = buildReport({ generatedAt: Date.now(), connection: null, networks: [net("Casa d'Ávila · 5G"), net('Família Souza')] });
+    assert.ok(text.includes(` 1. "Casa d'Ávila · 5G" · -80 dBm`));
+    assert.ok(text.includes(' 2. "Família Souza" · -80 dBm'));
+    // cleanText em si não muda (a planilha e o JSON têm a própria proteção)
+    assert.equal(cleanText('a "b" c'), 'a "b" c');
+  });
+
+  test('exportFileName: o que sai da demonstração leva "demonstracao" no nome', async () => {
+    const { exportFileName } = await import('../app/js/ui/tools/export-format.js');
+    const when = new Date(2026, 10, 5, 9, 7).getTime();
+    assert.equal(exportFileName('redes', 'csv', { when }), 'wifi-raio-x-redes-20261105-0907.csv');
+    assert.equal(exportFileName('redes', 'csv', { demo: false, when }), fileName('redes', 'csv', when));
+    assert.equal(exportFileName('redes', 'csv', { demo: true, when }), 'wifi-raio-x-redes-demonstracao-20261105-0907.csv');
+    assert.equal(exportFileName('redes', 'json', { demo: true, when }), 'wifi-raio-x-redes-demonstracao-20261105-0907.json');
+    assert.equal(exportFileName('relatorio', 'txt', { demo: true, when }), 'wifi-raio-x-relatorio-demonstracao-20261105-0907.txt');
+    assert.match(exportFileName('redes', 'csv', { demo: true }), /^wifi-raio-x-redes-demonstracao-\d{8}-\d{4}\.csv$/);
+  });
+});

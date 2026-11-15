@@ -534,7 +534,7 @@ test('CSP: a política está na página, sem código em linha e sem violações 
     const csp = await page.getAttribute('meta[http-equiv="Content-Security-Policy"]', 'content');
     assert.equal(
       csp,
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://speed.cloudflare.com; worker-src 'self' blob:; object-src 'none'; base-uri 'none'",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
     );
     assert.equal(await page.locator('script:not([src])').count(), 0, 'nenhum <script> em linha');
 

@@ -310,8 +310,13 @@ const levelWord = (rssi) => (isNum(rssi) ? LEVEL_WORDS.find(([min]) => rssi >= m
 
 const SEVERITY_WORD = { critical: 'Crítico', warning: 'Atenção', info: 'Informação', good: 'Tudo certo' };
 
-/** Nome de rede para o relatório: limpo e entre aspas (ou "rede oculta"). */
-const quoted = (name) => (isText(name) && cleanText(name).trim() !== '' ? `"${cleanText(name)}"` : '(rede oculta)');
+/**
+ * Nome de rede para o relatório: limpo e entre aspas (ou "rede oculta"). As aspas que o próprio
+ * nome tiver viram apóstrofo: um vizinho pode chamar a rede dele de `Casa" · -41 dBm · WPA3 · "`,
+ * e com as aspas intactas a linha pareceria trazer uma rede "Casa" forte e segura (ou, no ranking,
+ * uma nota inventada). Com um único par de aspas, tudo o que é nome fica visivelmente dentro dele.
+ */
+const quoted = (name) => (isText(name) && cleanText(name).trim() !== '' ? `"${cleanText(name).replace(/["\u201c\u201d\u201e\u201f\u00ab\u00bb\uff02]/g, "'")}"` : '(rede oculta)');
 /** Distância estimada: uma casa decimal só abaixo de 3 m, e sem ",0". */
 const metersText = (m) => `${numText(m, m < 2.95 ? 1 : 0).replace(/,0$/, '')} m`;
 // as frases que vêm das análises usam os sinais tipográficos da interface: aqui viram os comuns
@@ -433,6 +438,16 @@ export function fileName(kind, ext, when = Date.now()) {
   const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}`;
   const safe = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   return `wifi-raio-x-${safe(kind)}-${stamp}.${safe(ext)}`;
+}
+
+/**
+ * Nome do arquivo exportado. O que sai do modo demonstração leva "demonstracao" no nome: os dados
+ * são de uma casa virtual, e um arquivo sem marca nenhuma poderia ser passado adiante como se
+ * fosse a medição de um lugar de verdade (a planilha não tem onde dizer isso por dentro).
+ *   exportFileName('redes', 'csv', { demo: true }) -> "wifi-raio-x-redes-demonstracao-20261115-1432.csv"
+ */
+export function exportFileName(kind, ext, { demo = false, when = Date.now() } = {}) {
+  return fileName(demo ? `${kind}-demonstracao` : kind, ext, when);
 }
 
 /** Tamanho do texto em bytes (UTF-8), como ele vai para o arquivo. */

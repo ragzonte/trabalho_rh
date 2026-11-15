@@ -18,7 +18,7 @@ import { standardInfo } from '../../core/phy.js';
 import { securityTypeLabel } from '../../core/security.js';
 import { bandOf, freqToChannel } from '../../core/channels.js';
 import { recommendChannel } from '../../core/channel-rating.js';
-import { buildCsv, buildJson, buildReport, networkRecord, fileName, utf8Length, formatBytes, previewOf } from './export-format.js';
+import { buildCsv, buildJson, buildReport, networkRecord, exportFileName, utf8Length, formatBytes, previewOf } from './export-format.js';
 import { useToolsCss, copyWithToast } from './conexao.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
@@ -145,12 +145,14 @@ export async function mount(root, ctx) {
     const state = store.get();
     const now = Date.now();
     const appVersion = state.info && isText(state.info.appVersion) ? state.info.appVersion : '';
+    // dados da casa virtual saem com "demonstracao" no nome do arquivo
+    const stamp = { demo: state.backend === 'sim', when: now };
     if (kind === 'csv') {
-      return { kind, name: fileName('redes', 'csv', now), mime: 'text/csv', text: buildCsv(state.aps, { bom: forFile }) };
+      return { kind, name: exportFileName('redes', 'csv', stamp), mime: 'text/csv', text: buildCsv(state.aps, { bom: forFile }) };
     }
     if (kind === 'json') {
       const text = buildJson({ generatedAt: now, appVersion, device: state.info, connection: state.connection, scannedAt: state.scan.dataAt, aps: state.aps });
-      return { kind, name: fileName('redes', 'json', now), mime: 'application/json', text };
+      return { kind, name: exportFileName('redes', 'json', stamp), mime: 'application/json', text };
     }
     const connAp = store.connectedAp();
     const text = buildReport({
@@ -163,7 +165,7 @@ export async function mount(root, ctx) {
       networks: state.networks.map(networkRecord),
       signals: state.aps.length,
     });
-    return { kind, name: fileName('relatorio', 'txt', now), mime: 'text/plain', text };
+    return { kind, name: exportFileName('relatorio', 'txt', stamp), mime: 'text/plain', text };
   }
 
   // a prévia só é refeita quando os dados mudam (não a cada segundo do relógio)
