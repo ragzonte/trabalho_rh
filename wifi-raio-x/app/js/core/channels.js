@@ -254,7 +254,12 @@ function makeBlock(band, widthMHz, channels) {
   const names = [];
   for (const ch of channels) {
     const u = uniiOf(channelToFreq(ch, band));
-    if (u && !names.includes(u)) names.push(u);
+    if (!u) continue;
+    // Num bloco de vários canais, o canal "em cima do muro" (185 = "U-NII-7/8") conta para as
+    // duas sub-faixas, sem virar um terceiro nome.
+    for (const name of channels.length > 1 ? u.replace('/', '/U-NII-').split('/') : [u]) {
+      if (!names.includes(name)) names.push(name);
+    }
   }
   return Object.freeze({
     band,
@@ -436,6 +441,14 @@ function resolveBonded(band, f, channel, declared, plus, centers) {
     if (plus && b80) return done([b80], true);
   }
 
+  if (declared === 80 && band === '5') {
+    // Roteadores 11ac antigos anunciam 160 MHz da forma obsoleta (VHT Operation com largura 2 e
+    // o centro dos 160 MHz no primeiro campo). O Android lê isso como 80 MHz com centerFreq0 no
+    // centro do bloco de 160, e nenhum canal de 80 MHz tem esse centro: o canal é de 160 MHz.
+    const b160 = at(160);
+    if (b160 && centers.includes(b160.centerFreq)) return done([b160], false);
+  }
+
   if (declared === 40 || declared === 80) {
     const b = at(declared);
     if (b) return done([b], false);
@@ -473,6 +486,8 @@ function channelsOfPart(part) {
  * igual a `frequency`; em 160 MHz, centerFreq0 = centro do 80 MHz primário e centerFreq1 =
  * centro dos 160 MHz), então: em 5/6 GHz vale a tabela de junção (que é fixa) e os centros só
  * desempatam (320 MHz, 80+80); em 2,4 GHz o centro diz de que lado está o canal secundário.
+ * Um caso em que o centro corrige a largura: "80 MHz" com centerFreq0 no centro de um bloco de
+ * 160 MHz é um AP 11ac antigo de 160 MHz (veja resolveBonded).
  *
  * @param {{frequency?:number, channelWidth?:number, centerFreq0?:number, centerFreq1?:number}} rawAp
  * @returns {{

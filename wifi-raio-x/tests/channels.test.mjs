@@ -396,6 +396,29 @@ describe('blocksOf', () => {
     for (const w of [20, 40, 80, 160, 320]) for (const b of blocksOf('6', w)) assert.equal(b.dfs, false);
   });
 
+  // Regressão: blocos com o canal 185 (metade em cada sub-faixa) saíam "U-NII-7 + U-NII-7/8 + U-NII-8".
+  test('6 GHz: sub-faixas dos blocos que cruzam a divisa U-NII-7 / U-NII-8', () => {
+    const uniiOfBlock = (width, channel) => blocksOf('6', width).find((b) => b.channels.includes(channel)).unii;
+    assert.equal(uniiOfBlock(20, 185), 'U-NII-7/8'); // o canal sozinho mantém o rótulo próprio
+    assert.equal(uniiOfBlock(40, 185), 'U-NII-7 + U-NII-8'); // 185 + 189
+    assert.equal(uniiOfBlock(80, 185), 'U-NII-7 + U-NII-8'); // 177-189
+    assert.equal(uniiOfBlock(160, 185), 'U-NII-7 + U-NII-8'); // 161-189
+    assert.deepEqual(
+      blocksOf('6', 320).map((b) => b.unii),
+      ['U-NII-5', 'U-NII-5', 'U-NII-5 + U-NII-6 + U-NII-7', 'U-NII-6 + U-NII-7', 'U-NII-7 + U-NII-8', 'U-NII-7 + U-NII-8'],
+    );
+    for (const width of [20, 40, 80, 160, 320]) {
+      for (const b of blocksOf('6', width)) {
+        if (width > 20) assert.doesNotMatch(b.unii, /\//, `${width} MHz, centro ${b.center}`);
+        assert.equal(new Set(b.unii.split(' + ')).size, b.unii.split(' + ').length);
+      }
+    }
+    assert.equal(uniiOfBlock(80, 181), 'U-NII-7 + U-NII-8');
+    assert.equal(uniiOfBlock(40, 181), 'U-NII-7'); // 177 + 181
+    assert.equal(uniiOfBlock(40, 189), 'U-NII-7 + U-NII-8');
+    assert.equal(uniiOfBlock(40, 193), 'U-NII-8');
+  });
+
   test('6 GHz, 320 MHz: 31, 63, 95, 127, 159, 191 (blocos que se sobrepõem)', () => {
     const blocks = blocksOf('6', 320);
     assert.deepEqual(centers(blocks), [31, 63, 95, 127, 159, 191]);
@@ -606,6 +629,38 @@ describe('occupancy: 5 GHz', () => {
       assert.equal(o.dfs, true, id);
       assert.equal(o.unii, 'U-NII-1', id);
     }
+  });
+
+  // Regressão: o VHT Operation obsoleto (largura 2, centro dos 160 MHz no 1º campo, 2º campo
+  // zerado) chega do Android como CHANNEL_WIDTH_80MHZ com centerFreq0 no centro do bloco de 160
+  // (InformationElementUtil.VhtOperation: 2º centro 0 => 80 MHz). O AP aparecia com 80 MHz.
+  test('"80 MHz" com centerFreq0 no centro de um bloco de 160 MHz é um AP de 160 MHz', () => {
+    for (const [frequency, center, first, last] of [
+      [5180, 5250, 36, 64],
+      [5300, 5250, 36, 64],
+      [5500, 5570, 100, 128],
+      [5745, 5815, 149, 177],
+    ]) {
+      const o = occupancy({ frequency, channelWidth: CW.W80, centerFreq0: center, centerFreq1: 0 });
+      assert.equal(o.widthMHz, 160, String(frequency));
+      assert.equal(o.centerFreq, center);
+      assert.deepEqual(o.segments, [{ lo: center - 80, hi: center + 80 }]);
+      assert.deepEqual(o.channels, steps(first, last, 4));
+      assert.equal(o.noncontiguous, false);
+      assert.equal(o.approx, false);
+      // é o mesmo canal que o Android entrega na forma atual
+      assert.deepEqual(o, occupancy({ frequency, channelWidth: CW.W160, centerFreq0: center, centerFreq1: 0 }));
+    }
+    // centro de 160 MHz de OUTRO bloco não muda nada: continua valendo a tabela de 80 MHz
+    const other = occupancy({ frequency: 5180, channelWidth: CW.W80, centerFreq0: 5570 });
+    assert.equal(other.widthMHz, 80);
+    assert.deepEqual(other.segments, [{ lo: 5170, hi: 5250 }]);
+    // onde não existe bloco de 160 (canais 132-144) também não
+    assert.equal(occupancy({ frequency: 5660, channelWidth: CW.W80, centerFreq0: 5570 }).widthMHz, 80);
+    // nos 6 GHz a forma obsoleta não existe (a largura vem do HE Operation)
+    const six = occupancy({ frequency: 6135, channelWidth: CW.W80, centerFreq0: 6185 });
+    assert.equal(six.widthMHz, 80);
+    assert.deepEqual(six.segments, [{ lo: 6105, hi: 6185 }]);
   });
 
   test('160 MHz declarado como 80+80 mas contíguo continua sendo um canal só', () => {

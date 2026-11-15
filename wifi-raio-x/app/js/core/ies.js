@@ -380,11 +380,12 @@ function readHtCapabilities(b) {
   if (b.length < 26) return null;
   const cap = u16(b, 0);
   // Máscara de MCS de recepção: bytes 3..12 do corpo; cada um dos 4 primeiros é um fluxo espacial.
+  // O maior MCS é o do fluxo que vai mais longe (um AP pode limitar a modulação do último fluxo).
   let nss = 0;
   let top = -1;
   for (let i = 0; i < 4; i++) {
     if (b[3 + i] !== 0) nss += 1;
-    for (let k = 0; k < 8; k++) if (b[3 + i] & (1 << k)) top = i * 8 + k;
+    for (let k = 0; k < 8; k++) if (b[3 + i] & (1 << k) && k > top) top = k;
   }
   return {
     ldpc: (cap & 0x0001) !== 0,
@@ -397,7 +398,7 @@ function readHtCapabilities(b) {
     maxAmsdu: cap & 0x0800 ? 7935 : 3839,
     fortyIntolerant: (cap & 0x4000) !== 0,
     nss,
-    maxMcs: top < 0 ? null : top % 8,
+    maxMcs: top < 0 ? null : top,
   };
 }
 
@@ -534,7 +535,7 @@ function bandOfOpClass(opClass) {
   if (opClass >= 81 && opClass <= 84) return '2.4';
   if (opClass >= 115 && opClass <= 130) return '5';
   if (opClass >= 131 && opClass <= 137) return '6';
-  if (opClass === 180) return '60';
+  if (opClass >= 180 && opClass <= 183) return '60'; // 181 a 183: canais juntados do 802.11ay
   return null;
 }
 
@@ -679,7 +680,9 @@ function readHeOperation(b) {
       centerSeg0: b[pos + 2],
       centerSeg1: b[pos + 3],
       duplicateBeacon: (control & 0x04) !== 0,
-      regInfo: (control >> 3) & 7,
+      // Regulatory Info tem 4 bits (B3-B6): 0 = interno de baixa potência, 1 = potência padrão,
+      // 2 = potência muito baixa, 8 = interno de potência padrão (não cabe em 3 bits)
+      regInfo: (control >> 3) & 0x0f,
       minRate: b[pos + 4],
     };
   }

@@ -373,15 +373,41 @@ describe('scoreAp: sinal', () => {
     }
   });
 
+  // Regressão: com sinal fraco, um AP de canal largo saía com velocidade (e nota) menor que o
+  // mesmo AP em 20 MHz, porque a estimativa do enlace obrigava a largura cheia.
+  test('sozinho no canal, um AP mais largo nunca rende menos que o mesmo AP mais estreito', () => {
+    const widths = [
+      { channelWidth: CW.W20 },
+      { channelWidth: CW.W40, centerFreq0: 5190 },
+      { channelWidth: CW.W80, centerFreq0: 5210 },
+      { channelWidth: CW.W160, centerFreq0: 5250 },
+    ];
+    for (let level = -95; level <= -35; level++) {
+      let prev = null;
+      for (const width of widths) {
+        const aps = norm(scan([makeAp('00:11:22:33:44:55', 'Larga', level, 5180, { ...width, wifiStandard: 6, capabilities: SEC.wpa2 })]));
+        const r = scoreAp(aps[0], { aps, device: FLAGSHIP });
+        const id = `${level} dBm, ${aps[0].widthMHz} MHz`;
+        if (prev !== null) {
+          assert.ok(r.estMbps >= prev.estMbps, `${id}: ${r.estMbps} < ${prev.estMbps}`);
+          assert.ok(r.score >= prev.score, `${id}: nota ${r.score} < ${prev.score}`);
+          assert.ok(!r.detail.unstable || prev.detail.unstable, id);
+        }
+        assert.ok(r.detail.txWidthMHz >= 20 && r.detail.txWidthMHz <= r.detail.widthMHz, id);
+        prev = r;
+      }
+    }
+  });
+
   test('sinal inutilizável (abaixo de −80 dBm) limita a nota, por mais rápida que a conta dê', () => {
-    // 5 GHz em 80 MHz a −82 dBm: a taxa mínima do Wi-Fi 6 ainda dá dezenas de Mb/s no papel
-    const far = makeAp('00:11:22:33:44:55', 'Longe', -82, 5180, { channelWidth: CW.W80, centerFreq0: 5210, wifiStandard: 6, capabilities: SEC.wpa2 });
+    // 5 GHz em 80 MHz a −81 dBm: o Wi-Fi 6 ainda sustenta o MCS 2 em 20 MHz, dezenas de Mb/s no papel
+    const far = makeAp('00:11:22:33:44:55', 'Longe', -81, 5180, { channelWidth: CW.W80, centerFreq0: 5210, wifiStandard: 6, capabilities: SEC.wpa2 });
     const aps = norm(scan([far]));
     const r = scoreAp(aps[0], { aps, device: PHONE });
     assert.ok(r.estMbps > SPEED_GOOD_MBPS, `estMbps ${r.estMbps}`);
     assert.ok(speedScore(r.estMbps) > 60);
     assert.ok(r.score <= WEAK_SIGNAL_CAP, `nota ${r.score}`);
-    assert.equal(r.score, Math.round(signalCap(-82) * 10) / 10);
+    assert.equal(r.score, Math.round(signalCap(-81) * 10) / 10);
     assert.ok(r.cons.includes('Sinal fraco aqui'));
     assert.ok(r.warnings.some((w) => /Sinal no limite/.test(w)));
   });

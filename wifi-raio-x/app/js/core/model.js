@@ -150,16 +150,39 @@ function describeStandard(wifiStandard, occ, ie) {
 }
 
 /**
- * O Android anterior ao 13 não tem CHANNEL_WIDTH_320MHZ: um AP Wi-Fi 7 em 320 MHz chega como
- * 160 MHz. O elemento EHT Operation diz a largura de verdade e o centro do canal.
+ * Dois casos em que o Android informa uma largura menor que a do AP e os elementos do beacon
+ * dizem a verdadeira:
+ *
+ * 1. O Android anterior ao 13 não tem CHANNEL_WIDTH_320MHZ: um AP Wi-Fi 7 em 320 MHz chega como
+ *    160 MHz. O elemento EHT Operation traz a largura e o centro do canal.
+ * 2. Um AP 11ac/11ax que usa menos fluxos em 160 MHz do que em 80 MHz anuncia os 160 MHz (ou
+ *    80+80) pelo campo "Channel Center Frequency Segment 2" do HT Operation, deixando zerado o
+ *    segundo centro do VHT Operation (IEEE 802.11-2020, 9.4.2.158 e 11.38.1). O Android só lê
+ *    o VHT Operation e entrega 80 MHz.
  */
 function widenWithIes(raw, occ, ieInfo) {
   const eht = ieInfo.ehtOperation;
-  if (occ.band !== '6' || occ.widthMHz >= 320 || !isObj(eht) || eht.width !== 320) return occ;
-  const center = channelToFreq(eht.centerSeg1, '6');
-  if (center === null) return occ;
-  const wide = occupancy({ frequency: raw.frequency, channelWidth: 5, centerFreq0: center, centerFreq1: 0 });
-  return wide.widthMHz === 320 && !wide.approx ? wide : occ;
+  if (occ.band === '6' && occ.widthMHz < 320 && isObj(eht) && eht.width === 320) {
+    const center = channelToFreq(eht.centerSeg1, '6');
+    if (center === null) return occ;
+    const wide = occupancy({ frequency: raw.frequency, channelWidth: 5, centerFreq0: center, centerFreq1: 0 });
+    return wide.widthMHz === 320 && !wide.approx ? wide : occ;
+  }
+
+  const ht = ieInfo.htOperation;
+  const vht = ieInfo.vhtOperation;
+  const caps = ieInfo.vht;
+  if (occ.band !== '5' || occ.widthMHz !== 80 || occ.noncontiguous || !isObj(ht) || !isObj(vht) || !isObj(caps)) return occ;
+  if (vht.width !== 1 || vht.centerSeg1 !== 0 || !(ht.centerSeg2 > 0)) return occ;
+  // só vale para quem declara 160 MHz nas capacidades (largura cheia ou com menos fluxos)
+  if (!(caps.width160 === true || caps.extNssBw > 0)) return occ;
+  const gap = Math.abs(ht.centerSeg2 - vht.centerSeg0);
+  const center0 = channelToFreq(vht.centerSeg0, '5');
+  const center2 = channelToFreq(ht.centerSeg2, '5');
+  // 8 canais de distância = 160 MHz contíguos; mais de 16 = 80+80; o resto é reservado
+  if (center0 !== occ.centerFreq || center2 === null || !(gap === 8 || gap > 16)) return occ;
+  const wide = occupancy({ frequency: raw.frequency, channelWidth: gap === 8 ? 3 : 4, centerFreq0: center0, centerFreq1: center2 });
+  return wide.widthMHz === 160 && !wide.approx && wide.noncontiguous === (gap !== 8) ? wide : occ;
 }
 
 // Elementos de fabricante que todo roteador traz (Microsoft: WPA/WMM/WPS; Wi-Fi Alliance).

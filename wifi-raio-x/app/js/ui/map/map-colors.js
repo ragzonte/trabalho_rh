@@ -138,7 +138,7 @@ const THEMES = {
     pathCasing: '#ffffff',
     // Preenchimentos um pouco mais fechados que os do tema escuro: o fundo é claro.
     signal: ['#10b981', '#84cc16', '#f5b014', '#f97316', '#ef4444'],
-    rooms: ['#b5cff0', '#b4e0d6', '#d0c8f1', '#ecc4dc', '#efdcb4', '#b8deeb', '#dcc3ee', '#f2cbbd', '#c5d2e4', '#c4e3c8'],
+    rooms: ['#b5cff0', '#a9dccf', '#cfc5f0', '#efc2da', '#eedbae', '#9ddfe6', '#d7e2a6', '#f2cbbd', '#cbd3df', '#c4e3c8'],
   },
 };
 

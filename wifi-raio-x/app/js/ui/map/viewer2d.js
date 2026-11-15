@@ -953,7 +953,7 @@ export function createViewer2d(container, options = {}) {
       hatch.width = tile.width;
       hatch.height = tile.height;
       const hgx = hatch.getContext('2d');
-      const period = ((0.42 * clamp(prep.extent.radius / 6, 0.8, 2.2)) / cell) * k;
+      const period = ((0.23 * clamp(prep.extent.radius / 6, 0.8, 2.2)) / cell) * k;
       hgx.strokeStyle = theme.hatch;
       hgx.lineWidth = Math.max(1, period * 0.26);
       hgx.beginPath();
@@ -1208,8 +1208,8 @@ export function createViewer2d(container, options = {}) {
         ctx.strokeStyle = theme.labelHalo;
         ctx.stroke();
         markers.push({ kind: 'spot', x, y, r: 18, data: sp, floorIndex: i });
-        // o ponto que deu nome a um ambiente não repete o nome
-        if (!namesRoom(floor, sp.label)) {
+        // ponto sem nome fica só com o marcador; o que deu nome a um ambiente não repete o nome
+        if (cleanText(sp.label) && !namesRoom(floor, sp.label)) {
           labels.push({ spec: { kind: 'spot', text: sp.label }, x, y: y - 9, ax: 0.5, ay: 1, priority: 20, pick: { kind: 'spot', data: sp, floorIndex: i } });
         }
       }

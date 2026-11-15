@@ -10,6 +10,8 @@
 //   fake.heat(fake.model.networks[0].key)   HeatField[] (um por andar, na ordem de model.floors)
 //   fake.world, fake.truth          o mundo e a verdade usados
 //
+//   const real = await realMap('sobrado');                          o construtor de VERDADE (mapping/mapmodel.js) sobre um
+//                                                                   levantamento simulado e uma solução "verdade + erro"
 //   fakeBigMap({ nx: 200, ny: 200, floors: 3, pathPoints: 300 })   modelo grande e sintético (desempenho)
 //   relabel(model, ['texto 1', ...])                               troca os nomes (textos longos, emoji, hostis)
 //   HOSTILE_LABELS                                                 nomes para esses testes
@@ -236,6 +238,7 @@ export function fakeMap(worldOrId, options = {}) {
   // --- ambientes e pontos marcados: um ponto por ambiente, com o nome que o usuário deu ---
   let spotId = 0;
   let autoCount = 0;
+  let roomId = 0; // corrido entre os andares, como no construtor de verdade (o índice em `rooms` é outra coisa)
   const spots = [];
   const unnamed = options.unnamed ?? 1;
   const modelFloors = floors.map((fl, floorIndex) => {
@@ -301,7 +304,7 @@ export function fakeMap(worldOrId, options = {}) {
         near.still = true;
         spots.push({ id: spotId++, label, x: near.x, y: near.y, z: fl.z, floor: fl.floor, scans: 3 });
       }
-      return { id, label, auto: !named, cx: pole[0], cy: pole[1], areaM2: round1(a.cells * cell * cell), scans: a.scans };
+      return { id: roomId++, label, auto: !named, cx: pole[0], cy: pole[1], areaM2: round1(a.cells * cell * cell), scans: a.scans };
     });
 
     const outline = traceOutline(fl.inside, nx, ny).map((ring) => ring.map(([ix, iy]) => [round3(minX + ix * cell), round3(minY + iy * cell)]));
@@ -435,6 +438,91 @@ export function fakeMap(worldOrId, options = {}) {
   }
 
   return { model, heat, heatField: (floorIndex, key) => heat(key)[floorIndex], world, truth, survey, toMap, toWorld };
+}
+
+/**
+ * O construtor de verdade sobre um levantamento simulado: a caminhada marca um ponto por
+ * cômodo, e a "solução" é a verdade com erro suave (o que um bom solucionador entrega).
+ * Assíncrono porque carrega mapping/mapmodel.js na hora (os testes do visualizador não
+ * dependem dele para o resto).
+ *
+ * @param {string|object} worldOrId
+ * @param {{seed?:number, noiseM?:number, progress?:number, lengthM?:number}} [options]
+ * @returns {Promise<{model:object, heat:(key:string)=>object[], world:object, survey:object, solution:object}>}
+ */
+export async function realMap(worldOrId, options = {}) {
+  const { buildMap, heatField } = await import('../../app/js/mapping/mapmodel.js');
+  const seed = options.seed ?? 1;
+  const world = typeof worldOrId === 'string' ? presetWorld(worldOrId, seed) : worldOrId;
+  const rng = createRng('real-map', world.key ?? seed, seed);
+  const noiseM = options.noiseM ?? 0.7;
+  const area = world.bounds.width * world.bounds.height;
+  const walk = planWalk(world, { kind: 'tour', seed, minLengthM: options.lengthM ?? clamp(area * 1.9 * world.floors, 55, 420) });
+  const spotsPlan = planWalk(world, { kind: 'spots', seed });
+  // primeiro os pontos marcados (o usuário batiza os cômodos), depois a volta pela casa
+  const plan = { ...spotsPlan, steps: [...spotsPlan.steps], lengthM: spotsPlan.lengthM };
+  const a = simulateSurvey(world, plan, { seed, scanIntervalS: 3.5 });
+  const b = simulateSurvey(world, walk, { seed: seed + 1, scanIntervalS: 3.5 });
+  // junta os dois levantamentos num só (o segundo continua no tempo do primeiro)
+  const offset = a.survey.scans.length ? a.survey.scans[a.survey.scans.length - 1].t + 4 : 0;
+  const scans = [...a.survey.scans, ...b.survey.scans.map((sc) => ({ ...sc, t: sc.t + offset, floor: sc.floor + b.truth.startFloor - a.truth.startFloor }))];
+  const truthPoints = [...a.truth.points, ...b.truth.points];
+  const count = Math.max(4, Math.round(scans.length * clamp(options.progress ?? 1, 0, 1)));
+  const survey = { version: 1, scans: scans.slice(0, count), aps: { ...b.survey.aps, ...a.survey.aps } };
+
+  const waves = Array.from({ length: 4 }, () => ({ kx: rng.float(-1, 1) / rng.float(4, 9), ky: rng.float(-1, 1) / rng.float(4, 9), ph: rng.float(0, 6.28), ax: rng.gaussian(0, 0.55), ay: rng.gaussian(0, 0.55) }));
+  const warp = (x, y) => {
+    let dx = 0;
+    let dy = 0;
+    for (const w of waves) {
+      const sn = Math.sin((x * w.kx + y * w.ky) * Math.PI * 2 + w.ph);
+      dx += w.ax * sn;
+      dy += w.ay * sn;
+    }
+    return [dx * noiseM, dy * noiseM];
+  };
+  const raw = truthPoints.slice(0, count).map((p) => {
+    const [dx, dy] = warp(p.x, p.y);
+    return [p.x + dx + rng.gaussian(0, noiseM * 0.28), p.y + dy + rng.gaussian(0, noiseM * 0.28)];
+  });
+  let mx = 0;
+  let my = 0;
+  for (const p of raw) {
+    mx += p[0] / raw.length;
+    my += p[1] / raw.length;
+  }
+  let sxx = 0;
+  let sxy = 0;
+  let syy = 0;
+  for (const p of raw) {
+    sxx += (p[0] - mx) ** 2;
+    sxy += (p[0] - mx) * (p[1] - my);
+    syy += (p[1] - my) ** 2;
+  }
+  const angle = -0.5 * Math.atan2(2 * sxy, sxx - syy);
+  const toMap = (x, y) => [(x - mx) * Math.cos(angle) - (y - my) * Math.sin(angle), (x - mx) * Math.sin(angle) + (y - my) * Math.cos(angle)];
+  const solution = {
+    points: raw.map((p, i) => {
+      const [x, y] = toMap(p[0], p[1]);
+      return { x, y, z: survey.scans[i].floor * FLOOR_HEIGHT, conf: clamp(0.55 + 0.45 * Math.sin(i * 0.37) * Math.sin(i * 0.11 + 1.3) + (survey.scans[i].still ? 0.3 : 0), 0.15, 1) };
+    }),
+    aps: {},
+    scaleConf: 0.6,
+  };
+  const start = a.truth.startFloor;
+  for (const ap of world.aps) {
+    if (!survey.aps[ap.bssid]) continue;
+    const far = Math.hypot(ap.x - mx, ap.y - my);
+    const err = ap.own ? noiseM * 0.6 : noiseM * 1.2 + far * 0.18;
+    // todas as redes do mesmo aparelho ficam no mesmo lugar
+    const dev = createRng('real-ap', world.key ?? seed, ap.device);
+    const [wx, wy] = warp(ap.x, ap.y);
+    const [x, y] = toMap(ap.x + wx + dev.gaussian(0, err), ap.y + wy + dev.gaussian(0, err));
+    solution.aps[ap.bssid] = { x, y, z: ap.z - start * FLOOR_HEIGHT, p0: ap.p0, n: ap.n, conf: ap.own ? 0.8 : clamp(0.6 - far * 0.03, 0.08, 0.6) };
+  }
+  const model = buildMap(survey, solution, { debug: true, own: world.aps.filter((ap) => ap.own).map((ap) => ap.bssid) });
+  const heat = (key) => model.floors.map((_, i) => heatField(model, i, key));
+  return { model, heat, world, survey, solution };
 }
 
 // ---------------------------------------------------------------------------

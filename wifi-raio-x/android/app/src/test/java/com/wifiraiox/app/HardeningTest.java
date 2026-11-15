@@ -191,6 +191,97 @@ public class HardeningTest extends AllSdks {
         }
     }
 
+    /** Conexão que fica parada esperando o servidor até alguém fechá-la, e anota quem fechou. */
+    private static final class StuckConnection extends HttpURLConnection {
+        final CountDownLatch waiting = new CountDownLatch(1);
+        final CountDownLatch closed = new CountDownLatch(1);
+        final AtomicReference<Thread> closedBy = new AtomicReference<>(); // quem fechou primeiro
+
+        StuckConnection(java.net.URL url) {
+            super(url);
+        }
+
+        @Override
+        public void disconnect() {
+            closedBy.compareAndSet(null, Thread.currentThread());
+            closed.countDown();
+        }
+
+        @Override
+        public boolean usingProxy() {
+            return false;
+        }
+
+        @Override
+        public void connect() {
+        }
+
+        @Override
+        public int getResponseCode() throws java.io.IOException {
+            waiting.countDown();
+            // como a leitura de um socket de verdade: interromper a thread não a solta, só fechar a conexão
+            boolean interrupted = false;
+            while (true) {
+                try {
+                    closed.await();
+                    break;
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+            throw new java.io.IOException("conexão fechada");
+        }
+    }
+
+    @Test
+    public void cancellingASpeedTestFromTheUiThreadClosesConnectionsElsewhere() throws Exception {
+        // Fechar uma conexão https na thread da interface lança NetworkOnMainThreadException no celular
+        // (e a conexão continuaria aberta). É dali que vêm o encerramento da tela e a recarga da página.
+        final AtomicReference<StuckConnection> opened = new AtomicReference<>();
+        final SpeedTester tester = new SpeedTester("https://exemplo.invalid", network -> url -> {
+            StuckConnection c = new StuckConnection(url);
+            opened.compareAndSet(null, c);
+            return c;
+        }, null);
+        final AtomicReference<JSONObject> result = new AtomicReference<>();
+        Thread runner = new Thread(() -> result.set(tester.run("light", ShadowNetwork.newInstance(9), progress -> { })));
+        runner.start();
+        for (int i = 0; i < 500 && opened.get() == null; i++) Thread.sleep(10);
+        StuckConnection stuck = opened.get();
+        assertNotNull(stuck);
+        assertTrue(stuck.waiting.await(5, TimeUnit.SECONDS));
+
+        assertTrue("o teste roda na thread da interface", Sys.onMain());
+        tester.cancel();
+        assertTrue("a conexão parada é derrubada", stuck.closed.await(5, TimeUnit.SECONDS));
+        assertTrue("mas não pela thread da interface", stuck.closedBy.get() != Thread.currentThread());
+        assertEquals("wrx-speed-cancel", stuck.closedBy.get().getName());
+        runner.join(5000);
+        assertFalse(runner.isAlive());
+        assertEquals(false, result.get().get("ok"));
+        assertEquals("cancelled", result.get().get("error"));
+
+        // de uma thread de trabalho (ex.: a página pedindo "cancelar") fecha ali mesmo, sem thread extra
+        final AtomicReference<StuckConnection> second = new AtomicReference<>();
+        final SpeedTester other = new SpeedTester("https://exemplo.invalid", network -> url -> {
+            StuckConnection c = new StuckConnection(url);
+            second.compareAndSet(null, c);
+            return c;
+        }, null);
+        Thread runner2 = new Thread(() -> other.run("light", ShadowNetwork.newInstance(9), progress -> { }));
+        runner2.start();
+        for (int i = 0; i < 500 && second.get() == null; i++) Thread.sleep(10);
+        assertTrue(second.get().waiting.await(5, TimeUnit.SECONDS));
+        Thread canceller = new Thread(other::cancel, "cancelador");
+        canceller.start();
+        canceller.join(5000);
+        assertTrue(second.get().closed.await(5, TimeUnit.SECONDS));
+        assertEquals("cancelador", second.get().closedBy.get().getName());
+        runner2.join(5000);
+        assertNull(crashed.get());
+    }
+
     @Test
     public void aPingProbeThatBlowsUpResolvesTheCallWithAnError() throws Exception {
         Pinger pinger = new Pinger("/nao/existe", null, host -> InetAddress.getByAddress(new byte[] {10, 0, 0, 1}),

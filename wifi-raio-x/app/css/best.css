@@ -145,6 +145,12 @@
   border-color: var(--accent-line);
 }
 
+.best-hero--warning {
+  --hero: var(--warning);
+  --hero-soft: var(--warning-soft);
+  border-color: var(--warning-line);
+}
+
 .best-hero__main {
   display: flex;
   flex-direction: column;
@@ -262,7 +268,7 @@
 
 .best-side {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--sp-3);
   min-width: 0;
   padding: 10px 12px;
@@ -341,6 +347,11 @@
   font-size: var(--fs-xs);
   font-weight: 600;
   line-height: 16px;
+}
+
+/* lado único (sem conexão): anel, dados e seta alinhados pelo meio */
+.best-side--wide {
+  align-items: center;
 }
 
 .best-side__chev {
@@ -454,8 +465,23 @@
   white-space: nowrap;
 }
 
+/* O nome pode ocupar duas linhas: num ranking, "Casa" e "Casa-5G" não podem virar "Cas…". */
 .best-row__name {
   grid-area: name;
+  align-items: flex-start;
+}
+
+.best-row__name > .ssid {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.best-row__name > .icon {
+  margin-top: 3px;
 }
 
 .best-row__speed {
@@ -539,17 +565,11 @@
   overflow-wrap: anywhere;
 }
 
-/* na lista o aviso ocupa no máximo duas linhas; a frase inteira está no painel */
-.best-row .best-note--warn {
-  flex-basis: 100%;
-}
-
-.best-row .best-note--warn .best-note__text {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  overflow: hidden;
+/* vários avisos num cartão só, um por parágrafo */
+.best-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .best-more {
@@ -684,6 +704,12 @@
 /* ------------------------------------------------------------------------ */
 /* 5. Painéis                                                                */
 /* ------------------------------------------------------------------------ */
+
+/* o corpo do painel é uma coluna flexível com altura fixa: sem isto, um cartão com
+   overflow escondido (lista) encolhe até sumir quando o conteúdo passa da altura */
+.best-sheet > .sheet__body > * {
+  flex-shrink: 0;
+}
 
 .best-sheet-title {
   display: block;

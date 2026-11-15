@@ -55,7 +55,8 @@ const TIP_ID = 'best-mine';
  */
 export function scoreLook(score, usable = true) {
   if (!usable) return { step: 5, word: 'Sem uso' };
-  const value = isNum(score) ? score : 0;
+  // a palavra acompanha o número que aparece na tela (arredondado): 69,6 mostra "70" e é "Ótima"
+  const value = isNum(score) ? Math.round(score) : 0;
   if (value >= 85) return { step: 1, word: 'Excelente' };
   if (value >= 70) return { step: 1, word: 'Ótima' };
   if (value >= 55) return { step: 2, word: 'Boa' };
@@ -116,17 +117,32 @@ export function visibleRows(ranking, { mineOnly = false, expanded = false, limit
 
 const SPEED_PHRASE = /\b[MG]b\/s\b/;
 
+/** Um aviso em poucas palavras: o que vem antes dos dois-pontos ("Sinal no limite: a conexão…" -> "Sinal no limite"). */
+export function shortWarning(text) {
+  const value = typeof text === 'string' ? text.trim() : '';
+  const cut = value.indexOf(': ');
+  return (cut > 0 ? value.slice(0, cut) : value).replace(/\.$/, '');
+}
+
 /**
- * Prós e contras curtos para a linha do ranking. As frases que só repetem a velocidade ficam
- * de fora: ela já aparece em destaque ao lado.
- * @returns {{pros: string[], cons: string[]}}
+ * O que cabe na linha do ranking: no máximo `max` frases, entre o aviso (só o começo; a frase
+ * inteira fica no painel), os contras e os prós, nessa ordem de prioridade. As frases que só
+ * repetem a velocidade ficam de fora: ela já aparece em destaque ao lado.
+ * @returns {{pros: string[], cons: string[], warning: string|null, moreWarnings: number}}
  */
-export function rowNotes(row, { pros = 2, cons = 2 } = {}) {
-  const pick = (list, max) =>
-    (Array.isArray(list) ? list : [])
-      .filter((t) => typeof t === 'string' && t !== '' && !SPEED_PHRASE.test(t))
-      .slice(0, max);
-  return { pros: pick(row && row.pros, pros), cons: pick(row && row.cons, cons) };
+export function rowNotes(row, { max = 3 } = {}) {
+  const clean = (list) => (Array.isArray(list) ? list : []).filter((t) => typeof t === 'string' && t.trim() !== '');
+  const warnings = clean(row && row.warnings);
+  const warning = warnings.length ? shortWarning(warnings[0]) : null;
+  let left = Math.max(0, max - (warning ? 1 : 0));
+  const cons = clean(row && row.cons)
+    .filter((t) => !SPEED_PHRASE.test(t))
+    .slice(0, Math.min(2, left));
+  left -= cons.length;
+  const pros = clean(row && row.pros)
+    .filter((t) => !SPEED_PHRASE.test(t))
+    .slice(0, Math.min(2, left));
+  return { pros, cons, warning, moreWarnings: Math.max(0, warnings.length - 1) };
 }
 
 const partTone = (value) => (value >= 70 ? 'good' : value >= 40 ? 'warning' : 'critical');
@@ -153,8 +169,7 @@ function congestionText(detail) {
     bits.push('Nenhuma outra rede disputa este canal.');
   }
   if (isNum(detail.stations)) bits.push(`O roteador informa ${plural(detail.stations, 'aparelho conectado', 'aparelhos conectados')}.`);
-  if (isNum(detail.utilization)) bits.push(`Segundo ele, o canal fica ocupado ${fmtPct(detail.utilization * 100)} do tempo.`);
-  if (!bits.length) bits.push('Quanto do tempo o canal fica livre para o seu celular.');
+  if (isNum(detail.utilization)) bits.push(`${isNum(detail.stations) ? 'Segundo ele' : 'Segundo o roteador'}, o canal fica ocupado ${fmtPct(detail.utilization * 100)} do tempo.`);
   return bits.join(' ');
 }
 
@@ -187,7 +202,14 @@ export function scoreParts(row) {
       isNum(detail.linkMbps) ? `até ${estText(detail.linkMbps)}` : 'sem estimativa',
       'O que este sinal sustenta entre o roteador e o seu celular, com o canal só para você.',
     ),
-    make('congestion', 'users', 'Canal livre', parts.congestion, detail.share == null ? 'sem estimativa' : `${fmtPct(share)} do tempo · ${crowd}`, congestionText(detail)),
+    make(
+      'congestion',
+      'users',
+      'Canal livre',
+      parts.congestion,
+      detail.share == null ? 'sem estimativa' : crowd,
+      [detail.share == null ? 'Quanto do tempo o canal fica livre para o seu celular.' : `Sobra cerca de ${fmtPct(share)} do tempo do canal para o seu celular.`, congestionText(detail)].filter(Boolean).join(' '),
+    ),
     make(
       'security',
       'lock',
@@ -262,8 +284,10 @@ export function diagSummary(insights) {
       text: `${plural(problems.length, 'ponto de atenção', 'pontos de atenção')} no diagnóstico`,
     };
   }
-  if (good) return { tone: 'good', icon: 'check-circle', text: 'Diagnóstico: tudo certo com a conexão' };
-  if (notes.length) return { tone: 'info', icon: 'info', text: `Diagnóstico: ${plural(notes.length, 'observação', 'observações')}` };
+  if (good) return { tone: 'good', icon: 'check-circle', text: 'Diagnóstico: tudo certo' };
+  // "você não está conectado" a própria recomendação já diz
+  const extra = notes.filter((i) => i.id !== 'not-connected');
+  if (extra.length) return { tone: 'info', icon: 'info', text: `Diagnóstico: ${plural(extra.length, 'observação', 'observações')}` };
   return null;
 }
 
@@ -421,6 +445,22 @@ function nameLabel(item) {
   return ssidLabel(item.ssid);
 }
 
+/**
+ * Nome que pode quebrar de linha depois de "_", "." e "/" (nomes como "CLARO_5G4F1D2A" não têm
+ * espaço). O texto continua idêntico: a quebra é um <wbr>, que não é texto.
+ */
+function wrappingName(item) {
+  if (item.hidden || !item.ssid) return h('span.ssid.ssid--hidden', null, '(rede oculta)');
+  const kids = [];
+  displaySsid(item.ssid)
+    .split(/(?<=[_./])/)
+    .forEach((part, i) => {
+      if (i) kids.push(h('wbr'));
+      kids.push(part);
+    });
+  return h('span.ssid', { dir: 'auto' }, kids);
+}
+
 const plainName = (item) => (item.hidden || !item.ssid ? '(rede oculta)' : displaySsid(item.ssid));
 
 /** "● 5 GHz · canal 44" como itens de uma linha que corta o que não couber. */
@@ -437,6 +477,9 @@ function whereItems(ap) {
 
 const HERO_LOOK = {
   ok: { tone: 'good', icon: 'check-circle' },
+  // a melhor opção, mas nem ela está boa: o cartão não comemora
+  'ok-fair': { tone: 'neutral', icon: 'check-circle' },
+  'ok-weak': { tone: 'warning', icon: 'warning' },
   switch: { tone: 'accent', icon: 'bolt' },
   connect: { tone: 'accent', icon: 'wifi-off' },
   offline: { tone: 'neutral', icon: 'wifi-off' },
@@ -465,8 +508,9 @@ function sideTile(item, { label, target = false, gain = null, ring = false, onCl
 function heroCard(view, on) {
   const { advice, summary, ageMs, throttled } = view;
   const kind = heroKind(advice);
-  const look = HERO_LOOK[kind];
   const { current, target, alternative } = advice;
+  const okLook = kind === 'ok' && current ? scoreLook(current.score) : null;
+  const look = HERO_LOOK[okLook && okLook.step >= 4 ? 'ok-weak' : okLook && okLook.step === 3 ? 'ok-fair' : kind];
 
   let extra = null;
   if (kind === 'switch' && current && target) {
@@ -484,13 +528,13 @@ function heroCard(view, on) {
   const actions = [];
   if (kind === 'switch' || kind === 'connect') actions.push(button('Abrir o Wi-Fi do celular', { variant: 'primary', icon: 'external', block: true, onClick: on.openWifi }));
   if (kind === 'offline') actions.push(button('Abrir o Wi-Fi do celular', { variant: 'secondary', icon: 'external', block: true, onClick: on.openWifi }));
-  if (kind === 'unknown') actions.push(button('Buscar redes agora', { variant: 'secondary', icon: 'refresh', block: true, onClick: on.scanNow }));
+  // sem rede nenhuma na lista, quem oferece a busca é o aviso do ranking (um botão só)
+  if (kind === 'unknown' && view.hasRanking) actions.push(button('Buscar redes agora', { variant: 'secondary', icon: 'refresh', block: true, onClick: on.scanNow }));
   if (kind === 'ok' && alternative && alternative.ssid) {
     actions.push(button('Essa rede é minha', { variant: 'secondary', icon: 'star', block: true, onClick: () => on.markMine(alternative.ssid) }));
   }
 
   const stale = isNum(ageMs) && ageMs > STALE_NOTE_MS;
-  const okLook = kind === 'ok' && current ? scoreLook(current.score) : null;
 
   return h(
     'section.card.card--flush.best-hero',
@@ -502,7 +546,7 @@ function heroCard(view, on) {
         'div.best-hero__top',
         null,
         h('span.best-hero__icon', null, icon(look.icon, { size: 26 })),
-        h('div.best-hero__titles', null, h('span.best-hero__eyebrow', null, 'Recomendação para este ponto'), h('h2.best-hero__headline', null, advice.headline)),
+        h('div.best-hero__titles', null, h('span.best-hero__eyebrow', null, 'Recomendação neste ponto'), h('h2.best-hero__headline', null, advice.headline)),
         okLook
           ? h(
               'button.best-hero__score',
@@ -565,8 +609,6 @@ function rankRow(row, { onOpen }) {
   if (row.security) where.push(securityBadge(row.security, { plain: true }));
   if (best.stale && isNum(best.ageMs)) where.push(h('span', null, `visto ${fmtAgo(best.ageMs)}`));
 
-  const warnings = Array.isArray(row.warnings) ? row.warnings.filter((w) => typeof w === 'string' && w) : [];
-
   return h(
     'button.row.row--tappable.best-row',
     {
@@ -577,16 +619,16 @@ function rankRow(row, { onOpen }) {
       onClick: () => onOpen(row.key),
     },
     h('span.best-row__ring', null, scoreRing(row.score, { size: 44, usable }), h('span.best-row__word', { 'aria-hidden': 'true' }, look.word)),
-    h('span.row__title.best-row__name', null, nameLabel(row), row.favorite ? icon('star-filled', { size: 16, label: 'Minha rede', class: 'accent' }) : null),
+    h('span.row__title.best-row__name', null, wrappingName(row), row.favorite ? icon('star-filled', { size: 16, label: 'Minha rede', class: 'accent' }) : null),
     h('span.best-row__speed', null, usable ? estText(row.estMbps) : NO_VALUE),
     h('span.row__sub.row__sub--clip.best-row__where', null, where),
-    notes.pros.length || notes.cons.length || warnings.length
+    notes.pros.length || notes.cons.length || notes.warning
       ? h(
           'span.best-row__notes',
           null,
           notes.pros.map((t) => noteItem('pro', t)),
           notes.cons.map((t) => noteItem('con', t)),
-          warnings.length ? noteItem('warn', warnings.length > 1 ? `${warnings[0]} (+${warnings.length - 1})` : warnings[0]) : null,
+          notes.warning ? noteItem('warn', notes.moreWarnings ? `${notes.warning} (+${notes.moreWarnings})` : notes.warning) : null,
         )
       : null,
   );
@@ -669,7 +711,7 @@ const ACTION_ICON = { 'open-channels': 'channels', 'open-map': 'cube', 'open-set
 function insightActions(insight, on) {
   const out = [];
   const action = insight.action;
-  if (action && action.kind && action.kind !== 'none') {
+  if (action && action.kind && action.kind !== 'none' && !(action.kind === 'open-best' && on.hasRanking && !on.hasRanking())) {
     out.push(button(action.label, { variant: 'secondary', small: true, icon: ACTION_ICON[action.kind], dataset: { action: action.kind }, onClick: () => on.runAction(insight) }));
   }
   // o aviso do limite de buscas não traz atalho; o passo a passo ilustrado mora aqui
@@ -817,7 +859,7 @@ function scoreSheetBody(row, { gone, favorite, on }) {
       row.mesh ? badge('Vários roteadores', { outline: true, title: 'Mesh, repetidor ou mais de um ponto de acesso com o mesmo nome' }) : null,
     ),
     gone ? banner({ key: 'gone', tone: 'warning', icon: 'clock', title: 'Esta rede saiu do alcance', text: 'Ela não aparece mais nas buscas. Os números abaixo são os da última vez em que foi ouvida.' }) : null,
-    warnings.map((text, i) => banner({ key: `warn-${i}`, tone: 'warning', text })),
+    warnings.length ? banner({ key: 'warnings', tone: 'warning', text: h('span.best-warnings', null, warnings.map((text) => h('span', null, text))) }) : null,
     h('section.card.best-parts', { key: 'parts' }, h('h3.card__title', null, 'Do que a nota é feita'), scoreParts(row).map(partRow)),
     h(
       'section.card.best-why',
@@ -834,7 +876,7 @@ function scoreSheetBody(row, { gone, favorite, on }) {
           switchRow({
             icon: favorite ? 'star-filled' : 'star',
             title: 'Esta rede é minha',
-            subtitle: favorite ? 'As recomendações contam com ela.' : 'Marque se você tem a senha: as recomendações passam a contar com ela.',
+            subtitle: favorite ? 'As recomendações contam com ela.' : 'Marque se você tem a senha dela.',
             checked: favorite,
             onChange: (checked) => on.setFavorite(row.ssid, checked),
           }),
@@ -866,7 +908,6 @@ export async function mount(root, ctx) {
 
   let dead = false;
   let data = null; // {ranking, advice, insights, connected, band}
-  let queued = false;
   const panels = new Set(); // painéis abertos por esta tela: {panel, render}
 
   const el = {
@@ -982,7 +1023,7 @@ export async function mount(root, ctx) {
       tall: true,
       footer:
         !last.connected && !last.hidden && !last.p2p
-          ? [button('Abrir o Wi-Fi do celular para conectar', { variant: 'primary', icon: 'external', wrap: true, onClick: openWifi })]
+          ? [button('Abrir o Wi-Fi do celular', { variant: 'primary', icon: 'external', onClick: openWifi })]
           : undefined,
       onClose: () => untrack(),
     });
@@ -1012,6 +1053,9 @@ export async function mount(root, ctx) {
       onClose: () => untrack(),
     });
     panel.el.classList.add('best-sheet', 'best-picker');
+    // marcadas que não estão ao alcance: continuam na lista enquanto o painel estiver aberto,
+    // mesmo depois de desmarcadas (um toque errado tem de poder ser desfeito)
+    const sticky = new Set();
     const renderPanel = () => {
       if (!panel.isOpen() || !data) return;
       const favorites = store.get().favorites;
@@ -1025,7 +1069,8 @@ export async function mount(root, ctx) {
       }
       const weight = (row) => (row.connected ? 2 : favorites.has(row.ssid) ? 1 : 0);
       named.sort((a, b) => weight(b) - weight(a));
-      const away = [...favorites].filter((ssid) => !seen.has(ssid)).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+      for (const ssid of favorites) if (!seen.has(ssid)) sticky.add(ssid);
+      const away = [...sticky].filter((ssid) => !seen.has(ssid)).sort((a, b) => a.localeCompare(b, 'pt-BR'));
 
       const rowFor = (row) => {
         const usable = row.detail && row.detail.usable === true;
@@ -1059,8 +1104,8 @@ export async function mount(root, ctx) {
               away.map((ssid) =>
                 h(
                   'div.best-pick',
-                  { key: `pick-${ssid}`, dataset: { ssid, on: '1' } },
-                  switchRow({ title: ssidLabel(ssid), subtitle: 'Não apareceu na última busca', checked: true, onChange: (checked) => setFavorite(ssid, checked) }),
+                  { key: `pick-${ssid}`, dataset: { ssid, on: favorites.has(ssid) ? '1' : '0' } },
+                  switchRow({ title: ssidLabel(ssid), subtitle: 'Não apareceu na última busca', checked: favorites.has(ssid), onChange: (checked) => setFavorite(ssid, checked) }),
                 ),
               ),
             )
@@ -1119,7 +1164,7 @@ export async function mount(root, ctx) {
 
   const heroHandlers = { openRow, openWifi, scanNow, markMine, jumpToDiag: () => scrollTo(el.diag) };
   const rankHandlers = { openRow, openPicker, openHow, scanNow, setMineOnly, setExpanded };
-  const diagHandlers = { runAction, toggleNote, openThrottle: () => openThrottleHelp(ctx) };
+  const diagHandlers = { runAction, toggleNote, openThrottle: () => openThrottleHelp(ctx), hasRanking: () => !!data && data.ranking.length > 0 };
 
   function drawHero() {
     const state = store.get();
@@ -1132,6 +1177,7 @@ export async function mount(root, ctx) {
       heroCard(
         {
           advice: data.advice,
+          hasRanking: data.ranking.length > 0,
           summary: diagSummary(data.insights),
           ageMs: state.scan.dataAt ? Date.now() - state.scan.dataAt : null,
           throttled: state.loop.throttled === true,
@@ -1191,7 +1237,6 @@ export async function mount(root, ctx) {
   }
 
   function refresh() {
-    queued = false;
     if (dead) return;
     data = analyse(store.get());
     drawLoading();
@@ -1202,21 +1247,19 @@ export async function mount(root, ctx) {
     for (const entry of [...panels]) entry.render();
   }
 
-  /** Várias partes do estado mudam na mesma ação (varredura + conexão): a análise roda uma vez só. */
-  function schedule() {
-    if (queued || dead) return;
-    queued = true;
-    queueMicrotask(refresh);
-  }
-
   // Uma análise por varredura: `aps` é trocado a cada varredura (e quando a conexão muda de
   // BSSID ou uma rede é marcada); as leituras de sinal a cada segundo não passam por aqui.
-  store.subscribe((state) => state.aps, schedule);
-  store.subscribe((state) => state.scan.seq, schedule);
-  store.subscribe((state) => (state.connection && state.connection.connected ? `on|${state.connection.bssid || ''}` : 'off'), schedule);
-  store.subscribe((state) => state.favorites, schedule);
-  store.subscribe((state) => state.info, schedule);
-  store.subscribe((state) => `${state.loop.throttled}|${state.status ? state.status.throttled : ''}`, schedule);
+  // Tudo num seletor só: quando várias partes mudam na mesma ação, a análise roda uma vez.
+  const inputs = (state) => [
+    state.aps,
+    state.scan.seq,
+    state.connection && state.connection.connected ? `on|${state.connection.bssid || ''}` : 'off',
+    state.favorites,
+    state.info,
+    state.loop.throttled === true || (!!state.status && state.status.throttled === true),
+  ];
+  const sameInputs = (a, b) => a.length === b.length && a.every((x, i) => Object.is(x, b[i]));
+  store.subscribe(inputs, refresh, { equal: sameInputs });
   store.subscribe((state) => state.settings.tipsDismissed, drawTip);
 
   // a idade dos dados continua andando entre uma varredura e outra

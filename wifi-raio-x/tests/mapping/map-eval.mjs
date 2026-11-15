@@ -3,7 +3,7 @@
 //
 //   node tests/mapping/map-eval.mjs [--truth | --solver <módulo>] [--export nome] [--only <trecho>]
 //        [--json] [--svg <pasta>] [--jobs N] [--budget-ms N] [--cache <pasta>] [--noise <m>]
-//        [--no-labels] [--own track|all] [--param chave=valor ...]
+//        [--no-labels] [--own track|all] [--describe] [--param chave=valor ...]
 //
 // Para cada cenário de desenvolvimento (os mesmos de harness.mjs) monta o levantamento, obtém
 // uma solução, chama buildMap e compara o mapa com a planta de verdade, depois do MESMO
@@ -474,7 +474,7 @@ export function renderMapSvg(scenario, evaluated, result) {
   const panelH = (b.height + 2 * margin) * scale;
   const top = 64;
   const rowGap = 26;
-  const legendH = 70;
+  const legendH = 86;
   const W = Math.max(panelW * world.floors + 24, 1040);
   const H = top + 2 * panelH + rowGap + legendH;
   const X = (x, f) => 12 + f * panelW + (x - b.minX + margin) * scale;
@@ -616,7 +616,7 @@ export function renderMapSvg(scenario, evaluated, result) {
     out.push(`<rect x="${lx}" y="${ly2 - 6}" width="14" height="12" fill="${bin.color}" stroke="${INK.truth}" stroke-width="0.5"/>`, `<text x="${lx + 20}" y="${ly2 + 4}" font-size="11" fill="${INK.text2}">${bin.label}</text>`);
     lx += 34 + bin.label.length * 6;
   }
-  out.push(`<text x="${lx + 8}" y="${ly2 + 4}" font-size="11" fill="${INK.muted}">cores dos ambientes só separam vizinhos; o nome em negrito é o do mapa, em itálico o cômodo real</text>`);
+  out.push(`<text x="12" y="${ly2 + 22}" font-size="11" fill="${INK.muted}">as cores dos ambientes só separam vizinhos · nome em negrito = ambiente do mapa · nome em itálico = cômodo real</text>`);
   out.push('</svg>');
   return out.join('\n');
 }

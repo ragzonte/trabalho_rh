@@ -26,10 +26,10 @@ const TUNE = {
   maxSpanM: 150,
   // --- área ---
   areaH: 0.55, // núcleo da densidade do caminho (m)
-  areaR: 0.9, // meia-largura do "corpo" de uma passada isolada (m)
+  areaR: 1.0, // meia-largura do "corpo" de uma passada isolada (m)
   pointR: 0.6, // quem fez uma varredura num lugar ocupou pelo menos este raio (m)
   pointW: 0.6, // peso de uma varredura, em metros de caminho
-  closeR: 1.0, // fecha vãos mais estreitos que o dobro disto (m)
+  closeR: 1.2, // fecha vãos mais estreitos que o dobro disto (m)
   holeM2: 10, // buraco menor que isto é miolo de cômodo, não pátio
   speckM2: 1.5,
   bridgeR: 0.4, // meia-largura do corredor que mantém ligado o que foi andado
@@ -43,6 +43,7 @@ const TUNE = {
   roomInitM2: 4, // 1ª etapa: pedaços deste tamanho
   roomEdgeHi: 6, // acima do número típico de ambientes: só fronteira mais forte que isto (x a diferença de dentro) separa
   roomEdgeLo: 1.8, // abaixo dele: só fronteira mais fraca que isto junta
+  roomSeedK: 0.5, // peso da distância às marcas quando ambientes com nome disputam um pedaço
   roomM2Lo: 8, // no máximo um ambiente a cada 8 m²...
   roomM2Hi: 24, // ...e no mínimo um a cada 24 m²
   roomKnn: 5,
@@ -342,7 +343,8 @@ function makeGrid(ctx, opts, tune) {
     minY = Math.max(minY, my - tune.maxSpanM / 2);
     maxY = Math.min(maxY, my + tune.maxSpanM / 2);
   }
-  const m = tune.marginM;
+  // Margem: cabe a dilatação do fechamento inteira, com folga.
+  const m = Math.max(tune.marginM, tune.areaR + tune.closeR + 0.6);
   const w = maxX - minX + 2 * m;
   const h = maxY - minY + 2 * m;
   if ((w / cell) * (h / cell) > tune.maxCells) cell = clamp(Math.ceil(Math.sqrt((w * h) / tune.maxCells) / 0.05) * 0.05, cell, 0.5);
@@ -378,6 +380,29 @@ function forCellsNear(grid, x, y, radius, fn) {
       const dx = minX + (i + 0.5) * cell - x;
       const d2 = dx * dx + dy * dy;
       if (d2 <= r2) fn(j * nx + i, d2);
+    }
+  }
+}
+
+// Espalha um núcleo gaussiano em volta de (x, y): soma (max = false) ou máximo (max = true).
+// É o laço mais quente do construtor, por isso não usa forCellsNear (sem função por chamada).
+function splat(grid, out, x, y, radius, w, twoS2, max) {
+  const { cell, nx, ny, minX, minY } = grid;
+  const i0 = Math.max(0, Math.floor((x - radius - minX) / cell));
+  const i1 = Math.min(nx - 1, Math.floor((x + radius - minX) / cell));
+  const j0 = Math.max(0, Math.floor((y - radius - minY) / cell));
+  const j1 = Math.min(ny - 1, Math.floor((y + radius - minY) / cell));
+  const r2 = radius * radius;
+  for (let j = j0; j <= j1; j++) {
+    const dy = minY + (j + 0.5) * cell - y;
+    for (let i = i0; i <= i1; i++) {
+      const dx = minX + (i + 0.5) * cell - x;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > r2) continue;
+      const v = w * Math.exp(-d2 / twoS2);
+      const c = j * nx + i;
+      if (!max) out[c] += v;
+      else if (v > out[c]) out[c] = v;
     }
   }
 }
@@ -482,14 +507,9 @@ function buildArea(ctx, grid, members) {
   const conf = new Float32Array(size);
   const h2 = 2 * tune.areaH * tune.areaH;
   const c2 = 2 * tune.confS * tune.confS;
-  const splat = (x, y, wDens, wConf) => {
-    if (wDens > 0) forCellsNear(grid, x, y, 3 * tune.areaH, (c, d2) => (dens[c] += wDens * Math.exp(-d2 / h2)));
-    if (wConf > 0) {
-      forCellsNear(grid, x, y, 2.6 * tune.confS, (c, d2) => {
-        const v = wConf * Math.exp(-d2 / c2);
-        if (v > conf[c]) conf[c] = v;
-      });
-    }
+  const mark = (x, y, wDens, wConf) => {
+    if (wDens > 0) splat(grid, dens, x, y, 3 * tune.areaH, wDens, h2, false);
+    if (wConf > 0) splat(grid, conf, x, y, 2.6 * tune.confS, wConf, c2, true);
   };
 
   // Densidade do caminho: cada varredura e cada metro andado entre duas varreduras seguidas.
@@ -497,7 +517,7 @@ function buildArea(ctx, grid, members) {
   const links = [];
   for (let m = 0; m < members.length; m++) {
     const k = members[m];
-    splat(path[k].x, path[k].y, tune.pointW * weight[k], weight[k]);
+    mark(path[k].x, path[k].y, tune.pointW * weight[k], weight[k]);
     const next = members[m + 1];
     if (next === undefined || next !== k + 1 || !walked(ctx, k, next)) continue;
     links.push(k);
@@ -510,7 +530,7 @@ function buildArea(ctx, grid, members) {
     const w = Math.min(weight[k], weight[next]) * (len > 4 ? 0.5 : 1);
     for (let s = 0; s < steps; s++) {
       const u = (s + 0.5) / steps;
-      splat(p.x + (q.x - p.x) * u, p.y + (q.y - p.y) * u, (w * len) / steps, s % 2 ? w : 0);
+      mark(p.x + (q.x - p.x) * u, p.y + (q.y - p.y) * u, (w * len) / steps, s % 2 ? w : 0);
     }
   }
   // Limiar: o que uma passada reta e isolada deixa a `areaR` do eixo.
@@ -530,6 +550,9 @@ function buildArea(ctx, grid, members) {
     const d1 = distanceTransform(mask, nx, ny);
     const grown = new Uint8Array(size);
     for (let c = 0; c < size; c++) grown[c] = d1[c] <= R * R ? 0 : 1; // 1 = fora da dilatação
+    // A moldura da grade conta como "fora": sem isso, uma dilatação que encostasse na borda
+    // não seria desfeita desse lado e a área ganharia uma barriga.
+    clearBorder(grown, nx, ny, 1);
     const d2 = distanceTransform(grown, nx, ny);
     for (let c = 0; c < size; c++) if (d2[c] > R * R) mask[c] = 1;
   }
@@ -559,11 +582,16 @@ function buildArea(ctx, grid, members) {
   // O que foi andado de A a B continua ligado: corredor fino onde a máscara se partiu.
   let comp = components(grid, (c) => mask[c] === 1);
   let bridged = false;
+  // Vale também quando as varreduras do meio do trecho têm pouca confiança e ficaram de fora:
+  // liga-se, em linha reta, a última varredura de dentro à próxima, se a caminhada entre as
+  // duas não teve salto (cadeia de trechos andados).
   let last = -1;
-  for (const k of members) {
+  for (let m = 0; m < members.length; m++) {
+    const k = members[m];
+    if (m > 0 && !(members[m - 1] === k - 1 && walked(ctx, k - 1, k))) last = -1;
     const c = cellAt(grid, path[k].x, path[k].y);
     if (c < 0 || !mask[c]) continue;
-    if (last >= 0 && comp.label[c] !== comp.label[cellAt(grid, path[last].x, path[last].y)] && k - last <= 3 && walked(ctx, last, k)) {
+    if (last >= 0 && comp.label[c] !== comp.label[cellAt(grid, path[last].x, path[last].y)] && k - last <= 8) {
       const p = path[last];
       const q = path[k];
       const steps = Math.max(1, Math.ceil(Math.hypot(q.x - p.x, q.y - p.y) / (0.5 * cell)));
@@ -584,22 +612,22 @@ function buildArea(ctx, grid, members) {
     if (c >= 0 && comp.label[c] >= 0) hits[comp.label[c]]++;
   }
   const speck = tune.speckM2 / (cell * cell);
-  const biggest = comp.sizes.reduce((m, v) => Math.max(m, v), 0);
+  // O maior pedaço fica sempre (num levantamento de uma varredura só, ele é o mapa inteiro).
+  let biggest = -1;
+  for (let id = 0; id < comp.sizes.length; id++) if (biggest < 0 || comp.sizes[id] > comp.sizes[biggest]) biggest = id;
   for (let c = 0; c < size; c++) {
     const id = comp.label[c];
-    if (id < 0) continue;
-    const small = comp.sizes[id] < speck && hits[id] < 2;
-    const empty = hits[id] === 0 && comp.sizes[id] < biggest;
-    if (small || empty) mask[c] = 0;
+    if (id < 0 || id === biggest) continue;
+    if (hits[id] === 0 || (comp.sizes[id] < speck && hits[id] < 2)) mask[c] = 0;
   }
 
   for (let c = 0; c < size; c++) conf[c] = mask[c] ? clamp(conf[c], 0, 1) : 0;
   return { inside: mask, conf, links };
 }
 
-function clearBorder(mask, nx, ny) {
-  for (let i = 0; i < nx; i++) mask[i] = mask[(ny - 1) * nx + i] = 0;
-  for (let j = 0; j < ny; j++) mask[j * nx] = mask[j * nx + nx - 1] = 0;
+function clearBorder(mask, nx, ny, value = 0) {
+  for (let i = 0; i < nx; i++) mask[i] = mask[(ny - 1) * nx + i] = value;
+  for (let j = 0; j < ny; j++) mask[j * nx] = mask[j * nx + nx - 1] = value;
 }
 
 // ---------------------------------------------------------------------------
@@ -709,7 +737,7 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
       const s = scans[path[members[a]].i];
       const name = normLabel(s.label) || (s.spot !== null && s.spot !== undefined ? spotLabel.get(s.spot) : '') || '';
       if (!name) continue;
-      const key = name.toLocaleLowerCase('pt-BR');
+      const key = name.toLowerCase();
       if (!labelKey.has(key)) {
         labelKey.set(key, labelNames.length);
         labelNames.push(name);
@@ -885,8 +913,27 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
       } else cross[x].set(y, [w, 1]);
     }
   }
+  // Com nomes no andar, primeiro os ambientes com nome crescem sobre os pedaços sem nome que
+  // encostam neles (como uma bacia a partir de cada marca): pedaço sem nome não se junta a
+  // outro sem nome antes disso, senão um bloco inteiro iria parar num ambiente só.
+  let seeded = labelNames.length >= 2;
+  const seeds = labelNames.map(() => []);
+  for (let a = 0; a < m; a++) if (scanLabel[a] >= 0) seeds[scanLabel[a]].push(members[a]);
   const strength = (a, b, e) => {
     if (lab[a] >= 0 && lab[b] >= 0 && lab[a] !== lab[b]) return Infinity;
+    // Na fase das marcas a referência é o típico do andar, igual para todos: com a diferença
+    // "de dentro" de cada um, o ambiente que cresce primeiro passaria a ganhar todas as disputas.
+    // Entra também a distância do pedaço às marcas do ambiente: sem contraste de sinal que
+    // decida, o pedaço fica com o ambiente cuja marca está mais perto.
+    if (seeded) {
+      const named = lab[a] >= 0 ? a : b;
+      const blob = named === a ? b : a;
+      const bx = cs[blob * dim] / cn[blob];
+      const by = cs[blob * dim + 1] / cn[blob];
+      let d2 = Infinity;
+      for (const s of seeds[lab[named]]) d2 = Math.min(d2, (path[s].x - bx) ** 2 + (path[s].y - by) ** 2);
+      return e[0] / e[1] / typical + (tune.roomSeedK * Math.sqrt(d2)) / tune.roomPosM;
+    }
     // A referência "de dentro" puxa para o típico do andar quando os pedaços têm poucas arestas.
     const inner = (intSum[a] + intSum[b] + 4 * typical) / (intCnt[a] + intCnt[b] + 4);
     return e[0] / e[1] / inner;
@@ -898,7 +945,7 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
     for (let a = 0; a < m; a++) {
       if (!alive[a]) continue;
       for (const [c, e] of cross[a]) {
-        if (c < a) continue;
+        if (c < a || (seeded && lab[a] < 0 === lab[c] < 0)) continue;
         const v = strength(a, c, e);
         if (v < best || (v === best && (a < ba || (a === ba && c < bb)))) {
           best = v;
@@ -906,6 +953,10 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
           bb = c;
         }
       }
+    }
+    if (seeded && (ba < 0 || best > tune.roomEdgeHi)) {
+      seeded = false; // o que sobrou tem fronteira forte com os ambientes com nome: segue a regra geral
+      continue;
     }
     if (ba < 0 || best === Infinity) break;
     // Acima do número típico de ambientes só fica separado o que tem fronteira forte; abaixo
@@ -1007,7 +1058,7 @@ function assignCells(ctx, grid, inside, members, assign, groups) {
       if (assign[a] !== g) continue;
       const k = members[a];
       const w = 0.2 + 0.8 * weight[k];
-      forCellsNear(grid, path[k].x, path[k].y, 3 * tune.voteS, (c, d2) => (score[c] += w * Math.exp(-d2 / v2)));
+      splat(grid, score, path[k].x, path[k].y, 3 * tune.voteS, w, v2, false);
     }
     for (let c = 0; c < size; c++) {
       if (inside[c] && score[c] > best[c] && score[c] > 1e-4) {
@@ -1028,7 +1079,8 @@ function assignCells(ctx, grid, inside, members, assign, groups) {
       const next = [];
       for (const cur of queue) {
         const ix = cur % nx;
-        for (const nb of [ix > 0 ? cur - 1 : -1, ix < nx - 1 ? cur + 1 : -1, cur - nx, cur + nx]) {
+        for (let q = 0; q < 4; q++) {
+          const nb = q === 0 ? (ix > 0 ? cur - 1 : -1) : q === 1 ? (ix < nx - 1 ? cur + 1 : -1) : q === 2 ? cur - nx : cur + nx;
           if (nb < 0 || nb >= size || !inside[nb] || room[nb] >= 0) continue;
           room[nb] = room[cur];
           next.push(nb);
@@ -1701,8 +1753,9 @@ function buildAps(ctx, grid, floors, centre) {
       if (best < -62 || beyond || unclear) floor = null;
     }
     const fi = floor === null ? -1 : floors.findIndex((f) => f.floor === floor);
-    const c = cellAt(grid, x, y);
-    const inside = fi >= 0 && c >= 0 && floors[fi].inside[c] === 1;
+    // "Dentro" com 1 m de folga: roteador fica encostado na parede, onde ninguém pisa.
+    let inside = false;
+    if (fi >= 0) forCellsNear(grid, x, y, 1, (c) => (inside = inside || floors[fi].inside[c] === 1));
     const z = zSol !== null ? zSol : (floor === null ? (heardFloor ?? 0) : floor) * FLOOR_HEIGHT + 1;
     aps.push({
       id: sorted[0].id,
@@ -2042,9 +2095,10 @@ export function heatField(model, floorIndex, networkKey) {
           if (lin === lin) v = lin;
         }
       }
-      v = clamp(v, vMin - 3, vMax + 3);
-      out.dbm[c] = v;
+      out.dbm[c] = clamp(v, vMin - 3, vMax + 3);
       out.conf[c] = 1 - Math.exp(-dense / heat.confK);
+      // Mínimo e máximo saem do valor guardado (Float32), para baterem com o vetor.
+      v = out.dbm[c];
       if (v < lo) lo = v;
       if (v > hi) hi = v;
     }

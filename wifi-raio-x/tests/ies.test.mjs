@@ -533,7 +533,26 @@ test('HT Capabilities 3x3 de 20 MHz; corpo truncado é ignorado', () => {
   assert.equal(ht.sgi40, false);
   assert.equal(ht.txStbc, false);
   assert.equal(ht.maxAmsdu, 3839);
+  assert.equal(ht.maxMcs, 7);
   assert.equal(one(45, HT_CAP_2SS.slice(0, 50)).ht, undefined);
+});
+
+// Regressão: o maior MCS saía do último fluxo anunciado. Com modulação desigual (o 2º fluxo
+// só até o MCS 12, por exemplo) o resultado ficava menor que o que o 1º fluxo alcança.
+test('HT Capabilities: o maior MCS é o do fluxo que vai mais longe', () => {
+  const withMask = (mask) => hx('2c 01', '17', mask, '00 00', '01', '00 00 00', '00 00', '00 00 00 00', '00');
+  // fluxo 1: MCS 0-7 (0xff); fluxo 2: MCS 8-12 (0x1f)
+  const uneven = one(45, withMask('ff 1f 00 00 00 00 00 00 00 00')).ht;
+  assert.equal(uneven.nss, 2);
+  assert.equal(uneven.maxMcs, 7);
+  // um fluxo só até 16-QAM 3/4 (MCS 0-4)
+  const modest = one(45, withMask('1f 00 00 00 00 00 00 00 00 00')).ht;
+  assert.equal(modest.nss, 1);
+  assert.equal(modest.maxMcs, 4);
+  // máscara vazia: nenhum fluxo, MCS desconhecido
+  const none = one(45, withMask('00 00 00 00 00 00 00 00 00 00')).ht;
+  assert.equal(none.nss, 0);
+  assert.equal(none.maxMcs, null);
 });
 
 test('HT Operation', () => {
@@ -753,6 +772,18 @@ test('RNR: demais tamanhos de TBTT Information e blocos truncados', () => {
   assert.equal(one(201, '00 00 73 24').rnr, undefined);
 });
 
+// Classes operacionais globais (IEEE 802.11, Tabela E-4; conferidas com o global_op_class[] do
+// hostapd): 81-84 = 2,4 GHz; 115-130 = 5 GHz; 131-137 = 6 GHz; 180-183 = 60 GHz.
+test('RNR: faixa pela classe operacional global', () => {
+  const bandOf = (opClass) => one(201, `00 01 ${opClass.toString(16).padStart(2, '0')} 01 05`).rnr.neighbors[0].band;
+  for (const c of [81, 82, 83, 84]) assert.equal(bandOf(c), '2.4', String(c));
+  for (let c = 115; c <= 130; c++) assert.equal(bandOf(c), '5', String(c));
+  for (let c = 131; c <= 137; c++) assert.equal(bandOf(c), '6', String(c));
+  // 180 = canais de 2,16 GHz; 181 a 183 = canais juntados do 802.11ay (regressão: davam null)
+  for (const c of [180, 181, 182, 183]) assert.equal(bandOf(c), '60', String(c));
+  for (const c of [0, 80, 85, 114, 138, 179, 184, 255]) assert.equal(bandOf(c), null, String(c));
+});
+
 test('shortSsid é o CRC-32 padrão', () => {
   assert.equal(shortSsid('123456789'), 0xcbf43926); // valor de conferência clássico do CRC-32
   assert.equal(shortSsid(''), 0);
@@ -802,6 +833,36 @@ test('HE Operation com informação de 6 GHz, VHT e Co-Hosted', () => {
   assert.equal(cut.bssColor, 5);
   assert.equal(cut.sixGhz, undefined);
   assert.equal(one(255, 'f43f0025fc', 36).heOperation, undefined);
+});
+
+// Regressão: o Regulatory Info era lido com 3 bits (B3-B5). O campo tem 4 (B3-B6, máscara 0x78
+// em include/linux/ieee80211-he.h e no Wireshark): o valor 8, "AP interno de potência padrão",
+// virava 0 ("interno de baixa potência").
+test('HE Operation em 6 GHz: Regulatory Info tem 4 bits', () => {
+  const body = (control) =>
+    hx(
+      'f4 3f 02', '05', 'fc ff', //  parâmetros com o bit 17 (6 GHz), cor 5, MCS básico
+      '25', //                        Primary Channel = 37
+      control, //                     Control
+      '27 00 06', //                  centro 39, segundo centro 0, taxa mínima 6
+    );
+  // 0x42 = 80 MHz (2) + Regulatory Info 8 (8 << 3 = 0x40)
+  assert.equal(one(255, body('42'), 36).heOperation.sixGhz.regInfo, 8);
+  assert.equal(one(255, body('42'), 36).heOperation.sixGhz.width, 80);
+  // 0x3a = 80 MHz + Regulatory Info 7 ("papel do AP não se aplica")
+  assert.equal(one(255, body('3a'), 36).heOperation.sixGhz.regInfo, 7);
+  // 0x16 = 80 MHz + Duplicate Beacon (0x04) + Regulatory Info 2 (potência muito baixa)
+  assert.deepEqual(one(255, body('16'), 36).heOperation.sixGhz, {
+    primaryChannel: 37,
+    width: 80,
+    centerSeg0: 39,
+    centerSeg1: 0,
+    duplicateBeacon: true,
+    regInfo: 2,
+    minRate: 6,
+  });
+  // o bit 7 é reservado e não entra
+  assert.equal(one(255, body('c2'), 36).heOperation.sixGhz.regInfo, 8);
 });
 
 test('HE Capabilities escrito à mão (2,4 GHz, 2 fluxos)', () => {

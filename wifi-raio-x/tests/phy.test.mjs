@@ -19,7 +19,7 @@ import { noiseFloorDbm } from '../app/js/core/signal.js';
 const near = (actual, expected, tol, msg) =>
   assert.ok(Math.abs(actual - expected) <= tol, `${msg || 'valor'}: esperado ${expected} ± ${tol}, veio ${actual}`);
 
-const LINK_KEYS = ['gen', 'maxPhyMbps', 'mcs', 'nss', 'phyMbps', 'snrDb', 'standard', 'unstable', 'widthMHz'];
+const LINK_KEYS = ['gen', 'maxPhyMbps', 'mcs', 'nss', 'phyMbps', 'snrDb', 'standard', 'txWidthMHz', 'unstable', 'widthMHz'];
 
 describe('standardInfo', () => {
   test('os inteiros são os do Android (ScanResult.WIFI_STANDARD_*)', () => {
@@ -418,11 +418,11 @@ describe('MIN_SNR_DB', () => {
 });
 
 describe('estimateLink', () => {
-  /** Menor sinal (passo de 0,1 dB) em que o enlace chega ao MCS pedido. */
+  /** Menor sinal (passo de 0,1 dB) em que o enlace chega ao MCS pedido na largura negociada inteira. */
   function thresholdRssi(params, mcs) {
     for (let rssi = -100; rssi <= -20; rssi += 0.1) {
       const link = estimateLink({ ...params, rssi });
-      if (link.mcs !== null && link.mcs >= mcs && !link.unstable) return rssi;
+      if (link.mcs !== null && link.mcs >= mcs && !link.unstable && link.txWidthMHz === link.widthMHz) return rssi;
     }
     return null;
   }
@@ -433,6 +433,7 @@ describe('estimateLink', () => {
     assert.equal(link.gen, 6);
     assert.equal(link.standard, 'he');
     assert.equal(link.widthMHz, 80);
+    assert.equal(link.txWidthMHz, 80);
     assert.equal(link.nss, 2);
     assert.equal(link.mcs, 11);
     assert.equal(link.phyMbps, 1201);
@@ -590,12 +591,73 @@ describe('estimateLink', () => {
     assert.equal(at(-80).unstable, false);
   });
 
-  test('sinal abaixo do MCS 0: menor taxa, marcada como instável', () => {
+  test('sinal abaixo do MCS 0: a taxa mais robusta (MCS 0 em 20 MHz), marcada como instável', () => {
     const link = estimateLink({ rssi: -92, band: '5', widthMHz: 80, apGen: 6, clientGen: 6 });
     assert.equal(link.mcs, 0);
-    assert.equal(link.phyMbps, 72.1);
+    assert.equal(link.widthMHz, 80);
+    assert.equal(link.txWidthMHz, 20);
+    assert.equal(link.phyMbps, 17.2); // 11ax, 20 MHz, 2 fluxos, MCS 0
     assert.equal(link.unstable, true);
+    near(link.snrDb, -92 - noiseFloorDbm(20), 0.06);
     assert.ok(link.snrDb < MIN_SNR_DB[0]);
+    // logo acima do limite do MCS 0 em 20 MHz (−87 dBm) a mesma taxa já é estável
+    const edge = estimateLink({ rssi: -86.9, band: '5', widthMHz: 80, apGen: 6, clientGen: 6 });
+    assert.equal(edge.phyMbps, 17.2);
+    assert.equal(edge.unstable, false);
+  });
+
+  // Regressão: a largura negociada era tratada como obrigatória. Com sinal fraco um AP largo
+  // dava taxa menor (ou "instável") que o mesmo AP em 20 MHz, embora um BSS largo também
+  // transmita em 40/20 MHz dentro do canal (o primário está sempre incluído).
+  test('canal mais largo nunca rende menos: a largura negociada é teto, não obrigação', () => {
+    const widthsOf = { 4: [20, 40], 5: [20, 40, 80, 160], 6: [20, 40, 80, 160], 7: [20, 40, 80, 160, 320] };
+    for (const gen of [4, 5, 6, 7]) {
+      for (const band of gen === 7 ? ['6'] : ['5']) {
+        for (let rssi = -100; rssi <= -30; rssi += 0.5) {
+          let prev = null;
+          for (const widthMHz of widthsOf[gen]) {
+            const link = estimateLink({ rssi, band, widthMHz, apGen: gen, clientGen: gen });
+            const id = `Wi-Fi ${gen}, ${widthMHz} MHz, ${rssi} dBm`;
+            assert.equal(link.widthMHz, widthMHz, id);
+            assert.ok(link.txWidthMHz <= widthMHz, id);
+            if (prev !== null) {
+              assert.ok(link.phyMbps >= prev.phyMbps, `${id}: ${link.phyMbps} < ${prev.phyMbps}`);
+              // quem é estável em 20 MHz continua estável num canal largo
+              assert.ok(!link.unstable || prev.unstable, id);
+            }
+            prev = link;
+          }
+        }
+      }
+    }
+  });
+
+  test('sinal fraco num canal largo: cai para a largura que rende mais', () => {
+    // 160 MHz a −78,5 dBm: SNR de 6,5 dB na largura cheia (nem o MCS 0 cabe), 15,5 dB em 20 MHz
+    const wide = estimateLink({ rssi: -78.5, band: '5', widthMHz: 160, apGen: 6, clientGen: 6 });
+    const narrow = estimateLink({ rssi: -78.5, band: '5', widthMHz: 20, apGen: 6, clientGen: 6 });
+    assert.equal(wide.unstable, false);
+    assert.equal(wide.widthMHz, 160);
+    assert.equal(wide.maxPhyMbps, 2402);
+    assert.ok(wide.txWidthMHz < 160);
+    assert.ok(wide.phyMbps >= narrow.phyMbps);
+    assert.equal(narrow.mcs, 3); // 15 dB: 16-QAM 1/2
+    assert.equal(narrow.phyMbps, 68.8);
+    // SNR e MCS informados são os da largura em que a taxa sai
+    near(wide.snrDb, -78.5 - noiseFloorDbm(wide.txWidthMHz), 0.06);
+    assert.ok(wide.snrDb >= MIN_SNR_DB[wide.mcs]);
+    // 11n em 40 MHz a −81 dBm: MCS 2 em 20 MHz (43,3) ganha do MCS 0 em 40 MHz (30)
+    const ht = estimateLink({ rssi: -81, band: '5', widthMHz: 40, apGen: 4, clientGen: 4 });
+    assert.equal(ht.txWidthMHz, 20);
+    assert.equal(ht.mcs, 2);
+    assert.equal(ht.phyMbps, 43.3);
+    // com sinal bom a largura cheia sempre ganha; no empate fica a mais larga
+    for (const widthMHz of [40, 80, 160]) {
+      assert.equal(estimateLink({ rssi: -55, band: '5', widthMHz, apGen: 6, clientGen: 6 }).txWidthMHz, widthMHz);
+    }
+    const tie = estimateLink({ rssi: -83.9, band: '5', widthMHz: 40, apGen: 6, clientGen: 6 });
+    assert.equal(tie.phyMbps, 34.4); // MCS 0 em 40 MHz = MCS 1 em 20 MHz
+    assert.equal(tie.txWidthMHz, 40);
   });
 
   test('11ac em 20 MHz com 1 fluxo para no MCS 8 (o 9 não existe)', () => {
@@ -610,6 +672,7 @@ describe('estimateLink', () => {
     assert.equal(strong.gen, 2);
     assert.equal(strong.standard, 'legacy');
     assert.equal(strong.widthMHz, 20);
+    assert.equal(strong.txWidthMHz, 20);
     assert.equal(strong.nss, 1);
     assert.equal(strong.mcs, null);
     assert.equal(strong.phyMbps, 54);
@@ -669,6 +732,7 @@ describe('estimateLink', () => {
       assert.equal(link.unstable, false);
       assert.equal(link.gen, 6);
       assert.equal(link.widthMHz, 80);
+      assert.equal(link.txWidthMHz, null);
       assert.equal(link.nss, 2);
       assert.equal(link.maxPhyMbps, 1201);
     }

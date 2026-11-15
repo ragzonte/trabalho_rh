@@ -497,10 +497,16 @@ final class SpeedTester {
             runner = thread;
         }
 
-        /** Acorda quem conduz o teste (pode estar dormindo entre duas medidas) e derruba as conexões. */
+        /**
+         * Acorda quem conduz o teste (pode estar dormindo entre duas medidas) e derruba as conexões.
+         * Fechar uma conexão segura envia um aviso pela rede, e na thread da interface o Android
+         * responde a isso com NetworkOnMainThreadException: dali (tela fechando, página recarregada)
+         * o fechamento vai para uma thread avulsa.
+         */
         synchronized void cancel() {
             cancelled = true;
-            closeAll();
+            if (Sys.onMain()) Sys.thread("speed-cancel", this::closeAll).start();
+            else closeAll();
             if (runner != null) runner.interrupt();
         }
 

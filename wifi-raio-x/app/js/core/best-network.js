@@ -487,11 +487,13 @@ function channelRemark(air) {
  *                             congestion (% do tempo de ar que sobra), security (nível)
  *   pros: string[], cons: string[], warnings: string[],
  *   detail: {usable: boolean, rssi: number|null, linkMbps: number|null, phyMbps: number|null,
- *            widthMHz: number|null, gen: number|null, nss: number|null, mcs: number|null,
+ *            widthMHz: number|null, txWidthMHz: number|null, gen: number|null, nss: number|null, mcs: number|null,
  *            unstable: boolean, share: number|null, busy: number|null, channelScore: number|null,
  *            coChannel: number|null, overlapping: number|null, stations: number|null,
  *            utilization: number|null, cap: number, securityFactor: number}
- * }}  `detail` são os números por trás da nota (usable = o celular consegue usar esta rede)
+ * }}  `detail` são os números por trás da nota (usable = o celular consegue usar esta rede;
+ *     widthMHz = largura negociada; txWidthMHz = a largura em que a taxa estimada sai, à qual
+ *     `mcs` se refere: veja estimateLink)
  */
 export function scoreAp(ap, options) {
   const o = isObj(options) ? options : {};
@@ -607,6 +609,7 @@ export function scoreAp(ap, options) {
       linkMbps,
       phyMbps,
       widthMHz: link ? link.widthMHz : null,
+      txWidthMHz: link ? link.txWidthMHz : null,
       gen: link ? link.gen : null,
       nss: link ? link.nss : null,
       mcs: link ? link.mcs : null,

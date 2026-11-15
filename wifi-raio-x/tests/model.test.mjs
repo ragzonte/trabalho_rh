@@ -341,6 +341,66 @@ describe('normalizeAp', () => {
     assert.equal(byId(wifi7).get('c8:be:19:5a:9d:42').widthMHz, 160);
   });
 
+  // Regressão: 160 MHz anunciado pelo campo CCFS2 do HT Operation (AP com menos fluxos em 160 do
+  // que em 80 MHz; IEEE 802.11-2020, 11.38.1). O VhtOperation do Android só olha o 2º centro do
+  // VHT Operation, que nesse caso é 0, e entrega CHANNEL_WIDTH_80MHZ: o AP aparecia com 80 MHz.
+  test('160 MHz sinalizado no HT Operation (CCFS2): os elementos devolvem a largura de verdade', () => {
+    const hex = (...parts) => parts.join('').replace(/\s+/g, '');
+    const htOperation = (ccfs2) => {
+      const mode = ccfs2 << 5; // bits 13-20 do HT Operation Information = bits 5-12 destes 2 bytes
+      return hex('24', '05', (mode & 0xff).toString(16).padStart(2, '0'), (mode >> 8).toString(16).padStart(2, '0'), '00 00', '00'.repeat(16));
+    };
+    // VHT Capabilities Info 0x438A79B2: sem 160 MHz no "channel width set", Extended NSS BW = 1
+    const VHT_CAP_EXT_NSS = hex('b2 79 8a 43', 'ea ff 00 00', 'ea ff 00 00');
+    const VHT_CAP_80_ONLY = hex('b2 79 8a 03', 'ea ff 00 00', 'ea ff 00 00');
+    const VHT_OP_80 = hex('01 2a 00', 'fc ff'); // largura 1, centro 42, segundo centro 0
+    const raw = (ccfs2, vhtCap = VHT_CAP_EXT_NSS, vhtOp = VHT_OP_80) => ({
+      bssid: '00:11:22:33:44:66',
+      ssid: 'Onda2',
+      level: -55,
+      frequency: 5180,
+      channelWidth: CW.W80, // o que o Android entrega
+      centerFreq0: 5210,
+      centerFreq1: 0,
+      capabilities: '[WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]',
+      wifiStandard: 5,
+      ies: [
+        { id: 61, ext: 0, hex: htOperation(ccfs2) },
+        { id: 191, ext: 0, hex: vhtCap },
+        { id: 192, ext: 0, hex: vhtOp },
+      ],
+    });
+
+    // CCFS2 = 50: a 8 canais do centro 42 -> 160 MHz contíguos (36-64)
+    const wide = normalizeAp(raw(50));
+    assert.equal(wide.widthMHz, 160);
+    assert.deepEqual(wide.occ.segments, [{ lo: 5170, hi: 5330 }]);
+    assert.equal(wide.occ.centerChannel, 50);
+    assert.equal(wide.occ.noncontiguous, false);
+    assert.equal(wide.occ.approx, false);
+    assert.equal(wide.occ.dfs, true);
+    assert.equal(wide.channel, 36);
+
+    // CCFS2 = 155: mais de 16 canais de distância -> 80+80 (36-48 + 149-161)
+    const split = normalizeAp(raw(155));
+    assert.equal(split.widthMHz, 160);
+    assert.equal(split.occ.noncontiguous, true);
+    assert.deepEqual(split.occ.segments, [{ lo: 5170, hi: 5250 }, { lo: 5735, hi: 5815 }]);
+
+    // nada muda: CCFS2 zerado; distância reservada (4 canais); AP que não declara 160 MHz;
+    // centro que não é o do bloco do primário; sem os elementos
+    assert.equal(normalizeAp(raw(0)).widthMHz, 80);
+    assert.equal(normalizeAp(raw(46)).widthMHz, 80);
+    assert.equal(normalizeAp(raw(50, VHT_CAP_80_ONLY)).widthMHz, 80);
+    assert.equal(normalizeAp(raw(66, VHT_CAP_EXT_NSS, hex('01 3a 00', 'fc ff'))).widthMHz, 80);
+    assert.equal(normalizeAp({ ...raw(50), ies: undefined }).widthMHz, 80);
+    assert.deepEqual(normalizeAp(raw(0)).occ.segments, [{ lo: 5170, hi: 5250 }]);
+    // quando o próprio VHT Operation traz o 2º centro, o Android já entrega 160 MHz
+    const modern = normalizeAp({ ...raw(0, VHT_CAP_EXT_NSS, hex('01 2a 32', 'fc ff')), channelWidth: CW.W160, centerFreq1: 5250 });
+    assert.equal(modern.widthMHz, 160);
+    assert.deepEqual(modern.occ.segments, [{ lo: 5170, hi: 5330 }]);
+  });
+
   test('rede oculta, MAC sorteado e leitura velha', () => {
     const hidden = aps.get('28:6e:d4:5b:c2:e1');
     assert.equal(hidden.hidden, true);

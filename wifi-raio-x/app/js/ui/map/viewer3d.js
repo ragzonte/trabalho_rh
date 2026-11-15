@@ -91,6 +91,7 @@ import {
   declutter,
   niceScale,
   isSameMap,
+  cleanText,
   approxMeters,
   layoutLabel,
   paintLabel,
@@ -197,16 +198,17 @@ void main() {
 #endif
     // hachura na diagonal onde o mapa é um palpite; de longe vira um tom médio (sem moiré)
     float s = (vPos.x + vPos.y) * uHatchFreq;
-    float fs = fwidth(s);
-    float line = 1.0 - smoothstep(0.26 - fs, 0.26 + fs, abs(fract(s) - 0.5) * 2.0);
-    col = mix(col, uHatch, (1.0 - w) * 0.6 * mix(0.26, line, clamp(1.6 - fs * 3.2, 0.0, 1.0)));
+    float fs = max(fwidth(s), 1e-4); // (smoothstep com as duas bordas iguais não tem resultado definido)
+    float line = 1.0 - smoothstep(0.2 - fs, 0.2 + fs, abs(fract(s) - 0.5) * 2.0);
+    col = mix(col, uHatch, (1.0 - w) * 0.55 * mix(0.2, line, clamp(1.6 - fs * 3.2, 0.0, 1.0)));
 
 #ifdef USE_HEAT
     // curvas de nível do sinal (a altura 0..1 vem de uma textura: vale também com o piso plano)
-    float c = texture2D(uHgt, uv).r * 11.0;
+    float c = texture2D(uHgt, uv).r * 10.6 + 0.3; // (as pontas da escala, onde o sinal satura, ficam fora das curvas)
     float fc = fwidth(c);
-    float iso = 1.0 - smoothstep(0.0, 1.4 * fc, abs(fract(c + 0.5) - 0.5));
-    col *= 1.0 - 0.2 * iso * clamp(1.0 - fc * 3.5, 0.0, 1.0) * w;
+    float iso = 1.0 - smoothstep(0.0, 1.4 * max(fc, 1e-5), abs(fract(c + 0.5) - 0.5));
+    // num patamar (sinal igual em toda a volta, ou no teto da escala) não há curva a desenhar
+    col *= 1.0 - 0.2 * iso * clamp(1.0 - fc * 3.5, 0.0, 1.0) * clamp(fc * 1500.0, 0.0, 1.0) * w;
 #endif
 #ifdef USE_RELIEF
     // relevo: luz vinda de um lado
@@ -224,7 +226,9 @@ void main() {
       float w4 = w2 * w2;
       float fall = clamp((uRingReach - d) / uRingReach, 0.0, 1.0);
       float fd = fwidth(d) / uRingGap;
-      acc += r.w * (w4 * w4 * w2 * fall * fall * clamp(1.0 - fd * 3.0, 0.0, 1.0) + 0.3 * (1.0 - smoothstep(r.z * 0.82, r.z, d)));
+      // (com r.z = 0 o smoothstep não tem resultado definido: o halo só entra quando há dúvida)
+      float halo = r.z > 0.001 ? 0.3 * (1.0 - smoothstep(r.z * 0.82, r.z, d)) : 0.0;
+      acc += r.w * (w4 * w4 * w2 * fall * fall * clamp(1.0 - fd * 3.0, 0.0, 1.0) + halo);
     }
     col = mix(col, uRingColor, clamp(acc * 0.5, 0.0, 0.7) * uRings);
 #endif
@@ -271,7 +275,7 @@ void main() {
   float mask = 1.0;
   if (vDash.y > 0.0) {
     float s = vDash.x / vDash.y;
-    float f = fwidth(s);
+    float f = max(fwidth(s), 1e-4);
     mask = 1.0 - smoothstep(0.56 - f, 0.56 + f, abs(fract(s) - 0.5) * 2.0);
     mask = mix(0.55, mask, clamp(1.4 - f * 2.8, 0.0, 1.0));
   }
@@ -321,7 +325,7 @@ void main() {
   float body = 1.0 - smoothstep(1.0 - 1.5 * fe, 1.0, e);
   // onde a posição é duvidosa o traço fica tracejado e mais apagado
   float s = vDist / 0.4;
-  float fs = fwidth(s);
+  float fs = max(fwidth(s), 1e-4);
   float dash = 1.0 - smoothstep(0.58 - fs, 0.58 + fs, abs(fract(s) - 0.5) * 2.0);
   dash = mix(0.6, dash, clamp(1.4 - fs * 2.8, 0.0, 1.0));
   float sure = smoothstep(0.3, 0.55, vConf);
@@ -899,7 +903,7 @@ function createViewer3d(container, options = {}) {
   const walkerDisc = new Mesh(kit.disc, kit.mats.walker);
   const walkerCore = new Mesh(kit.disc, kit.mats.walkerCore);
   const walkerBeam = new Mesh(kit.beam, kit.mats.walker);
-  const walkerOrb = new Mesh(kit.orb, kit.mats.walkerCore);
+  const walkerOrb = new Mesh(kit.orb, kit.mats.walker);
   walkerGroup.add(walkerHalo, walkerDisc, walkerCore, walkerBeam, walkerOrb);
   world.add(walkerGroup);
   const tapRing = new Mesh(kit.ring, kit.mats.tap);
@@ -1221,7 +1225,7 @@ function createViewer3d(container, options = {}) {
       uRings: shared.uRings,
       uRingGap: { value: 0.85 * unit },
       uRingReach: { value: 3.4 * unit },
-      uHatchFreq: { value: 2.4 / unit },
+      uHatchFreq: { value: 4.4 / unit },
       uOrigin: { value: new Vector2(bounds.minX, bounds.minY) },
       uInvSize: { value: new Vector2(1 / (nx * cell), 1 / (ny * cell)) },
       uNeutral: shared.uNeutral,
@@ -1570,7 +1574,8 @@ function createViewer3d(container, options = {}) {
       anchors.push({ obj: pin, floorIndex: fs.index, x: sp.x, y: sp.y, z0: 0 });
       const pick = { kind: 'spot', data: sp, floorIndex: fs.index };
       markers.push({ layer: 'spots', floorIndex: fs.index, x: sp.x, y: sp.y, z: 0.56 * unit, radius: 22, pick });
-      if (!namesRoom(fs.floor, sp.label)) addLabel(bin, fs.markerGroup, fs.index, { kind: 'spot', text: sp.label }, [sp.x, sp.y, 0.68 * unit], { ay: 0, priority: 20, layer: 'spots', pick });
+      // ponto sem nome fica só com o alfinete; o que deu nome a um ambiente não repete o nome
+      if (cleanText(sp.label) && !namesRoom(fs.floor, sp.label)) addLabel(bin, fs.markerGroup, fs.index, { kind: 'spot', text: sp.label }, [sp.x, sp.y, 0.68 * unit], { ay: 0, priority: 20, layer: 'spots', pick });
     }
 
     // roteadores
@@ -1828,6 +1833,7 @@ function createViewer3d(container, options = {}) {
 
   const tmpV = new Vector3();
   const tmpV2 = new Vector3();
+  const camBefore = new Vector3();
 
   function readCamera() {
     const t = controls.target;
@@ -2076,12 +2082,22 @@ function createViewer3d(container, options = {}) {
 
     cameraMoved = false;
     if (!tweens.has('camera') && controls.enabled) {
+      // a inércia dos controles é por quadro; aqui vira por tempo, para durar o mesmo em qualquer aparelho
+      controls.dampingFactor = 1 - Math.pow(0.86, dt / 16.7);
+      camBefore.copy(camera.position);
       if (controls.update()) {
         clampTarget();
         dirty = true;
         labelsDirty = true;
         active = true;
         cameraMoved = true;
+        // o finzinho da inércia é invisível e seguraria o laço de desenho por segundos: encerra de uma vez
+        if (!controlsBusy && camBefore.distanceTo(camera.position) < camera.position.distanceTo(controls.target) * 4e-4) {
+          controls.enableDamping = false;
+          controls.update();
+          controls.enableDamping = true;
+          active = tweens.size > 0;
+        }
       }
     }
 

@@ -128,6 +128,36 @@ public class MainActivityTest extends AllSdks {
     }
 
     @Test
+    @org.robolectric.annotation.Config(shadows = BrokenWebView.class)
+    public void deviceWithoutAWorkingWebViewGetsAMessageNotACrash() {
+        Throwable[] failures = {
+            new android.util.AndroidRuntimeException("android.webkit.WebViewFactory$MissingWebViewPackageException"),
+            // durante a atualização do WebView pela loja a biblioteca nativa some por instantes: é um Error, não uma exceção
+            new UnsatisfiedLinkError("dlopen failed: library \"libwebviewchromium.so\" not found"),
+        };
+        try {
+            for (Throwable failure : failures) {
+                BrokenWebView.failure = failure;
+                ActivityController<MainActivity> c = Robolectric.buildActivity(MainActivity.class).create();
+                MainActivity activity = c.get();
+                assertTrue(String.valueOf(failure), activity.isFinishing());
+                assertNull(activity.webView());
+                assertNull(activity.bridge());
+                assertTrue(org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("WebView"));
+                // o resto do ciclo de vida, se o Android ainda o entregar, não encontra nada para quebrar
+                c.start().resume();
+                activity.onBackPressed();
+                activity.onRequestPermissionsResult(Permissions.REQUEST_LOCATION, new String[0], new int[0]);
+                activity.eval("1+1");
+                Fixtures.idle();
+                c.pause().stop().destroy();
+            }
+        } finally {
+            BrokenWebView.failure = null;
+        }
+    }
+
+    @Test
     public void bundledAssetsAreServedWithTheRightTypes() throws Exception {
         MainActivity activity = launch();
         WebViewClient client = shadowOf(activity.webView()).getWebViewClient();
@@ -447,6 +477,27 @@ public class MainActivityTest extends AllSdks {
         controller.pause().saveInstanceState(new android.os.Bundle()).stop();
         answer.onReceiveValue("false");
         assertTrue("sai do mesmo jeito, sem derrubar o app", activity.isFinishing());
+    }
+
+    /**
+     * O mesmo roteiro com o onBackPressed() de verdade do Android (ver RealBackActivity): no 7 ele
+     * lança IllegalStateException depois do estado salvo; do 8 em diante já confere antes.
+     */
+    @Test
+    @org.robolectric.annotation.Config(sdk = {24, 26, 28}, shadows = RealBackActivity.class)
+    public void theRealBackHandlingOfEachAndroidSurvivesALateAnswer() {
+        MainActivity activity = launch();
+        activity.onBackPressed();
+        android.webkit.ValueCallback<String> answer = shadowOf(activity.webView()).getLastEvaluatedJavascriptCallback();
+        controller.pause().saveInstanceState(new android.os.Bundle()).stop();
+        answer.onReceiveValue("false"); // sem a proteção, no Android 7: "Can not perform this action after onSaveInstanceState"
+        assertTrue(activity.isFinishing());
+
+        // e no caminho normal (tela em primeiro plano) o "voltar" de verdade também fecha
+        MainActivity second = launch();
+        second.onBackPressed();
+        shadowOf(second.webView()).getLastEvaluatedJavascriptCallback().onReceiveValue("false");
+        assertTrue(second.isFinishing());
     }
 
     @Test

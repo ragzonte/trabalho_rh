@@ -3,6 +3,7 @@
 // Tudo o que os controles fazem também entra pela URL, para tirar fotos direto num estado:
 //   ?world=sobrado          apartamento | sobrado | escritorio | kitnet | big (200 x 200, 3 andares)
 //   &seed=1&noise=0.7       semente do mundo e erro de posição do mapa de mentira (m)
+//   &builder=real           usa o construtor de verdade (mapping/mapmodel.js) sobre um levantamento simulado
 //   &theme=light            dark | light
 //   &heat=0                 índice da rede que colore o piso (sem o parâmetro: cor por ambiente)
 //   &layers=relief,neighbours,-grid   liga (ou desliga, com "-") camadas
@@ -20,7 +21,7 @@
 
 import { createViewer } from '../../../app/js/ui/map/viewer3d.js';
 import { DEFAULT_LAYERS } from '../../../app/js/ui/map/viewer2d.js';
-import { fakeMap, fakeBigMap, relabel, listPresets, HOSTILE_LABELS } from '../../helpers/fake-map.mjs';
+import { fakeMap, fakeBigMap, realMap, relabel, listPresets, HOSTILE_LABELS } from '../../helpers/fake-map.mjs';
 
 const params = new URLSearchParams(location.search);
 const $ = (id) => document.getElementById(id);
@@ -28,6 +29,7 @@ const num = (key, fallback) => (params.has(key) && params.get(key) !== '' && Num
 
 const state = {
   world: params.get('world') || 'apartamento',
+  builder: params.get('builder') === 'real' ? 'real' : 'fake',
   seed: num('seed', 1),
   noise: num('noise', 0.7),
   theme: params.get('theme') === 'light' ? 'light' : 'dark',
@@ -75,10 +77,12 @@ function status(text) {
   $('status').textContent = text;
 }
 
-function buildModel() {
+async function buildModel() {
   if (state.world === 'big') {
     fake = fakeBigMap({ seed: state.seed });
     fake.networks = fake.model.networks;
+  } else if (state.builder === 'real') {
+    fake = await realMap(state.world, { seed: state.seed, noiseM: state.noise, progress: state.progress });
   } else {
     fake = fakeMap(state.world, { seed: state.seed, noiseM: state.noise, progress: state.progress });
   }
@@ -116,14 +120,14 @@ function syncControls() {
 
 /** Aplica um estado (parcial) e devolve quando a cena estiver desenhada. */
 async function apply(patch = {}) {
-  const rebuild = ['world', 'seed', 'noise', 'labels', 'progress'].some((k) => k in patch && patch[k] !== state[k]) || !model;
+  const rebuild = ['world', 'seed', 'noise', 'labels', 'progress', 'builder'].some((k) => k in patch && patch[k] !== state[k]) || !model;
   const before = { ...state };
   Object.assign(state, patch, patch.layers ? { layers: { ...state.layers, ...patch.layers } } : {});
   if (rebuild) {
     const sameWorld = before.world === state.world && before.seed === state.seed && model;
     if (!sameWorld && !('heat' in patch) && model) state.heat = -1;
     if (!sameWorld && !('focus' in patch) && model) state.focus = null;
-    buildModel();
+    await buildModel();
     viewer.setModel(model);
   }
   document.documentElement.dataset.theme = state.theme;
@@ -206,5 +210,6 @@ window.__demo = {
   },
   fakeMap,
   fakeBigMap,
+  realMap,
   relabel,
 };

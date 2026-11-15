@@ -236,6 +236,11 @@ const LEGACY_SENSITIVITY = [-82, -81, -79, -77, -74, -70, -66, -65];
 //   3. O SNR é medido na largura usada: o ruído sobe 3 dB a cada vez que a largura dobra, então
 //      o sinal necessário também sobe 3 dB por dobra. Com o nosso piso de ruído (−94 dBm em
 //      20 MHz), MCS 7 pede −69 dBm em 20 MHz e −63 dBm em 80 MHz.
+//   4. Largura negociada é teto, não obrigação: num BSS de 80 MHz os quadros também podem sair
+//      em 40 ou 20 MHz (sempre incluindo o canal primário), e é o que o controle de taxa faz
+//      quando o sinal não sustenta a largura cheia. Vale, portanto, a combinação largura × MCS
+//      de maior taxa. Sem isso um AP de 160 MHz pareceria pior (e "instável" antes) que o mesmo
+//      AP em 20 MHz com o mesmo sinal.
 // Simplificações: o número de fluxos não cai com sinal fraco e o intervalo de guarda é sempre o
 // mais curto. As duas puxam para cima; a margem compensa em parte.
 const SNR_MARGIN_DB = 3;
@@ -259,16 +264,21 @@ function normGen(gen) {
  * Em 2,4 GHz a largura para em 40 MHz e o 11ac vira 11n (11ac só existe em 5 GHz).
  * `rssi` é o sinal do beacon (dBm); `noiseDbm` é o ruído em 20 MHz (padrão: piso térmico com
  * 7 dB de figura de ruído, −94 dBm) e é corrigido para a largura usada.
- * Escolhe o maior MCS cujo SNR mínimo (MIN_SNR_DB) cabe no SNR disponível. Se nem o MCS 0
- * couber, devolve a menor taxa com `unstable: true`.
+ * Em cada largura até a negociada, escolhe o maior MCS cujo SNR mínimo (MIN_SNR_DB) cabe no
+ * SNR disponível, e fica com a largura que rende mais (empate: a mais larga). Assim a taxa
+ * nunca cai quando o sinal melhora nem quando o canal é mais largo. Se nem o MCS 0 em 20 MHz
+ * couber, devolve essa taxa (a mais robusta que existe) com `unstable: true`.
  *
  * @param {{rssi:number, band?:string|number, widthMHz?:number, apGen?:number, apNss?:number,
  *          clientGen?:number, clientNss?:number, clientMaxWidthMHz?:number, noiseDbm?:number}} params
- * @returns {{gen:number|null, standard:string|null, widthMHz:number|null, nss:number|null,
- *            mcs:number|null, phyMbps:number|null, maxPhyMbps:number|null, snrDb:number|null,
- *            unstable:boolean}}
- *          `mcs` é null em redes antigas (a/g); tudo é null se a combinação for impossível
- *          (ex.: cliente sem Wi-Fi 6 numa rede de 6 GHz) ou o padrão for desconhecido.
+ * @returns {{gen:number|null, standard:string|null, widthMHz:number|null, txWidthMHz:number|null,
+ *            nss:number|null, mcs:number|null, phyMbps:number|null, maxPhyMbps:number|null,
+ *            snrDb:number|null, unstable:boolean}}
+ *          `widthMHz` é a largura negociada (o teto, usado em `maxPhyMbps`); `txWidthMHz` é a
+ *          largura em que a taxa estimada sai (menor que a negociada quando o sinal é fraco) e
+ *          `mcs` e `snrDb` valem para ela. `mcs` é null em redes antigas (a/g); tudo é null se a
+ *          combinação for impossível (ex.: cliente sem Wi-Fi 6 numa rede de 6 GHz) ou o padrão
+ *          for desconhecido.
  */
 export function estimateLink(params) {
   const o = params !== null && typeof params === 'object' ? params : {};
@@ -283,6 +293,7 @@ export function estimateLink(params) {
     gen,
     standard: null,
     widthMHz: null,
+    txWidthMHz: null,
     nss: null,
     mcs: null,
     phyMbps: null,
@@ -311,40 +322,52 @@ export function estimateLink(params) {
     nss = Math.min(apNss, clientNss, phy.maxNss);
   }
 
-  const snr = rssi === null ? null : rssi - (noise20 + 10 * Math.log10(widthMHz / 20));
   const out = {
     ...empty,
     standard,
     widthMHz,
     nss,
     maxPhyMbps: legacy ? LEGACY_MAX_MBPS : maxRate({ gen, widthMHz, nss }),
-    snrDb: snr === null ? null : round1(snr),
   };
-  if (snr === null) return out;
+  if (rssi === null) return out;
+  const snrAt = (w) => rssi - (noise20 + 10 * Math.log10(w / 20));
 
   if (legacy) {
+    const snr = snrAt(20);
     let i = LEGACY_RATES.length - 1;
     while (i > 0 && snr < LEGACY_MIN_SNR_DB[i]) i--;
     out.phyMbps = LEGACY_RATES[i];
+    out.txWidthMHz = 20;
+    out.snrDb = round1(snr);
     out.unstable = snr < LEGACY_MIN_SNR_DB[0];
     return out;
   }
 
-  let lowest = null; // menor MCS válido, para quando nem ele cabe no SNR
-  for (let mcs = PHY[standard].maxMcs; mcs >= 0; mcs--) {
-    const rate = dataRate({ standard, widthMHz, nss, mcs });
-    if (rate === null) continue;
-    lowest = { mcs, rate };
-    if (snr >= MIN_SNR_DB[mcs]) {
-      out.mcs = mcs;
-      out.phyMbps = rate;
-      return out;
+  // Da largura negociada para baixo: em cada uma, o maior MCS que cabe; fica a de maior taxa
+  // (a comparação estrita mantém a mais larga nos empates).
+  const phy = PHY[standard];
+  const widths = Object.keys(phy.nsd).map(Number).filter((w) => w <= widthMHz).sort((a, b) => b - a);
+  let best = null;
+  let floor = null; // menor MCS válido da menor largura, para quando nada cabe
+  for (const w of widths) {
+    const snr = snrAt(w);
+    for (let mcs = phy.maxMcs; mcs >= 0; mcs--) {
+      const rate = dataRate({ standard, widthMHz: w, nss, mcs });
+      if (rate === null) continue;
+      floor = { mcs, rate, width: w, snr };
+      if (snr >= MIN_SNR_DB[mcs]) {
+        if (best === null || rate > best.rate) best = floor;
+        break;
+      }
     }
   }
-  if (lowest) {
-    out.mcs = lowest.mcs;
-    out.phyMbps = lowest.rate;
-    out.unstable = true;
+  const pick = best ?? floor;
+  if (pick) {
+    out.mcs = pick.mcs;
+    out.phyMbps = pick.rate;
+    out.txWidthMHz = pick.width;
+    out.snrDb = round1(pick.snr);
+    out.unstable = best === null;
   }
   return out;
 }
