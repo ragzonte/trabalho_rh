@@ -43,9 +43,25 @@ function wallLine(floor, ax, ay, bx, by, material, openings = []) {
 
 // Parede horizontal (y fixo) e vertical (x fixo): as aberturas vão em coordenadas do mundo.
 const hw = (floor, y, xa, xb, material, openings = []) =>
-  wallLine(floor, xa, y, xb, y, material, openings.map(([a, b, m]) => [a - xa, b - xa, m]));
+  wallLine(
+    floor,
+    xa,
+    y,
+    xb,
+    y,
+    material,
+    openings.map(([a, b, m]) => [a - xa, b - xa, m]),
+  );
 const vw = (floor, x, ya, yb, material, openings = []) =>
-  wallLine(floor, x, ya, x, yb, material, openings.map(([a, b, m]) => [a - ya, b - ya, m]));
+  wallLine(
+    floor,
+    x,
+    ya,
+    x,
+    yb,
+    material,
+    openings.map(([a, b, m]) => [a - ya, b - ya, m]),
+  );
 
 const rect = (x0, y0, x1, y1) => [
   [x0, y0],
@@ -247,7 +263,13 @@ function boxFactory(rng) {
       if (rng.chance(0.4)) add(base, 1, '', radio5(), SEC.wpa2NoWps);
     } else if (kind === 'multilaser') {
       const base = macBase('realtek');
-      add(base, 0, uniqueName(() => `Multilaser_2.4G_${rng.hex(6)}`), radio24({ modern: false }), SEC.wpa2);
+      add(
+        base,
+        0,
+        uniqueName(() => `Multilaser_2.4G_${rng.hex(6)}`),
+        radio24({ modern: false }),
+        SEC.wpa2,
+      );
     } else if (kind === 'dlink') {
       const base = macBase('dlink');
       const ssid = uniqueName(() => `D-Link_DIR-${rng.pick(['615', '809', '842', '610'])}_${rng.hex(2)}`);
@@ -301,7 +323,12 @@ function placeNeighbours(rng, factory, spec, o) {
   const aps = [];
   let guard = 0;
   while (aps.length < o.bssids && guard++ < 500) {
-    const level = o.levels ? rng.weighted(o.levels.map((l) => l[0]), o.levels.map((l) => l[1])) : 0;
+    const level = o.levels
+      ? rng.weighted(
+          o.levels.map((l) => l[0]),
+          o.levels.map((l) => l[1]),
+        )
+      : 0;
     // Mais vizinhos perto do que longe: os de longe quase nunca chegam a aparecer.
     const r = o.minDist + (o.maxDist - o.minDist) * Math.pow(rng.next(), 1.7);
     const a = rng.float(0, 2 * Math.PI);
@@ -440,7 +467,22 @@ function sobrado(seed) {
   for (const f of [0, 1]) {
     // Paredes externas de tijolo, com janelas; a porta da rua fica no térreo.
     walls.push(
-      ...hw(f, 0, 0, 8, B, f === 0 ? [[1.8, 2.7, 'wood'], [5.6, 7.0, 'glass']] : [[1.2, 3.0, 'glass'], [5.6, 6.6, 'glass']]),
+      ...hw(
+        f,
+        0,
+        0,
+        8,
+        B,
+        f === 0
+          ? [
+              [1.8, 2.7, 'wood'],
+              [5.6, 7.0, 'glass'],
+            ]
+          : [
+              [1.2, 3.0, 'glass'],
+              [5.6, 6.6, 'glass'],
+            ],
+      ),
       ...vw(f, 8, 0, 10, B, [[7.2, 8.6, 'glass']]),
       ...hw(f, 10, 0, 8, B, [[1.4, 3.0, 'glass']]),
       ...vw(f, 0, 0, 10, B, [[2.0, 3.6, 'glass']]),
@@ -521,9 +563,21 @@ function sobrado(seed) {
     rooms,
     // Escada reta no hall: sobe de oeste para leste e chega no corredor de cima.
     stairs: [{ fromFloor: 0, toFloor: 1, x: 5.2, y: 5.0, x2: 7.4, y2: 5.0 }],
+    building: false, // casa isolada: entre ela e os vizinhos há ar livre, não laje
     clutter: { dbPerM: 0.3 },
     aps: [
-      ...factory.ownRouter({ vendor: 'tplink', device: 'roteador', ssid, ch24: ch24[0], ch5: ch5[0], offset5: 1, sec: SEC.wpa23, x: rx, y: ry, z: rz }),
+      ...factory.ownRouter({
+        vendor: 'tplink',
+        device: 'roteador',
+        ssid,
+        ch24: ch24[0],
+        ch5: ch5[0],
+        offset5: 1,
+        sec: SEC.wpa23,
+        x: rx,
+        y: ry,
+        z: rz,
+      }),
       ...factory.ownRouter({
         vendor: 'tplink',
         device: 'mesh-cima',
@@ -792,9 +846,7 @@ export function randomSpec(seed, options = {}) {
   let leaves = [{ x0: 0, y0: 0, x1: W, y1: H }];
   const splits = []; // paredes internas: {vertical, at, from, to}
   for (let guard = 0; leaves.length < roomCount && guard < 60; guard++) {
-    const order = leaves
-      .map((r, i) => ({ i, area: (r.x1 - r.x0) * (r.y1 - r.y0) * rng.float(0.8, 1.2) }))
-      .sort((p, q) => q.area - p.area);
+    const order = leaves.map((r, i) => ({ i, area: (r.x1 - r.x0) * (r.y1 - r.y0) * rng.float(0.8, 1.2) })).sort((p, q) => q.area - p.area);
     let done = false;
     for (const { i } of order) {
       const r = leaves[i];
@@ -905,12 +957,20 @@ export function randomSpec(seed, options = {}) {
   });
   // Casa grande costuma ter um repetidor do outro lado.
   if (sizeName === 'grande' && rng.chance(0.6)) {
-    const far = leaves
-      .map((r) => ({ r, d: Math.hypot((r.x0 + r.x1) / 2 - rx, (r.y0 + r.y1) / 2 - ry) }))
-      .sort((p, q) => q.d - p.d)[0].r;
+    const far = leaves.map((r) => ({ r, d: Math.hypot((r.x0 + r.x1) / 2 - rx, (r.y0 + r.y1) / 2 - ry) })).sort((p, q) => q.d - p.d)[0].r;
     const [ex, ey, ez] = nearWall(far);
     aps.push(
-      ...factory.ownRouter({ vendor: 'tplink', device: 'repetidor', ssid: `${ssid}_EXT`, ch24: rng.pick([1, 6, 11]), ch5: null, eirp24: 17, x: ex, y: ey, z: ez }),
+      ...factory.ownRouter({
+        vendor: 'tplink',
+        device: 'repetidor',
+        ssid: `${ssid}_EXT`,
+        ch24: rng.pick([1, 6, 11]),
+        ch5: null,
+        eirp24: 17,
+        x: ex,
+        y: ey,
+        z: ez,
+      }),
     );
   }
 
@@ -921,6 +981,7 @@ export function randomSpec(seed, options = {}) {
     walls,
     rooms,
     stairs: [],
+    building,
     clutter: { dbPerM: round3(building ? rng.float(0.4, 0.6) : rng.float(0.25, 0.4)) },
     aps,
   };

@@ -3,12 +3,13 @@
 // Entrada principal: o texto cru de ScanResult.capabilities, por exemplo
 //   "[WPA2-PSK-CCMP][RSN-PSK+SAE-CCMP][ESS][WPS][MFPC]"
 // O formato mudou bastante entre versões do Android (conferido no código do AOSP,
-// InformationElementUtil.Capabilities, e no wpa_supplicant, que gerava o texto antes):
+// InformationElementUtil.Capabilities, e no wpa_supplicant, de onde o formato veio):
 //   - até o Android 9:  "[WPA2-PSK-CCMP]", "[WPA2-EAP-CCMP]", "[WPA2-FT/PSK+PSK-CCMP-preauth]"
 //   - Android 10+:      cada bloco RSN aparece duas vezes ("[WPA2-...][RSN-...]"); o bloco
 //                       "WPA2" para no primeiro AKM quando há SAE (compatibilidade)
 //   - Android 12+:      "EAP" virou "EAP/SHA1" e "EAP/SHA256"; surgem [MFPR] e [MFPC]
-//   - Android 16:       "CCMP" virou "CCMP-128"; surge "GCMP-128"; flag [RSNO]
+//   - Android 15:       flag [RSNO]
+//   - Android 16:       "CCMP" virou "CCMP-128"; surgem "CCMP-256" e "GCMP-128"
 // Por isso nada aqui depende de posição: cada bloco é lido por palavras conhecidas e o
 // que não for reconhecido é ignorado. Nenhuma função lança exceção.
 

@@ -319,9 +319,7 @@ export function planWalk(world, options = {}) {
   const kind = options.kind || 'tour';
   const rng = createRng('walk', world.seed, options.seed ?? 1, kind);
   const nav = navGrid(world);
-  const floorOrder = (options.floorOrder || Array.from({ length: world.floors }, (_, k) => k)).filter(
-    (f) => f >= 0 && f < world.floors,
-  );
+  const floorOrder = (options.floorOrder || Array.from({ length: world.floors }, (_, k) => k)).filter((f) => f >= 0 && f < world.floors);
 
   const cellXY = (c) => {
     const i = c % nav.nx;
@@ -599,7 +597,13 @@ export function planWalk(world, options = {}) {
     const again = [marked[0], ...rng.shuffle(marked.slice(1, Math.max(1, marked.length - 3)))].slice(0, revisits);
     for (const m of again) {
       // Ninguém para exatamente no mesmo lugar: até um passo de diferença.
-      const near = nearestCell(nav, m.room.floor, cellXY(m.cell)[0] + rng.float(-0.3, 0.3), cellXY(m.cell)[1] + rng.float(-0.3, 0.3), m.room.index);
+      const near = nearestCell(
+        nav,
+        m.room.floor,
+        cellXY(m.cell)[0] + rng.float(-0.3, 0.3),
+        cellXY(m.cell)[1] + rng.float(-0.3, 0.3),
+        m.room.index,
+      );
       visit(near >= 0 ? near : m.cell, m.room, { spot: m.spot });
       plan.steps.push({ type: 'spot', x: at.x, y: at.y, floor: m.room.floor, spot: m.spot, room: m.room.name });
     }

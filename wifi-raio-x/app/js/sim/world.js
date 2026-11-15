@@ -231,11 +231,17 @@ function makeField(rng, corrM, corrZ, waves) {
  * @property {{floor:number,name:string,polygon:number[][]}[]} rooms
  * @property {{fromFloor:number,toFloor:number,x:number,y:number,x2?:number,y2?:number}[]} [stairs]
  *           (x, y) é o pé da escada no andar `fromFloor`; (x2, y2) o topo no andar `toFloor` (padrão: mesmo ponto)
- * @property {Object[]} aps                  veja a tarefa: bssid, ssid, x, y, z, freq, widthMHz, standard,
- *           capabilities, eirpDbm, device, own
+ * @property {Object[]} aps  uma entrada por rede (BSSID): bssid, ssid ('' = oculta), x, y, z (m), freq (MHz),
+ *           widthMHz, standard (WIFI_STANDARD_* do Android), capabilities (texto do Android), eirpDbm,
+ *           device (id do aparelho físico: as redes de um mesmo roteador têm o mesmo device e a mesma posição),
+ *           own (true = é da casa; false = vizinho) e, opcional, secondary ('above' | 'below': canal
+ *           secundário de 40 MHz em 2,4 GHz)
  * @property {{dbPerM:number}} [clutter]  o que não está na planta (paredes e móveis dos vizinhos): perda média,
  *           em dB por metro a 2,4 GHz, do trecho do raio que passa fora da casa. Fica bem abaixo de "uma parede
  *           a cada 4 m" porque o sinal acha caminho por corredores, janelas e difração.
+ * @property {boolean} [building]  true (padrão) = prédio: a laje continua além do contorno, então todo raio que
+ *           muda de andar atravessa laje. false = casa isolada: só conta a laje atravessada dentro do contorno
+ *           (o sinal do vizinho desce pelo ar livre e entra pela parede).
  * @property {Partial<typeof DEFAULT_RF>} [rf]
  */
 
@@ -329,6 +335,7 @@ export function createWorld(spec, seed = 1, rfOverrides = {}) {
   }));
 
   const clutterDbPerM = spec.clutter?.dbPerM ?? 0;
+  const slabsEverywhere = spec.building !== false;
 
   // --- roteadores ---
   const deviceCache = new Map();
@@ -376,7 +383,7 @@ export function createWorld(spec, seed = 1, rfOverrides = {}) {
     const fspl1m = 20 * Math.log10(a.freq) - 27.55; // perda no espaço livre a 1 m
     const widthMHz = a.widthMHz || 20;
     const [cf0, cf1] = centerFreqs({ ...a, widthMHz });
-    return {
+    const ap = {
       index,
       bssid,
       ssid: a.ssid ?? '',
@@ -399,10 +406,14 @@ export function createWorld(spec, seed = 1, rfOverrides = {}) {
       n: rf.n + info.nOffset,
       sweep: sweepFraction(a.freq),
       staleS: info.staleS,
-      _hash: hash,
-      _radio: radio,
-      _device: info,
     };
+    // Estado interno do simulador: fica fora de JSON.stringify e de Object.keys.
+    Object.defineProperties(ap, {
+      _hash: { value: hash },
+      _radio: { value: radio },
+      _device: { value: info },
+    });
+    return ap;
   });
   const apByBssid = new Map(aps.map((a) => [a.bssid, a]));
 
@@ -507,7 +518,16 @@ export function createWorld(spec, seed = 1, rfOverrides = {}) {
     if (outside > 0) wallSum += outside * clutterDbPerM * rf.clutterBand[band];
     const wallsDb = saturate(wallSum * rf.wallScale, rf.wallKneeDb[band], rf.wallCapDb[band]);
 
-    const slabCount = kMax - kMin;
+    let slabCount = kMax - kMin;
+    if (slabCount > 0 && !slabsEverywhere) {
+      // Casa isolada: fora do contorno não há laje para atravessar.
+      slabCount = 0;
+      for (let k = kMin + 1; k <= kMax; k++) {
+        if (k < 1 || k > floors - 1) continue;
+        const t = (k * FLOOR_HEIGHT - az) / dz;
+        if (pointInPolygon(ax + dx * t, ay + dy * t, outlines[k - 1])) slabCount++;
+      }
+    }
     let slabsDb = 0;
     if (slabCount > 0) {
       const oblique = Math.min(1.15, 1 / Math.sqrt(Math.max(Math.abs(dz) / d, 1e-3)));
@@ -561,8 +581,8 @@ export function createWorld(spec, seed = 1, rfOverrides = {}) {
   }
 
   // Uma medição: média + corpo + desvanecimento do lugar + ruído do instante.
-  function measure(ap, pos, heading, t, noiseScale) {
-    const tk = Math.round(t * 1000);
+  // `tk` identifica a varredura (ou a amostra): é a chave do ruído, igual para todas as redes dela.
+  function measure(ap, pos, heading, tk, noiseScale) {
     const radio = ap._radio;
     let v = meanRssi(ap, pos) - bodyLoss(ap, pos, heading);
     v += rf.fadeSigmaDb * radio.fade(pos.x, pos.y, pos.z);
@@ -646,7 +666,7 @@ export function createWorld(spec, seed = 1, rfOverrides = {}) {
       const jitter = 0.01 * hashUniform(ap._hash, tk, 6);
       const heardAt = t - latency - sweep * (1 - Math.min(1, ap.sweep + jitter));
       const pos = q.path ? toPosition(q.path(heardAt), base) : base;
-      const level = Math.round(measure(ap, pos, pos.heading, heardAt, 1));
+      const level = Math.round(measure(ap, pos, pos.heading, tk, 1));
       const heard = hashUniform(ap._hash, tk, 7) < detectProbability(level);
       if (heard) {
         out.push({
@@ -681,7 +701,7 @@ export function createWorld(spec, seed = 1, rfOverrides = {}) {
   function track(ap, pos, heading, t = pos.t ?? 0) {
     const a = resolveAp(ap);
     const p = toPosition(pos);
-    const level = Math.round(measure(a, p, heading ?? p.heading, t, 0.75));
+    const level = Math.round(measure(a, p, heading ?? p.heading, Math.round(t * 1000), 0.75));
     return Math.max(-100, Math.min(level, -18));
   }
 

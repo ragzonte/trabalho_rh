@@ -1,0 +1,435 @@
+// O estado único do app. As telas leem daqui e nunca pedem dados de varredura à ponte.
+//
+// ---------------------------------------------------------------------------------------------
+// COMO USAR (as telas recebem o store em ctx.store)
+//
+//   const state = store.get();                                // retrato atual (não altere os objetos)
+//   const off = store.subscribe((s) => s.aps, (aps, antes, state) => { ... });
+//       O ouvinte roda quando o valor escolhido muda (comparação por ===). Tudo o que muda no
+//       estado é trocado por um objeto novo, então `(s) => s.aps` dispara uma vez por varredura.
+//       Opções: { immediate: true } chama já com o valor atual; { equal: shallowEqual } para
+//       seletores que montam um objeto/lista a cada chamada.
+//       Dentro de uma tela, o que for inscrito por ctx.store é cancelado sozinho ao sair dela.
+//
+// ---------------------------------------------------------------------------------------------
+// FORMA DO ESTADO
+//
+//   backend      'native' | 'sim' | null       quem responde: o celular ou o simulador (modo demonstração)
+//   info         DeviceInfo | null             (bridge.js) modelo, versão do Android, faixas que o celular suporta
+//   status       Status | null                 (bridge.js) Wi-Fi/localização/permissão/limite; canScan
+//   connection   Connection | null             (bridge.js) a rede em que o celular está conectado
+//   rssi         RssiSample | null             última leitura do sinal da rede conectada (~1 por segundo)
+//   theme        'dark' | 'light'              tema em uso (já resolvido quando o ajuste é "sistema")
+//   settings     Settings                      (prefs.js) theme, scanIntervalS, demo, demoWorld, units, tipsDismissed
+//   favorites    Set<string>                   "minhas redes": SSIDs marcados pelo usuário (fica salvo)
+//   own          Set<string>                   BSSIDs "da casa": o AP conectado, os outros rádios do mesmo
+//                                              aparelho e todos os APs das redes favoritas
+//   vendorsReady boolean                       a tabela de fabricantes já carregou
+//
+//   scan         a última varredura:
+//     seq          número de varreduras recebidas desde que o app abriu (0 = nenhuma ainda)
+//     ts           relógio do celular quando a lista foi lida (ms desde 1970) | null
+//     receivedAt   relógio do app quando o evento chegou | null
+//     freshAt      relógio do app quando chegou a última lista NOVA (fresh) | null
+//     dataAt       relógio do app de quando os dados da tela são: igual a freshAt ou, se só chegou
+//                  lista em cache, estimado pela idade das leituras | null    <- use para "atualizado há X"
+//     fresh        true = varredura nova; false = lista em cache (pedido recusado/limitado)
+//     source       'request' | 'system' | 'cache' | null
+//     count        quantos BSSIDs vieram
+//     scanning     há uma busca em andamento
+//     lastAccepted o último pedido de busca foi aceito? (null = nenhum pedido ainda)
+//     lastReason   motivo da última recusa ('throttled', ...) | null
+//
+//   loop         ScanLoopState (scan-loop.js): mode, paused, throttled, intervalMs, nextAt...
+//                loop.throttled === true -> o Android está limitando as buscas (mostre a idade dos dados)
+//
+//   aps          Ap[]       um por BSSID, do sinal mais forte para o mais fraco. Campos de core/model.js
+//                           (id, bssid, ssid, hidden, name, rssi, quality, level, freq, band, channel, occ,
+//                           widthMHz, security, gen, ..., ageMs, stale, raw) MAIS os que o store acrescenta:
+//                             vendor       nome do fabricante pelo MAC | null
+//                             vendorGuess  true = fabricante provável (BSSID virtual do roteador)
+//                             connected    é o BSSID em que o celular está conectado
+//                             favorite     o SSID está em "minhas redes"
+//                             own          o BSSID está em state.own
+//   devices      aparelhos físicos (core/model.js groupByDevice): BSSIDs do mesmo roteador juntos
+//   networks     redes por nome (core/model.js groupBySsid)
+//
+// Derivados que não ficam no estado:
+//   store.apById(bssid)     -> Ap | null (da lista atual)
+//   store.history(bssid)    -> histórico de sinal daquele BSSID (ApTracker.history)
+//   store.rssiHistory()     -> RssiSample[] dos últimos minutos da rede conectada (o mais novo por último)
+//   store.connectedAp()     -> Ap | null
+//
+// ---------------------------------------------------------------------------------------------
+// AÇÕES
+//
+// Para as telas:
+//   toggleFavorite(ssid) -> boolean      marca/desmarca "minha rede"; devolve o estado novo
+//   setFavorite(ssid, on)
+//   isFavorite(ssid) / isOwn(bssid)
+//   updateSettings(patch) -> Settings    grava nos ajustes (validado por prefs.js) e avisa quem escuta
+//   dismissTip(id) / resetTips()         dicas dispensáveis (components.tipBanner)
+//   clearSavedData()                     apaga favoritos e ajustes guardados (volta aos padrões)
+//
+// Só para o main.js e o scan-loop.js (a "fiação" do app):
+//   setBackend(kind) · setInfo(info) · setStatus(status) · setConnection(conn) · setRssi(sample)
+//   ingestScan(scanEvent) · setLoop(loopState) · setTheme('dark'|'light') · setVendorLookup(lookup)
+//   resetScanData()                      ao trocar de celular de verdade para simulador (e vice-versa)
+// ---------------------------------------------------------------------------------------------
+
+import { ApTracker, groupByDevice, groupBySsid } from './core/model.js';
+import { DEFAULT_SETTINGS, sanitizeSettings } from './prefs.js';
+
+/** Um BSSID que não aparece há mais tempo que isto sai da lista. */
+export const MAX_AP_AGE_MS = 90_000;
+/** Quantas leituras do sinal da rede conectada ficam guardadas (~15 min a 1 por segundo). */
+export const RSSI_HISTORY_MAX = 900;
+
+/** Comparação rasa (um nível) para seletores que devolvem objeto ou lista. */
+export function shallowEqual(a, b) {
+  if (Object.is(a, b)) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) if (!Object.is(a[k], b[k])) return false;
+  return true;
+}
+
+const EMPTY_SCAN = Object.freeze({
+  seq: 0,
+  ts: null,
+  receivedAt: null,
+  freshAt: null,
+  dataAt: null,
+  fresh: false,
+  source: null,
+  count: 0,
+  scanning: false,
+  lastAccepted: null,
+  lastReason: null,
+});
+
+const EMPTY_LOOP = Object.freeze({
+  running: false,
+  mode: 'normal',
+  scanning: false,
+  paused: 'stopped',
+  throttled: false,
+  intervalMs: 10_000,
+  nextAt: null,
+  lastRequestAt: null,
+  lastAccepted: null,
+  lastReason: null,
+  lastFreshAt: null,
+  lastEventAt: null,
+});
+
+const macOf = (x) => (typeof x === 'string' ? x.toLowerCase() : '');
+
+/**
+ * @param {object} [deps]
+ * @param {ReturnType<import('./prefs.js').createPrefs>} [deps.prefs]  sem isto nada é gravado (testes)
+ * @param {() => number} [deps.now]
+ * @param {(err:unknown) => void} [deps.onError]  chamado quando um ouvinte lança (o store segue funcionando)
+ */
+export function createStore({ prefs = null, now = Date.now, onError } = {}) {
+  let tracker = new ApTracker();
+  let vendors = null; // OuiLookup de core/oui.js
+  let rssiLog = [];
+
+  let state = {
+    backend: null,
+    info: null,
+    status: null,
+    connection: null,
+    rssi: null,
+    theme: 'dark',
+    settings: prefs ? prefs.loadSettings() : sanitizeSettings(DEFAULT_SETTINGS),
+    favorites: new Set(prefs ? prefs.loadFavorites() : []),
+    own: new Set(),
+    vendorsReady: false,
+    scan: EMPTY_SCAN,
+    loop: EMPTY_LOOP,
+    aps: [],
+    devices: [],
+    networks: [],
+  };
+  let byId = new Map();
+
+  const subs = new Set(); // {selector, listener, equal, value}
+  let depth = 0; // ações aninhadas: avisa só quando a de fora termina
+  let dirty = false;
+
+  function report(err) {
+    console.error('[store] erro num ouvinte', err);
+    if (onError) {
+      try {
+        onError(err);
+      } catch {
+        // quem trata erro não pode derrubar o store
+      }
+    }
+  }
+
+  function notify() {
+    for (const sub of [...subs]) {
+      if (!subs.has(sub)) continue;
+      let value;
+      try {
+        value = sub.selector(state);
+      } catch (err) {
+        report(err);
+        continue;
+      }
+      if (sub.equal(value, sub.value)) continue;
+      const prev = sub.value;
+      sub.value = value;
+      try {
+        sub.listener(value, prev, state);
+      } catch (err) {
+        report(err);
+      }
+    }
+  }
+
+  /** Troca campos do estado; os ouvintes são avisados uma vez, no fim da ação mais externa. */
+  function commit(patch) {
+    state = { ...state, ...patch };
+    dirty = true;
+    if (depth === 0) flush();
+  }
+
+  function flush() {
+    // um ouvinte pode disparar outra ação; repete até assentar
+    let guard = 0;
+    while (dirty && guard++ < 50) {
+      dirty = false;
+      notify();
+    }
+  }
+
+  function action(fn) {
+    depth += 1;
+    try {
+      return fn();
+    } finally {
+      depth -= 1;
+      if (depth === 0) flush();
+    }
+  }
+
+  // --- listas derivadas ------------------------------------------------------------------------
+
+  function vendorOf(bssid) {
+    if (!vendors) return null;
+    try {
+      return vendors.vendor(bssid) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** BSSIDs "da casa": o conectado, os outros rádios do mesmo aparelho e os APs das redes favoritas. */
+  function ownSet(aps, devices, connectedBssid, favorites) {
+    const own = new Set();
+    for (const ap of aps) if (favorites.has(ap.ssid) && ap.ssid) own.add(ap.bssid);
+    if (connectedBssid) {
+      own.add(connectedBssid);
+      for (const device of devices) {
+        const members = Array.isArray(device.aps) ? device.aps : [];
+        if (members.some((ap) => ap.bssid === connectedBssid)) for (const ap of members) own.add(ap.bssid);
+      }
+    }
+    return own;
+  }
+
+  /** Refaz aps/devices/networks/own a partir do que o rastreador tem. Uma vez por varredura. */
+  function derive(extra = {}) {
+    const connection = 'connection' in extra ? extra.connection : state.connection;
+    const favorites = 'favorites' in extra ? extra.favorites : state.favorites;
+    const connectedBssid = connection && connection.connected ? macOf(connection.bssid) : '';
+
+    const aps = tracker.list({ maxAgeMs: MAX_AP_AGE_MS, now: now() });
+    for (const ap of aps) {
+      const v = vendorOf(ap.bssid);
+      ap.vendor = v && v.name ? v.name : null;
+      ap.vendorGuess = !!(v && v.guess);
+      ap.connected = !!connectedBssid && ap.bssid === connectedBssid;
+      ap.favorite = !!ap.ssid && favorites.has(ap.ssid);
+    }
+    aps.sort((a, b) => (b.rssi ?? -999) - (a.rssi ?? -999) || (a.bssid < b.bssid ? -1 : 1));
+    const devices = groupByDevice(aps);
+    const networks = groupBySsid(aps);
+    const own = ownSet(aps, devices, connectedBssid, favorites);
+    for (const ap of aps) ap.own = own.has(ap.bssid);
+    byId = new Map(aps.map((ap) => [ap.bssid, ap]));
+    return { ...extra, aps, devices, networks, own };
+  }
+
+  // --- API -------------------------------------------------------------------------------------
+
+  const store = {
+    /** O estado atual. Trate como somente leitura. */
+    get: () => state,
+
+    /**
+     * @template T
+     * @param {(state:object) => T} selector
+     * @param {(value:T, prev:T, state:object) => void} listener
+     * @param {{immediate?:boolean, equal?:(a:T, b:T) => boolean}} [options]
+     * @returns {() => void} cancela a inscrição
+     */
+    subscribe(selector, listener, { immediate = false, equal = Object.is } = {}) {
+      const sub = { selector, listener, equal, value: selector(state) };
+      subs.add(sub);
+      if (immediate) {
+        try {
+          listener(sub.value, undefined, state);
+        } catch (err) {
+          report(err);
+        }
+      }
+      return () => subs.delete(sub);
+    },
+
+    /** Agrupa várias ações: os ouvintes são avisados uma vez só, no fim. */
+    batch: (fn) => action(fn),
+
+    apById: (bssid) => byId.get(macOf(bssid)) || null,
+    connectedAp: () => state.aps.find((ap) => ap.connected) || null,
+    history: (bssid) => tracker.history(macOf(bssid)),
+    rssiHistory: () => rssiLog.slice(),
+    isFavorite: (ssid) => state.favorites.has(ssid),
+    isOwn: (bssid) => state.own.has(macOf(bssid)),
+
+    // --- fiação ---
+
+    setBackend(kind) {
+      commit({ backend: kind === 'native' || kind === 'sim' ? kind : null });
+    },
+
+    setInfo(info) {
+      commit({ info: info && typeof info === 'object' ? info : null });
+    },
+
+    setStatus(status) {
+      commit({ status: status && typeof status === 'object' ? status : null });
+    },
+
+    setConnection(connection) {
+      const next = connection && typeof connection === 'object' ? connection : null;
+      const before = state.connection && state.connection.connected ? macOf(state.connection.bssid) : '';
+      const after = next && next.connected ? macOf(next.bssid) : '';
+      // só refaz as listas quando o BSSID conectado muda (a conexão é reenviada com frequência)
+      if (before !== after) commit(derive({ connection: next }));
+      else commit({ connection: next });
+    },
+
+    setRssi(sample) {
+      if (!sample || typeof sample !== 'object' || typeof sample.rssi !== 'number') return;
+      rssiLog.push(sample);
+      if (rssiLog.length > RSSI_HISTORY_MAX) rssiLog = rssiLog.slice(-RSSI_HISTORY_MAX);
+      commit({ rssi: sample });
+    },
+
+    /** @param {import('./bridge.js').ScanEvent} ev */
+    ingestScan(ev) {
+      if (!ev || typeof ev !== 'object' || !Array.isArray(ev.aps)) return;
+      const t = now();
+      tracker.update(ev);
+      const fresh = ev.fresh !== false;
+      let dataAt = state.scan.dataAt;
+      if (fresh) dataAt = t;
+      else {
+        // lista em cache: ela é tão velha quanto a leitura mais recente que traz
+        let minAge = Infinity;
+        for (const ap of ev.aps) if (ap && typeof ap.ageMs === 'number' && ap.ageMs >= 0 && ap.ageMs < minAge) minAge = ap.ageMs;
+        if (Number.isFinite(minAge) && (dataAt === null || t - minAge > dataAt)) dataAt = t - minAge;
+      }
+      commit(
+        derive({
+          scan: {
+            ...state.scan,
+            seq: state.scan.seq + 1,
+            ts: typeof ev.ts === 'number' ? ev.ts : t,
+            receivedAt: t,
+            freshAt: fresh ? t : state.scan.freshAt,
+            dataAt,
+            fresh,
+            source: typeof ev.source === 'string' ? ev.source : null,
+            count: ev.aps.length,
+          },
+        }),
+      );
+    },
+
+    /** @param {import('./scan-loop.js').ScanLoopState} loop */
+    setLoop(loop) {
+      const scan = state.scan;
+      const same = scan.scanning === loop.scanning && scan.lastAccepted === loop.lastAccepted && scan.lastReason === loop.lastReason;
+      commit({
+        loop,
+        scan: same ? scan : { ...scan, scanning: loop.scanning, lastAccepted: loop.lastAccepted, lastReason: loop.lastReason },
+      });
+    },
+
+    setTheme(theme) {
+      const next = theme === 'light' ? 'light' : 'dark';
+      if (next !== state.theme) commit({ theme: next });
+    },
+
+    /** @param {import('./core/oui.js').OuiLookup|null} lookup */
+    setVendorLookup(lookup) {
+      vendors = lookup && typeof lookup.vendor === 'function' ? lookup : null;
+      commit(derive({ vendorsReady: !!(vendors && vendors.loaded !== false) }));
+    },
+
+    resetScanData() {
+      tracker = new ApTracker();
+      rssiLog = [];
+      commit(derive({ scan: EMPTY_SCAN, rssi: null, connection: null, status: null, info: null }));
+    },
+
+    // --- para as telas ---
+
+    setFavorite(ssid, on) {
+      if (typeof ssid !== 'string' || ssid === '') return false;
+      const favorites = new Set(state.favorites);
+      if (on) favorites.add(ssid);
+      else favorites.delete(ssid);
+      if (prefs) prefs.saveFavorites(favorites);
+      commit(derive({ favorites }));
+      return favorites.has(ssid);
+    },
+
+    toggleFavorite(ssid) {
+      return store.setFavorite(ssid, !state.favorites.has(ssid));
+    },
+
+    /** @param {Partial<import('./prefs.js').Settings>} patch */
+    updateSettings(patch) {
+      const settings = prefs ? prefs.saveSettings({ ...state.settings, ...(patch || {}) }) : sanitizeSettings({ ...state.settings, ...(patch || {}) });
+      commit({ settings });
+      return settings;
+    },
+
+    dismissTip(id) {
+      if (typeof id !== 'string' || !id || state.settings.tipsDismissed.includes(id)) return;
+      store.updateSettings({ tipsDismissed: [...state.settings.tipsDismissed, id] });
+    },
+
+    resetTips() {
+      store.updateSettings({ tipsDismissed: [] });
+    },
+
+    /** Apaga o que o app guardou aqui (favoritos e ajustes). Os mapas salvos são de mapping/storage. */
+    clearSavedData() {
+      if (prefs) prefs.clear();
+      commit(derive({ favorites: new Set(), settings: sanitizeSettings(DEFAULT_SETTINGS) }));
+    },
+  };
+
+  return store;
+}

@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">WiFi Raio-X</string>
+    <string name="share_file_title">Salvar ou compartilhar</string>
+    <string name="webview_missing">O componente WebView do Android não está disponível. Atualize o “Android System WebView” e abra o app de novo.</string>
+    <string name="no_app_for_link">Nenhum aplicativo instalado abre este link.</string>
 </resources>

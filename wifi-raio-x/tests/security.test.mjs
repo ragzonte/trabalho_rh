@@ -228,7 +228,7 @@ test('flags soltas: WPS, MFPC, MFPR, P2P, ESS, IBSS, MESH', () => {
 // formatos por versão do Android
 // ---------------------------------------------------------------------------
 
-test('formato antigo (até o Android 9, vindo do wpa_supplicant)', () => {
+test('formato antigo (até o Android 9, herdado do wpa_supplicant)', () => {
   check('[WPA2-PSK-CCMP][ESS]', { protocols: ['WPA2'], akms: ['PSK'], ciphers: ['CCMP'], label: 'WPA2', level: 3 });
   check('[WPA2-PSK-CCMP-preauth][ESS]', { akms: ['PSK'], ciphers: ['CCMP'], label: 'WPA2' });
   check('[WPA-PSK-CCMP+TKIP][WPA2-PSK-CCMP+TKIP][WPS][ESS]', { protocols: ['WPA', 'WPA2'], ciphers: ['CCMP', 'TKIP'], wps: true, label: 'WPA/WPA2' });

@@ -153,7 +153,8 @@ export function listScenarios(set = 'dev') {
  * @returns {{desc:Object, world:Object, plan:Object, survey:Object, truth:Object}}
  */
 export function buildScenario(desc) {
-  const spec = desc.world.type === 'preset' ? presetSpec(desc.world.id, desc.world.seed) : randomSpec(desc.world.seed, { size: desc.world.size });
+  const spec =
+    desc.world.type === 'preset' ? presetSpec(desc.world.id, desc.world.seed) : randomSpec(desc.world.seed, { size: desc.world.size });
   const world = createWorld(spec, desc.world.seed, desc.rf || {});
   const walk = { ...desc.walk };
   if (walk.auto) {
@@ -379,19 +380,30 @@ export function renderSvg(scenario, solution, result) {
 
   for (let f = 0; f < world.floors; f++) {
     if (world.floors > 1) {
-      out.push(`<text x="${X(b.minX, f).toFixed(1)}" y="${(Y(b.maxY) - 8).toFixed(1)}" font-size="12" fill="${INK.text2}">${f === 0 ? 'Térreo' : `${f}º andar`}</text>`);
+      out.push(
+        `<text x="${X(b.minX, f).toFixed(1)}" y="${(Y(b.maxY) - 8).toFixed(1)}" font-size="12" fill="${INK.text2}">${f === 0 ? 'Térreo' : `${f}º andar`}</text>`,
+      );
     }
     for (const r of world.roomsOn(f)) {
-      out.push(`<polygon points="${r.polygon.map((p) => `${X(p[0], f).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(' ')}" fill="${INK.room}"/>`);
-      out.push(`<text x="${X(r.centroid.x, f).toFixed(1)}" y="${Y(r.centroid.y).toFixed(1)}" font-size="11" text-anchor="middle" fill="${INK.muted}">${esc(r.name)}</text>`);
+      out.push(
+        `<polygon points="${r.polygon.map((p) => `${X(p[0], f).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(' ')}" fill="${INK.room}"/>`,
+      );
+      out.push(
+        `<text x="${X(r.centroid.x, f).toFixed(1)}" y="${Y(r.centroid.y).toFixed(1)}" font-size="11" text-anchor="middle" fill="${INK.muted}">${esc(r.name)}</text>`,
+      );
     }
     for (const w of world.wallsOn(f)) {
-      out.push(`<line x1="${X(w.x1, f).toFixed(1)}" y1="${Y(w.y1).toFixed(1)}" x2="${X(w.x2, f).toFixed(1)}" y2="${Y(w.y2).toFixed(1)}" ${WALL_STYLE[w.material]} stroke-linecap="round"/>`);
+      out.push(
+        `<line x1="${X(w.x1, f).toFixed(1)}" y1="${Y(w.y1).toFixed(1)}" x2="${X(w.x2, f).toFixed(1)}" y2="${Y(w.y2).toFixed(1)}" ${WALL_STYLE[w.material]} stroke-linecap="round"/>`,
+      );
     }
     // Caminho real: trechos seguidos no mesmo andar.
     let run = [];
     const flush = () => {
-      if (run.length > 1) out.push(`<polyline points="${run.join(' ')}" fill="none" stroke="${INK.truth}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`);
+      if (run.length > 1)
+        out.push(
+          `<polyline points="${run.join(' ')}" fill="none" stroke="${INK.truth}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`,
+        );
       run = [];
     };
     truth.points.forEach((p, i) => {
@@ -408,7 +420,9 @@ export function renderSvg(scenario, solution, result) {
         const err = Math.hypot(p.x - t.x, p.y - t.y);
         const px = X(p.x, f).toFixed(1);
         const py = Y(p.y).toFixed(1);
-        out.push(`<line x1="${px}" y1="${py}" x2="${X(t.x, f).toFixed(1)}" y2="${Y(t.y).toFixed(1)}" stroke="${INK.truth}" stroke-width="0.6"/>`);
+        out.push(
+          `<line x1="${px}" y1="${py}" x2="${X(t.x, f).toFixed(1)}" y2="${Y(t.y).toFixed(1)}" stroke="${INK.truth}" stroke-width="0.6"/>`,
+        );
         dots.push(
           `<circle cx="${px}" cy="${py}" r="4" fill="${colorOf(err)}" stroke="${INK.surface}" stroke-width="1.5"><title>varredura ${i + 1} · ${br(survey.scans[i].t, 0)} s · erro ${br(err)} m</title></circle>`,
         );
@@ -425,7 +439,9 @@ export function renderSvg(scenario, solution, result) {
         const g = fit.apply(guess);
         const gx = Math.max(6, Math.min(W - 6, X(g.x, f)));
         const gy = Math.max(top, Math.min(top + panelH, Y(g.y)));
-        out.push(`<line x1="${ax.toFixed(1)}" y1="${ay.toFixed(1)}" x2="${gx.toFixed(1)}" y2="${gy.toFixed(1)}" stroke="${AP_COLOR}" stroke-width="1"/>`);
+        out.push(
+          `<line x1="${ax.toFixed(1)}" y1="${ay.toFixed(1)}" x2="${gx.toFixed(1)}" y2="${gy.toFixed(1)}" stroke="${AP_COLOR}" stroke-width="1"/>`,
+        );
         out.push(
           `<circle cx="${gx.toFixed(1)}" cy="${gy.toFixed(1)}" r="6" fill="${INK.surface}" stroke="${AP_COLOR}" stroke-width="2"><title>${esc(ap.ssid || '(oculta)')} ${ap.band === 0 ? '2,4' : ap.band === 1 ? '5' : '6'} GHz estimado · erro ${br(Math.hypot(g.x - ap.x, g.y - ap.y))} m</title></circle>`,
         );
@@ -544,7 +560,8 @@ function tableHeader() {
 }
 
 function tableRow(r) {
-  if (!r.ok) return `${r.name.padEnd(34)}${String(r.scans).padStart(4)}${f(r.score, 7, 1)}  FALHOU: ${String(r.error).split('\n')[0].slice(0, 90)}`;
+  if (!r.ok)
+    return `${r.name.padEnd(34)}${String(r.scans).padStart(4)}${f(r.score, 7, 1)}  FALHOU: ${String(r.error).split('\n')[0].slice(0, 90)}`;
   return (
     r.name.padEnd(34) +
     String(r.scans).padStart(4) +
@@ -565,7 +582,22 @@ function tableRow(r) {
 }
 
 function summaryHeader() {
-  return 'grupo'.padEnd(18) + '  n' + ' falhas' + '   nota' + '  medR' + '  p90R' + '  medS' + ' escala' + ' apCasa' + ' apPerto' + ' confi' + ' conti' + ' cômodo' + '     ms';
+  return (
+    'grupo'.padEnd(18) +
+    '  n' +
+    ' falhas' +
+    '   nota' +
+    '  medR' +
+    '  p90R' +
+    '  medS' +
+    ' escala' +
+    ' apCasa' +
+    ' apPerto' +
+    ' confi' +
+    ' conti' +
+    ' cômodo' +
+    '     ms'
+  );
 }
 
 function summaryRow(name, a) {
@@ -627,7 +659,9 @@ async function main() {
     for (const [name, a] of Object.entries(bench.modes)) console.log(summaryRow(name, a));
     console.log('');
     console.log(summaryRow('TOTAL', bench.aggregate));
-    console.log(`\nNOTA FINAL: ${bench.aggregate.score.toFixed(1)}  (${bench.results.length} cenários, ${bench.aggregate.failures} falhas, ${(wallMs / 1000).toFixed(1)} s)`);
+    console.log(
+      `\nNOTA FINAL: ${bench.aggregate.score.toFixed(1)}  (${bench.results.length} cenários, ${bench.aggregate.failures} falhas, ${(wallMs / 1000).toFixed(1)} s)`,
+    );
     if (args.svgDir) console.log(`desenhos em ${path.resolve(args.svgDir)}`);
   }
 }

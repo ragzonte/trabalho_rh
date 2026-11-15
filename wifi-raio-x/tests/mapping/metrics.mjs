@@ -118,8 +118,9 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
  * Confiabilidade e continuidade (Venna & Kaski), entre 0 e 1.
  * - confiabilidade (trust): os vizinhos na ESTIMATIVA são vizinhos de verdade?
  * - continuidade: os vizinhos de VERDADE continuam vizinhos na estimativa?
- * Empates na verdade (varreduras no mesmo ponto) contam todos como vizinhos; na estimativa o
- * desempate é pelo índice, para que juntar tudo num ponto só não saia de graça.
+ * Varreduras feitas no mesmo ponto empatam na distância: os empatados dividem o melhor posto
+ * do grupo (todos contam como vizinhos). Na estimativa isso só vale para grupos pequenos (até k);
+ * um empate em massa é desempatado pelo índice, para que juntar tudo num ponto não saia de graça.
  */
 export function trustContinuity(est, truth, k = NEIGHBOURS) {
   const n = Math.min(est.length, truth.length);
@@ -138,9 +139,15 @@ export function trustContinuity(est, truth, k = NEIGHBOURS) {
       dt[j] = dist(truth, i, j);
       if (j !== i) order[m++] = j;
     }
-    // Estimativa: posto pela ordem (distância, índice).
+    // Estimativa: posto pela ordem (distância, índice); empates pequenos dividem o posto.
     order.sort((p, q) => de[p] - de[q] || p - q);
-    for (let r = 0; r < order.length; r++) rankEst[order[r]] = r + 1;
+    for (let r = 0; r < order.length; ) {
+      let end = r + 1;
+      while (end < order.length && de[order[end]] - de[order[r]] < 1e-9) end++;
+      const share = end - r <= k;
+      for (let q = r; q < end; q++) rankEst[order[q]] = share ? r + 1 : q + 1;
+      r = end;
+    }
     // Verdade: pontos empatados dividem o melhor posto do grupo.
     order.sort((p, q) => dt[p] - dt[q] || p - q);
     for (let r = 0; r < order.length; r++) {
@@ -195,11 +202,14 @@ export function failure(reason, runtimeMs = null) {
  * Nota (`score`, quanto MENOR melhor; 0 = perfeito; 100 = tão ruim quanto juntar todos os
  * pontos num lugar só; teto 200, que é também a nota fixa de falha):
  *
- *   score = 100 · [ 0,6 · medianRigid / R50  +  0,2 · p90Rigid / R90  +  0,2 · medianSim / R50 ]
+ *   score = 100 · [ 0,55 · medianRigid / R50  +  0,20 · p90Rigid / R90  +  0,15 · medianSim / R50
+ *                   +  0,10 · min(1, |log2(scaleRatio)|) ]
  *
- * com cada razão limitada a 2. R50 e R90 são a mediana e o percentil 90 da distância dos pontos
- * verdadeiros ao seu centro: exatamente o erro de quem "responde" com um ponto só. Assim a nota
- * vale igual numa kitnet e num escritório, e uma solução degenerada ou aleatória não passa de ~100.
+ * com cada razão de erro limitada a 2. R50 e R90 são a mediana e o percentil 90 da distância dos
+ * pontos verdadeiros ao seu centro: exatamente o erro de quem "responde" com um ponto só. Assim a
+ * nota vale igual numa kitnet e num escritório, e uma solução degenerada ou aleatória fica em ~100
+ * ou pior. O último termo cobra o tamanho do mapa (metade ou o dobro do real = punição cheia): sem
+ * ele, encolher uma solução ruidosa em direção ao centro renderia alguns pontos de graça.
  *
  * @param {import('../../app/js/mapping/types.js').MapSolution} solution
  * @param {Object} truth    o que simulateSurvey devolve em `truth`
@@ -301,9 +311,13 @@ export function evaluate(solution, truth, survey, extra = {}) {
   const medianRigid = median(errRigid);
   const p90Rigid = quantile(errRigid, 0.9);
   const medianSim = median(errSim);
+  const sizeError = scaleRatio > 0 ? Math.min(1, Math.abs(Math.log2(scaleRatio))) : 1;
   const score =
     100 *
-    (0.6 * Math.min(2, medianRigid / ref50) + 0.2 * Math.min(2, p90Rigid / ref90) + 0.2 * Math.min(2, medianSim / ref50));
+    (0.55 * Math.min(2, medianRigid / ref50) +
+      0.2 * Math.min(2, p90Rigid / ref90) +
+      0.15 * Math.min(2, medianSim / ref50) +
+      0.1 * sizeError);
 
   return {
     ok: true,

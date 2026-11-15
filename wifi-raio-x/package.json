@@ -10,5 +10,8 @@
     "test:e2e": "node tests/e2e/run.mjs",
     "oui": "node tools/build-oui.mjs",
     "vendor": "node tools/vendor.mjs"
+  },
+  "devDependencies": {
+    "oui-data": "2.1.60"
   }
 }

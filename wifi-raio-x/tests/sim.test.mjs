@@ -49,7 +49,13 @@ const std = (list) => {
 
 function tourSurvey(id, seed = 1, options = {}) {
   const world = presetWorld(id, seed);
-  const plan = planWalk(world, { kind: options.kind || 'tour', seed, minLengthM: options.minLengthM ?? 120, count: options.count, floorOrder: options.floorOrder });
+  const plan = planWalk(world, {
+    kind: options.kind || 'tour',
+    seed,
+    minLengthM: options.minLengthM ?? 120,
+    count: options.count,
+    floorOrder: options.floorOrder,
+  });
   return { world, plan, ...simulateSurvey(world, plan, { seed, scanIntervalS: options.scanIntervalS ?? 3.5 }) };
 }
 
@@ -124,7 +130,8 @@ test('propagação: mais perto é mais forte, com a queda do modelo log-distânc
   assert.equal(world.meanRssi(ap, at(5.1)), world.meanRssi(ap, at(5.3)));
   // Com sombra, vale na média.
   const shadowed = lab([], { shadowSigmaDb: 3 });
-  const ring = (r) => mean(Array.from({ length: 60 }, (_, i) => shadowed.meanRssi(shadowed.aps[0], at(5 + r * Math.cos(i), 5 + 0.1 * r * Math.sin(i)))));
+  const ring = (r) =>
+    mean(Array.from({ length: 60 }, (_, i) => shadowed.meanRssi(shadowed.aps[0], at(5 + r * Math.cos(i), 5 + 0.1 * r * Math.sin(i)))));
   assert.ok(ring(3) > ring(9) + 6);
 });
 
@@ -188,6 +195,36 @@ test('propagação: a laje derruba bastante o sinal, mais ainda em 5 GHz', () =>
   assert.equal(upstairsWall.explain(upstairsWall.aps[0], at(30, 5, 1)).wallCount, 0);
 });
 
+test('propagação: casa isolada só tem laje dentro do contorno; prédio tem em toda parte', () => {
+  // Vizinho no andar de cima da casa ao lado; o celular está no térreo, perto da parede.
+  const spec = (building) => ({
+    name: 'casa',
+    floors: 2,
+    building,
+    outline: [
+      [0, 0],
+      [8, 0],
+      [8, 8],
+      [0, 8],
+    ],
+    walls: [],
+    rooms: [],
+    aps: [{ bssid: '02:00:00:00:00:aa', ssid: 'vizinho', x: 20, y: 4, z: FLOOR_HEIGHT + 1.5, freq: 2437, eirpDbm: 20 }],
+  });
+  const phone = { x: 7, y: 4, z: PHONE_HEIGHT };
+  const house = createWorld(spec(false), 1, { shadowSigmaDb: 0 });
+  const tower = createWorld(spec(true), 1, { shadowSigmaDb: 0 });
+  assert.equal(house.explain(house.aps[0], phone).slabCount, 0, 'o raio desce pelo ar livre');
+  assert.equal(tower.explain(tower.aps[0], phone).slabCount, 1);
+  assert.ok(house.meanRssi(house.aps[0], phone) > tower.meanRssi(tower.aps[0], phone) + 12);
+  // Dentro da casa a laje existe: roteador próprio em cima, celular embaixo.
+  const inside = createWorld(
+    { ...spec(false), aps: [{ bssid: '02:00:00:00:00:bb', ssid: 'casa', x: 4, y: 4, z: FLOOR_HEIGHT + 1, freq: 2437, own: true }] },
+    1,
+  );
+  assert.equal(inside.explain(inside.aps[0], { x: 5, y: 4, z: PHONE_HEIGHT }).slabCount, 1);
+});
+
 test('propagação: a sombra é repetível no lugar, suave e com uns 3 dB', () => {
   const world = lab([], { shadowSigmaDb: 3 });
   const ap = world.aps[0];
@@ -245,7 +282,18 @@ test('medição: ruído de uns 2 dB por varredura, níveis inteiros, formato do 
 
   const sample = scans.find((s) => s.length === 2);
   for (const r of sample) {
-    assert.deepEqual(Object.keys(r).sort(), ['ageMs', 'bssid', 'capabilities', 'centerFreq0', 'centerFreq1', 'channelWidth', 'frequency', 'level', 'ssid', 'wifiStandard']);
+    assert.deepEqual(Object.keys(r).sort(), [
+      'ageMs',
+      'bssid',
+      'capabilities',
+      'centerFreq0',
+      'centerFreq1',
+      'channelWidth',
+      'frequency',
+      'level',
+      'ssid',
+      'wifiStandard',
+    ]);
     assert.match(r.bssid, /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/);
     assert.ok(Number.isInteger(r.level) && Number.isInteger(r.ageMs));
     assert.ok(r.ageMs >= 0 && r.ageMs <= 3000, `leitura nova com ${r.ageMs} ms`);
@@ -261,8 +309,49 @@ test('medição: ruído de uns 2 dB por varredura, níveis inteiros, formato do 
   assert.deepEqual(world.scan({ ...at(11), heading: 1, t: 77 }), world.scan({ ...at(11), heading: 1, t: 77 }));
 });
 
+test('medição: redes do mesmo rádio variam juntas; o estado interno não aparece em world.aps', () => {
+  const world = presetWorld('escritorio');
+  const box = world.aps.filter((a) => a.device === 'ap-teto-2');
+  const [corp24, guest24] = box.filter((a) => a.band === 0);
+  const corp5 = box.find((a) => a.band === 1);
+  assert.ok(corp24 && guest24 && corp5 && corp24.ssid !== guest24.ssid);
+  const sameRadio = [];
+  const otherBand = [];
+  for (let i = 0; i < 300; i++) {
+    const list = world.scan({ x: 9 + (i % 10) * 0.4, y: 3 + Math.floor(i / 10) * 0.1, floor: 0, heading: null, t: 5 + i * 3.5 });
+    const level = (ap) => list.find((r) => r.bssid === ap.bssid)?.level;
+    if (level(corp24) != null && level(guest24) != null) sameRadio.push(level(corp24) - level(guest24));
+    if (level(corp24) != null && level(corp5) != null) otherBand.push(level(corp24) - level(corp5));
+  }
+  assert.ok(sameRadio.length > 250 && otherBand.length > 250);
+  // Espalhamento robusto (metade da faixa entre os percentis 16 e 84): ignora as leituras aberrantes.
+  const spread = (list) => {
+    const v = list.slice().sort((a, b) => a - b);
+    return (v[Math.floor(v.length * 0.84)] - v[Math.floor(v.length * 0.16)]) / 2;
+  };
+  // Mesmo rádio: mesma sombra, mesmo desvanecimento e boa parte do ruído -> diferença pequena.
+  assert.ok(spread(sameRadio) <= 1.5, `mesmo rádio: ${spread(sameRadio)} dB`);
+  assert.ok(Math.abs(mean(sameRadio)) < 1.2);
+  assert.ok(spread(otherBand) >= spread(sameRadio) + 1, `outra faixa: ${spread(otherBand)} dB`);
+  // O que a interface enxerga de um roteador é só dado simples.
+  const plain = JSON.parse(JSON.stringify(world.aps[0]));
+  assert.ok(!Object.keys(plain).some((k) => k.startsWith('_')));
+  assert.equal(plain.bssid, world.aps[0].bssid);
+});
+
 test('medição: larguras de canal e frequências centrais coerentes', () => {
-  const ap = (bssid, freq, widthMHz) => ({ bssid, ssid: 'x', freq, widthMHz, x: 1, y: 1, z: 1, eirpDbm: 20, standard: 6, capabilities: '[ESS]' });
+  const ap = (bssid, freq, widthMHz) => ({
+    bssid,
+    ssid: 'x',
+    freq,
+    widthMHz,
+    x: 1,
+    y: 1,
+    z: 1,
+    eirpDbm: 20,
+    standard: 6,
+    capabilities: '[ESS]',
+  });
   const world = createWorld(
     {
       name: 't',
@@ -322,7 +411,8 @@ test('detecção: sempre acima de -85, some por volta de -93, nunca abaixo de -9
   const edge = rate(-90);
   assert.ok(edge > 0.1 && edge < 0.8, `na beira some às vezes: ${edge}`);
   assert.ok(rate(-95) < 0.12);
-  assert.equal(rate(-101), 0, 'abaixo do piso nunca aparece');
+  assert.ok(rate(-99) < 0.02, 'abaixo do piso só com um pico raro de ruído');
+  assert.equal(rate(-112), 0, 'muito abaixo do piso nunca aparece');
 });
 
 test('varredura: o Android repete leituras antigas com idade grande', () => {
@@ -389,15 +479,19 @@ test('mundos prontos: carregam e têm os roteadores combinados', () => {
       const neighbours = world.aps.filter((a) => !a.own);
       assert.equal(own.length, exp.own, `${id}: redes próprias`);
       assert.equal(new Set(own.map((a) => a.device)).size, exp.ownDevices);
-      assert.ok(neighbours.length >= exp.neighbours[0] && neighbours.length <= exp.neighbours[1], `${id}#${seed}: ${neighbours.length} vizinhos`);
+      assert.ok(
+        neighbours.length >= exp.neighbours[0] && neighbours.length <= exp.neighbours[1],
+        `${id}#${seed}: ${neighbours.length} vizinhos`,
+      );
       assert.equal(new Set(world.aps.map((a) => a.bssid)).size, world.aps.length, 'BSSIDs únicos');
       for (const a of world.aps) {
         assert.match(a.bssid, /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/);
-        assert.ok(MATERIALS && a.capabilities.includes('[ESS]'));
+        assert.ok(a.capabilities.includes('[ESS]'));
         assert.ok(a.eirpDbm >= 10 && a.eirpDbm <= 30);
         assert.ok([1, 4, 5, 6, 8].includes(a.standard));
         if (a.own) assert.ok(world.isFree(a.x, a.y, Math.floor(a.z / FLOOR_HEIGHT), 0), `${id}: roteador próprio dentro da casa`);
-        else if (a.z > 0 && a.z < world.floors * FLOOR_HEIGHT) assert.ok(!pointInPolygon(a.x, a.y, world.outline(0)), 'vizinho do mesmo andar fica fora da casa');
+        else if (a.z > 0 && a.z < world.floors * FLOOR_HEIGHT)
+          assert.ok(!pointInPolygon(a.x, a.y, world.outline(0)), 'vizinho do mesmo andar fica fora da casa');
         if (a.ssid === '') hidden++;
       }
       // Rádios do mesmo aparelho: mesma posição e BSSIDs que só mudam no fim.
@@ -417,7 +511,11 @@ test('mundos prontos: carregam e têm os roteadores combinados', () => {
   }
   assert.ok(hidden > 0, 'há redes ocultas entre os vizinhos');
   assert.equal(presetWorld('sobrado').stairs.length, 1);
-  assert.ok(presetWorld('apartamento').rooms.map((r) => r.name).includes('Cozinha'));
+  assert.ok(
+    presetWorld('apartamento')
+      .rooms.map((r) => r.name)
+      .includes('Cozinha'),
+  );
   assert.throws(() => presetSpec('castelo'), /desconhecido/);
 });
 
@@ -472,7 +570,8 @@ test('casas sorteadas: plausíveis, variadas e totalmente alcançáveis', () => 
     const nav = navGrid(world);
     for (const room of world.rooms) {
       let cells = 0;
-      for (let c = 0; c < nav.floors[0].free.length; c++) if (nav.floors[0].room[c] === room.index && nav.floors[0].comp[c] === nav.main) cells++;
+      for (let c = 0; c < nav.floors[0].free.length; c++)
+        if (nav.floors[0].room[c] === room.index && nav.floors[0].comp[c] === nav.main) cells++;
       assert.ok(cells >= 4, `casa ${seed}: ${room.name} isolado`);
     }
     shapes.add(`${world.bounds.width}x${world.bounds.height}/${world.rooms.length}`);
@@ -490,12 +589,18 @@ function checkPlan(world, plan, label) {
     if (step.type === 'move') {
       moves++;
       assert.equal(step.floor, prev.floor, `${label}: troca de andar sem escada`);
-      assert.ok(!world.crossesWall(prev.x, prev.y, step.x, step.y, step.floor), `${label}: atravessou parede em (${prev.x}, ${prev.y}) -> (${step.x}, ${step.y})`);
+      assert.ok(
+        !world.crossesWall(prev.x, prev.y, step.x, step.y, step.floor),
+        `${label}: atravessou parede em (${prev.x}, ${prev.y}) -> (${step.x}, ${step.y})`,
+      );
       assert.ok(world.isFree(step.x, step.y, step.floor), `${label}: parou dentro de parede`);
       assert.ok(pointInPolygon(step.x, step.y, world.outline(step.floor)), `${label}: saiu da casa`);
       // Pontos intermediários do trecho também ficam livres.
       for (const u of [0.25, 0.5, 0.75]) {
-        assert.ok(world.isFree(prev.x + (step.x - prev.x) * u, prev.y + (step.y - prev.y) * u, step.floor), `${label}: trecho raspa na parede`);
+        assert.ok(
+          world.isFree(prev.x + (step.x - prev.x) * u, prev.y + (step.y - prev.y) * u, step.floor),
+          `${label}: trecho raspa na parede`,
+        );
       }
       prev = step;
     } else if (step.type === 'stairs') {
@@ -575,7 +680,9 @@ test('levantamento: formato exato de Survey e nenhuma verdade vazando', () => {
       assert.ok(survey.scans.length >= 8);
       let last = -Infinity;
       for (const scan of survey.scans) {
-        const keys = Object.keys(scan).filter((k) => k !== 'label').sort();
+        const keys = Object.keys(scan)
+          .filter((k) => k !== 'label')
+          .sort();
         assert.deepEqual(keys, ['floor', 'readings', 'spot', 'still', 't']);
         assert.ok(scan.t > last, 'varreduras em ordem de tempo');
         last = scan.t;
@@ -599,7 +706,8 @@ test('levantamento: formato exato de Survey e nenhuma verdade vazando', () => {
       }
       // BSSIDs do mesmo aparelho no mundo têm o mesmo `device` no levantamento.
       const pairs = Object.entries(survey.aps);
-      for (const [a, ma] of pairs) for (const [b, mb] of pairs) assert.equal(ma.device === mb.device, world.ap(a).device === world.ap(b).device);
+      for (const [a, ma] of pairs)
+        for (const [b, mb] of pairs) assert.equal(ma.device === mb.device, world.ap(a).device === world.ap(b).device);
       // Rede conectada: uma amostra a cada 2 s, sempre de um roteador da casa.
       survey.track.forEach((s, i) => {
         assert.deepEqual(Object.keys(s).sort(), ['id', 'rssi', 't']);
@@ -640,7 +748,10 @@ test('levantamento: varreduras paradas ficam no ponto marcado; andando, cada can
     if (pts.length > 3) revisited++;
   }
   assert.equal(revisited, 1, 'um ponto é revisitado');
-  assert.ok(survey.scans.some((s) => !s.still), 'entre os pontos o app continua varrendo');
+  assert.ok(
+    survey.scans.some((s) => !s.still),
+    'entre os pontos o app continua varrendo',
+  );
   assert.ok(survey.scans.some((s) => s.label) && survey.scans.some((s) => s.still && !s.label), 'só parte dos pontos ganha nome');
 
   // Com o limite de 30 s: uma varredura por ponto.
