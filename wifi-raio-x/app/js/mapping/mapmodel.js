@@ -26,10 +26,10 @@ const TUNE = {
   maxSpanM: 150,
   // --- área ---
   areaH: 0.55, // núcleo da densidade do caminho (m)
-  areaR: 0.75, // meia-largura do "corpo" de uma passada isolada (m)
+  areaR: 0.9, // meia-largura do "corpo" de uma passada isolada (m)
   pointR: 0.6, // quem fez uma varredura num lugar ocupou pelo menos este raio (m)
   pointW: 0.6, // peso de uma varredura, em metros de caminho
-  closeR: 1.25, // fecha vãos mais estreitos que o dobro disto (m)
+  closeR: 1.0, // fecha vãos mais estreitos que o dobro disto (m)
   holeM2: 10, // buraco menor que isto é miolo de cômodo, não pátio
   speckM2: 1.5,
   bridgeR: 0.4, // meia-largura do corredor que mantém ligado o que foi andado
@@ -41,7 +41,8 @@ const TUNE = {
   roomPosCap: 9, // a posição para de pesar depois de 3 unidades: sala grande continua sala
   roomUnitM2: 14, // tamanho típico de um cômodo: dá a "massa" de cada varredura
   roomInitM2: 4, // 1ª etapa: pedaços deste tamanho
-  roomEdgeT: 1.5, // fronteira mais forte que isto (x a diferença de dentro) separa dois ambientes
+  roomEdgeHi: 6, // acima do número típico de ambientes: só fronteira mais forte que isto (x a diferença de dentro) separa
+  roomEdgeLo: 1.8, // abaixo dele: só fronteira mais fraca que isto junta
   roomM2Lo: 8, // no máximo um ambiente a cada 8 m²...
   roomM2Hi: 24, // ...e no mínimo um a cada 24 m²
   roomKnn: 5,
@@ -63,18 +64,20 @@ const TUNE = {
   doorJoinM: 1.2,
   doorMaxStepM: 4.5,
   wallNearM: 2.5,
-  wallC0: 1.0, // contraste (dB) em que a divisão começa a merecer confiança
-  wallC1: 5.0, // contraste em que a confiança chega a 1
+  wallC0: 3.0, // contraste (dB) em que a divisão começa a merecer confiança
+  wallC1: 7.5, // contraste em que a confiança chega a 1
+  wallNamed: 0.7, // confiança mínima da divisão entre dois ambientes com nome
   // --- sinal ---
   heatH0: 0.3,
-  heatHk: 0.6, // largura do núcleo = heatH0 + heatHk * erro esperado, entre heatHmin e heatHmax
+  heatHk: 0.4, // largura do núcleo = heatH0 + heatHk * erro esperado, entre heatHmin e heatHmax
   heatHmin: 0.7,
-  heatHmax: 1.6,
+  heatHmax: 1.2,
   heatWide: 3, // núcleo largo (x a largura) que preenche longe das medições
-  heatWideW: 0.02,
-  heatRidge: 0.6,
+  heatWideW: 0.01,
+  heatRidge: 1.5,
   heatLinear: 1,
-  heatConfK: 1.0,
+  heatConfK: 1.5,
+  heatConfS: 0.8,
 };
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -843,6 +846,9 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
   // 1ª etapa (Ward): pedaços compactos, bem menores que um cômodo.
   const kMin = Math.max(1, labelNames.length, Math.round(areaM2 / tune.roomM2Hi));
   const kMax = Math.max(kMin, Math.round(areaM2 / tune.roomM2Lo));
+  // Com nomes dados pelo usuário, o número típico é o de nomes: o que sobrou sem nome (ponto
+  // marcado sem batizar, trecho andando) entra num ambiente com nome, salvo fronteira forte.
+  const kMid = labelNames.length >= 2 ? kMin : clamp(Math.round(areaM2 / tune.roomUnitM2), kMin, kMax);
   const kInit = Math.max(kMax, Math.round(areaM2 / tune.roomInitM2));
   while (count > kInit) {
     const pick = cheapest(null);
@@ -902,7 +908,9 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
       }
     }
     if (ba < 0 || best === Infinity) break;
-    if (best > tune.roomEdgeT && count <= kMax) break;
+    // Acima do número típico de ambientes só fica separado o que tem fronteira forte; abaixo
+    // dele só se junta o que quase não tem fronteira (sala grande, escritório aberto).
+    if (count <= kMax && best > (count > kMid ? tune.roomEdgeHi : tune.roomEdgeLo)) break;
     intSum[ba] += intSum[bb] + cross[ba].get(bb)[0];
     intCnt[ba] += intCnt[bb] + cross[ba].get(bb)[1];
     cross[ba].delete(bb);
@@ -1474,12 +1482,17 @@ function buildWalls(ctx, grid, floor, members, scanRoom, links) {
     const ga = nearOf(ch.a);
     const gb = nearOf(ch.b);
     const contrast = contrastDb(ctx, ga, gb);
+    // Na bancada, divisão com contraste abaixo de ~4 dB quase nunca é parede; acima de ~7, quase sempre.
     let conf = clamp((contrast - tune.wallC0) / (tune.wallC1 - tune.wallC0), 0, 1);
-    conf *= 0.4 + 0.6 * Math.min(1, Math.min(ga.length, gb.length) / 4);
-    // Dois nomes dados pelo usuário: ele disse que são ambientes diferentes.
-    if (!rooms[ch.a].auto && !rooms[ch.b].auto) conf = Math.max(conf, 0.5);
-    conf = Math.round(clamp(conf, 0.05, 1) * 100) / 100;
-    for (const s of cutPolyline(ch.pts, gapsOf.get(ch) || [])) walls.push({ x1: s[0], y1: s[1], x2: s[2], y2: s[3], kind: 'inner', conf });
+    if (Math.min(ga.length, gb.length) < 2) conf *= 0.7;
+    // Dois nomes dados pelo usuário: ele disse que são ambientes diferentes (acerta 4 em 5 vezes).
+    if (!rooms[ch.a].auto && !rooms[ch.b].auto) conf = Math.max(conf, tune.wallNamed);
+    conf = Math.round(clamp(conf, 0.1, 1) * 100) / 100;
+    for (const s of cutPolyline(ch.pts, gapsOf.get(ch) || [])) {
+      const wall = { x1: s[0], y1: s[1], x2: s[2], y2: s[3], kind: 'inner', conf };
+      if (tune.debugWalls) wall._dbg = { contrast, na: ga.length, nb: gb.length, named: !rooms[ch.a].auto && !rooms[ch.b].auto, oneNamed: !rooms[ch.a].auto || !rooms[ch.b].auto };
+      walls.push(wall);
+    }
   }
 
   // Contorno: anéis simplificados; a confiança de cada trecho é a das células que ele encosta.
@@ -1732,17 +1745,18 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
   }
   const collapsed = P >= 4 && spread < 0.3;
 
-  // Erro típico esperado: parte do que a bancada mede numa casa bem levantada (pouco mais de
-  // 1 m) e piora com o que sabidamente atrapalha.
-  let err = 1.1;
-  if (!flat) err *= 1.5 - 0.7 * meanConf;
-  if (strong < 3) err *= 1.5;
-  else if (strong < 5) err *= 1.2;
-  if (cadence > 10) err *= 1.25;
-  if (P < 25) err *= 1.4;
-  else if (P < 50) err *= 1.15;
-  err *= 1 + 0.15 * Math.max(0, Math.sqrt(areaM2 / 60) - 1);
-  if (scaleConf < 0.3) err *= 1.15;
+  // Erro típico esperado, calibrado na bancada com quatro solucionadores: cresce com o tamanho
+  // do lugar (perto da raiz da área de um andar), com varreduras lentas e com mais de um andar;
+  // a confiança que o próprio solucionador declara e a falta de dados ajustam em volta disso.
+  const perFloor = Math.max(8, areaM2 / Math.max(1, floors.length));
+  const base = 1.45 * Math.pow(perFloor / 60, 0.54);
+  let err = base;
+  if (cadence > 10) err *= 1.45;
+  if (floors.length > 1) err *= 1.35;
+  if (!flat) err *= clamp(1.3 - 0.5 * meanConf, 0.85, 1.3);
+  if (strong < 3) err *= 1.4;
+  if (P < 25) err *= 1.3;
+  if (scaleConf < 0.3) err *= 1.1;
   if (collapsed || !P) err = Math.max(err, 5);
   if (P && meanConf < 0.02 && flat) err = Math.max(err, 4);
   err = Math.round(clamp(err, 0.5, 9) * 10) / 10;
@@ -1762,9 +1776,12 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     else if (!labelled) notes.push('Dê nome aos pontos marcados para o mapa separar os ambientes.');
     if (!veryStrong && strong >= 3) notes.push('Nenhum roteador chega forte aqui: o sinal fraco deixa o mapa menos nítido.');
   }
+  // Nível: o erro esperado comparado com o que se consegue num lugar deste tamanho (num
+  // escritório grande, 2,5 m de erro é um bom levantamento; numa kitnet, não).
+  const excess = err / base;
   let level = 'fraca';
-  if (P >= 40 && err <= 1.5) level = 'boa';
-  else if (P >= 15 && err <= 2.5) level = 'razoavel';
+  if (P >= 40 && excess <= 1.15 && err <= 3.5) level = 'boa';
+  else if (P >= 15 && excess <= 1.75 && err <= 5) level = 'razoavel';
   if (level === 'boa' && !notes.length) notes.push('Levantamento bom: posições com erro típico de 1 a 2 metros.');
   return {
     scans: P,
@@ -1908,7 +1925,7 @@ function build(survey, solution, opts) {
     path: path.map((p) => ({ i: p.i, t: p.t, x: p.x, y: p.y, z: p.z, floor: p.floor, conf: p.conf, still: p.still })),
     spots,
     quality,
-    _heat: { missDbm: ctx.missDbm, h, wide: tune.heatWide, wideW: tune.heatWideW, ridge: tune.heatRidge, linear: tune.heatLinear, confK: tune.heatConfK, weight: ctx.weight, nets },
+    _heat: { missDbm: ctx.missDbm, h, wide: tune.heatWide, wideW: tune.heatWideW, ridge: tune.heatRidge, linear: tune.heatLinear, confK: tune.heatConfK, confS: tune.heatConfS, weight: ctx.weight, nets },
   };
 }
 
@@ -1971,6 +1988,8 @@ export function heatField(model, floorIndex, networkKey) {
   const n2 = 2 * h * h;
   const w2 = 2 * (h * heat.wide) ** 2;
   const cut = 12 * h * h;
+  const c2 = 2 * heat.confS * heat.confS;
+  const cutConf = 6 * c2;
   let lo = Infinity;
   let hi = -Infinity;
   for (let j = 0; j < ny; j++) {
@@ -1994,11 +2013,9 @@ export function heatField(model, floorIndex, networkKey) {
         const dy = ys[s] - y;
         const d2 = dx * dx + dy * dy;
         let k = heat.wideW * Math.exp(-d2 / w2);
-        if (d2 < cut) {
-          const kn = Math.exp(-d2 / n2);
-          k += kn;
-          dense += ws[s] * kn;
-        }
+        if (d2 < cut) k += Math.exp(-d2 / n2);
+        // Confiança: medições a menos de ~1 m, numa escala fixa (não a do núcleo da regressão).
+        if (d2 < cutConf) dense += ws[s] * Math.exp(-d2 / c2);
         k *= ws[s];
         s0 += k;
         sx += k * dx;
@@ -2313,12 +2330,18 @@ export function describeMap(model) {
   }
   const own = model.aps.filter((a) => a.own);
   const grid = { nx: model.nx, ny: model.ny, cell: model.cell, minX: model.bounds.minX, minY: model.bounds.minY };
-  for (const a of own.slice(0, 4)) {
+  const placeOf = (a) => {
     const fi = a.floor === null ? -1 : floors.findIndex((f) => f.floor === a.floor);
     const where = fi >= 0 && a.inside ? roomLabelAt(model, fi, cellAt(grid, a.x, a.y)) : null;
-    const place = where ? `em "${where}"` : a.inside ? 'dentro da área medida' : 'fora da área por onde você andou';
     const level = a.floor === null || single ? '' : `, ${floorName(a.floor, false)}`;
-    out.push(`Roteador ${a.ssid ? `"${a.ssid}"` : 'da casa'}: posição estimada ${place}${level}, a uns ${brNum(a.distanceM, 0)} m do centro do mapa.`);
+    return `${where ? `em "${where}"` : a.inside ? 'dentro da área medida' : 'fora da área por onde você andou'}${level}`;
+  };
+  if (own.length === 1) {
+    const a = own[0];
+    out.push(`Roteador ${a.ssid ? `"${a.ssid}"` : 'da casa'}: posição estimada ${placeOf(a)}, a uns ${brNum(a.distanceM, 0)} m do centro do mapa.`);
+  } else if (own.length > 1) {
+    const shown = own.slice(0, 6).map(placeOf);
+    out.push(`A rede da casa sai de ${own.length} aparelhos, com posição estimada ${shown.join('; ')}${own.length > shown.length ? '; e outros' : ''}.`);
   }
   const others = model.aps.length - own.length;
   if (others > 0) out.push(`Outros ${others} ${others === 1 ? 'aparelho de vizinho foi ouvido' : 'aparelhos de vizinhos foram ouvidos'} durante a caminhada.`);

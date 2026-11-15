@@ -19,10 +19,13 @@
 //                     deixando o próprio ponto de fora, para um ponto não se explicar sozinho), mais
 //                     as restrições de movimento (ninguém anda a mais de ~0,9 m/s; passos parecidos);
 //   4. escala         o Wi-Fi sozinho quase não mede metros: a régua principal é o passo de quem anda
-//                     (tempo x velocidade típica), com uma ajuda fraca da física (nível típico a 1 m);
+//                     (tempo x velocidade típica), com uma ajuda fraca da física (nível típico a 1 m,
+//                     que pesa mais quando há vários roteadores); sem relógio (um ponto a cada 30 s)
+//                     sobra a física, segurada pelo tamanho típico de uma casa;
 //   5. finish         saída: pontos, roteadores, confiança, calibração do usuário (knownDistances).
 //
-// Tudo é determinístico (nenhum sorteio) e sem dependências: roda num Web Worker do celular.
+// Tudo é determinístico (não há sorteio; `options.seed` é aceito e não muda nada) e sem dependências:
+// roda num Web Worker do celular. Custo: O(nós² x rádios) por iteração, ~0,5 s para 200 varreduras.
 
 import { FLOOR_HEIGHT } from '../types.js';
 
@@ -38,6 +41,8 @@ const FRESH_MS = 3400;
 const CENSOR_MARGIN_DB = 2;
 /** Peso máximo de um nó por rádio (um ponto marcado tem várias varreduras; depois de 2 o ganho é pequeno). */
 const WEIGHT_CAP = 2;
+/** Peso do núcleo abaixo do qual um par de nós é ignorado (a mais de ~3,7 larguras de distância). */
+const KERNEL_CUTOFF = 1e-3;
 const LOG10 = Math.log(10);
 
 // Ajustes do método. Os que têm unidade física são priors largos (valem para casas e celulares
@@ -71,7 +76,7 @@ const TUNING = {
   sigma: 4, // dB: desvio de uma leitura em torno do campo (ruído + desvanecimento + corpo)
   missW: 0.5, // peso de um "não ouvido" como observação
   outer: 4, // rodadas (modelo físico -> posições -> escala)
-  inner: 30, // iterações de L-BFGS por rodada
+  inner: 25, // iterações de L-BFGS por rodada
   registerRounds: 2, // rodadas em que os andares são reencaixados como corpos rígidos
   // --- modelo físico dos roteadores ---
   fitMissW: 0.3,
@@ -82,14 +87,14 @@ const TUNING = {
   farPenalty: 0.02,
   // --- escala pela física ---
   physW: 0.15, // peso (em log) da física quando há passo cronometrado
-  physWMulti: 0.5, // idem, com três ou mais roteadores fortes (escritório, casa com malha)
+  physWMulti: 0.6, // idem, com três ou mais roteadores fortes (escritório, casa com malha)
   physN: 2.2, // expoente em visada quase direta
   physQ: 0.85, // quantil: as leituras mais fortes para a distância são as com menos parede
   physP0: -43, // dBm a 1 m em 2,4 GHz: ~20 dBm de EIRP, 40 dB de espaço livre, ~18 dB do celular, alguma obstrução
   physMinPeak: -52, // só rádios que chegam fortes (roteador dentro da área levantada)
   physDamp: 0.7,
   sparsePhysW: 0.65, // sem relógio: peso (em log) da física contra o raio típico de uma casa
-  sparsePhysWMulti: 0.65, // idem, com três ou mais roteadores fortes
+  sparsePhysWMulti: 0.9, // idem, com três ou mais roteadores fortes
   // --- saída ---
   shiftGain: 0.5, // fração do atraso das leituras compensada ao longo do caminho
   probeStep: 0.5, // m: passo da sonda de curvatura (incerteza de cada ponto)
@@ -1080,7 +1085,7 @@ function refineFields(data, X0, P, dbg, progress) {
         const dy = X[2 * a + 1] - X[2 * b + 1];
         const w = Math.exp(-(dx * dx + dy * dy) * inv2h2);
         Wm[a * M + b] = w;
-        if (w < 1e-4) continue;
+        if (w < KERNEL_CUTOFF) continue;
         const ra = a * R;
         const rb = b * R;
         for (let k = 0; k < R; k++) {
@@ -1116,7 +1121,7 @@ function refineFields(data, X0, P, dbg, progress) {
     for (let a = 0; a < M; a++) {
       for (let b = a + 1; b < M; b++) {
         const w = Wm[a * M + b];
-        if (w < 1e-4) continue;
+        if (w < KERNEL_CUTOFF) continue;
         const ra = a * R;
         const rb = b * R;
         let dw = 0;
@@ -1250,7 +1255,7 @@ function refineFields(data, X0, P, dbg, progress) {
         const dx = xa - X[2 * b];
         const dy = ya - X[2 * b + 1];
         const w = Math.exp(-(dx * dx + dy * dy) * inv2h2);
-        if (w < 1e-4) continue;
+        if (w < KERNEL_CUTOFF) continue;
         const rb = b * R;
         for (let k = 0; k < R; k++) {
           const wb = w * wgt[rb + k];

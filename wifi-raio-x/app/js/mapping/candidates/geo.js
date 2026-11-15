@@ -102,7 +102,7 @@ const CFG = {
   evHopSd: 0.5,
   sizeWeight: 400,
   spreadShrink: 1.5, // quanto a incerteza das posições encolhe o mapa final (0 = nada)
-  shrinkFloor: 0,
+  shrinkFloor: 0.9, // ...mas nunca mais que 10% (a escala já erra ~20% por si)
   // --- tortuosidade ---
   turnKappa: 0.5,
   turnTop: 1.5,
@@ -635,6 +635,7 @@ function buildModel(prep, cfg) {
   const p0Ref = new Float64Array(RA);
   // Altura inicial de cada aparelho: um pouco acima do celular, no andar onde chega mais forte.
   const devZ0 = new Float64Array(DA);
+  const devFloor = new Int32Array(DA);
   const devTop = new Float64Array(DA).fill(-Infinity);
   for (let a = 0; a < RA; a++) {
     const r = radios[list[a]];
@@ -645,6 +646,7 @@ function buildModel(prep, cfg) {
     const level = cnt[a * NF + mainFloor[a]] ? sum[a * NF + mainFloor[a]] / cnt[a * NF + mainFloor[a]] : -Infinity;
     if (level > devTop[d] || devTop[d] === -Infinity) {
       devTop[d] = level;
+      devFloor[d] = mainFloor[a];
       devZ0[d] = zFloor[mainFloor[a]] + 0.6;
     }
   }
@@ -653,7 +655,7 @@ function buildModel(prep, cfg) {
     P, RA, DA, NF, size, oA, oR, p0Index, mainFloor, list, top,
     M, oNode, oRad, oFloor, oY, oW,
     C: cNode.length, cNode: Int32Array.from(cNode), cRad: Int32Array.from(cRad),
-    zFloor, radDev, p0Ref, devZ0, edges, nodeFloor: prep.nodeFloor, known: prep.known,
+    zFloor, radDev, p0Ref, devZ0, devFloor, edges, nodeFloor: prep.nodeFloor, known: prep.known,
     sizeTarget: 0,
   };
 }
@@ -1668,7 +1670,7 @@ function solveInner(survey, options) {
   if (model.RA === 0) {
     // Leituras de menos para ajustar qualquer curva (levantamento minúsculo): fica o embutimento
     // das impressões digitais, com confiança baixa.
-    return finalize(survey, prep, model, X0, new Float64Array(P).fill(4), 0.05);
+    return finalize(prep, model, X0, new Float64Array(P).fill(4), 0.05);
   }
   const theta = new Float64Array(model.size);
   theta.set(X0, 0);
@@ -1823,14 +1825,14 @@ function solveInner(survey, options) {
     if (now() < deadline) optimise(cfg.mIter, true);
   }
 
-  const solution = finalize(survey, prep, model, theta, nodeSpread, scaleConf);
+  const solution = finalize(prep, model, theta, nodeSpread, scaleConf);
   if (options.debug) solution.debug = { ms: now() - t0, note: notes.join(' '), nodes: P, radios: model.RA };
   progress(1, 'pronto');
   return solution;
 }
 
 /** Monta a saída: centra, gira para o eixo de maior espalhamento e preenche roteadores e confianças. */
-function finalize(survey, prep, model, theta, nodeSpread, scaleConf) {
+function finalize(prep, model, theta, nodeSpread, scaleConf) {
   const { N, P, nodeOf, scans, radios } = prep;
   const px = new Float64Array(N);
   const py = new Float64Array(N);
@@ -1884,8 +1886,9 @@ function finalize(survey, prep, model, theta, nodeSpread, scaleConf) {
     const main = model.mainFloor[a];
     const p0 = theta[model.p0Index[a * model.NF + main]];
     const n = theta[model.oR + 2 * a];
-    // Altura relativa ao piso do andar de partida, presa ao andar onde o rádio chega mais forte.
-    const zLow = prep.floorList[main] * FLOOR_HEIGHT;
+    // Altura relativa ao piso do andar de partida, presa ao andar onde o aparelho chega mais
+    // forte (a mesma para todos os rádios dele: é uma caixa só).
+    const zLow = prep.floorList[model.devFloor[model.radDev[a]]] * FLOOR_HEIGHT;
     const z = clamp(theta[d3 + 2], zLow + 0.1, zLow + FLOOR_HEIGHT - 0.1);
     const near = clamp((model.top[a] - (model.p0Ref[a] - 30)) / 20, 0, 1);
     const seen = Math.min(1, prep.radioCount[model.list[a]] / 15);

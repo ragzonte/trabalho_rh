@@ -27,6 +27,7 @@
 //
 // Opções: theme, onPick, onFallback(motivo), renderer ('auto' | '3d' | '2d'), padding, label (aria),
 //         ambient (false desliga a pulsação dos roteadores), maxPixelRatio (padrão 2),
+//         antialias (padrão: ligado, menos quando o WebGL é desenhado por software),
 //         reducedMotion (padrão: o que o sistema pede), contextRestoreMs (espera pelo contexto: 4000)
 //
 // Honestidade: o mapa é aproximado. Por isso o contorno é um vidro baixo de quinas macias,
@@ -66,6 +67,7 @@ import {
   LinearFilter,
   ClampToEdgeWrapping,
   RGBAFormat,
+  RedFormat,
   UnsignedByteType,
   DoubleSide,
   AdditiveBlending,
@@ -148,14 +150,16 @@ void main() {
 }`;
 
 const FLOOR_FRAG = /* glsl */ `
-uniform sampler2D uColA;
-uniform sampler2D uColB;
+// Variantes (defines), para cada pixel pagar só pelo que usa:
+//   USE_MASK   borda do piso: recorta pelo contorno suave (o miolo não precisa e deixa a placa descartar o que está escondido)
+//   USE_HEAT   curvas de nível do sinal        USE_RELIEF  luz lateral do relevo
+//   ROUTERS n  ondas de n roteadores da casa neste andar
+uniform sampler2D uCol;
 uniform sampler2D uMask;
-uniform float uMix;
+uniform sampler2D uHgt;
 uniform float uFade;
 uniform float uRelief;
 uniform float uTime;
-uniform float uContour;
 uniform float uRings;
 uniform float uRingGap;
 uniform float uRingReach;
@@ -166,15 +170,17 @@ uniform vec3 uNeutral;
 uniform vec3 uHatch;
 uniform vec3 uSlab;
 uniform vec3 uRingColor;
-uniform vec4 uRouters[4];
+#if ROUTERS > 0
+uniform vec4 uRouters[ROUTERS];
+#endif
 varying vec3 vPos;
 varying vec2 vG;
 varying float vKind;
 varying float vH;
 void main() {
   vec2 uv = (vPos.xy - uOrigin) * uInvSize;
-  vec4 tex = mix(texture2D(uColA, uv), texture2D(uColB, uv), uMix);
-  // pouca confiança: a cor some no tom neutro (a mesma curva de confWeight em map-colors.js)
+  vec4 tex = texture2D(uCol, uv);
+  // pouca confiança: a cor fica lavada (a mesma conta de fadeRgb em map-colors.js)
   float w = smoothstep(${CONF_NONE.toFixed(3)}, ${CONF_FULL.toFixed(3)}, tex.a);
   vec3 col = mix(uNeutral, tex.rgb, ${CONF_TINT.toFixed(3)} + ${(1 - CONF_TINT).toFixed(3)} * w);
   float alpha = 1.0;
@@ -183,53 +189,45 @@ void main() {
   } else if (vKind > 0.5) {
     col = mix(uSlab, col, 0.5) * (0.82 + 0.18 * vH); // "barranco" do relevo
   } else {
+#ifdef USE_MASK
     float m = texture2D(uMask, uv).r;
     float aa = max(fwidth(m), 0.0005);
     alpha = clamp((m - 0.5) / aa + 0.5, 0.0, 1.0);
     if (alpha < 0.02) discard;
-
+#endif
     // hachura na diagonal onde o mapa é um palpite; de longe vira um tom médio (sem moiré)
     float s = (vPos.x + vPos.y) * uHatchFreq;
     float fs = fwidth(s);
-    float tri = abs(fract(s) - 0.5) * 2.0;
-    float line = 1.0 - smoothstep(0.26 - fs, 0.26 + fs, tri);
-    float crisp = clamp(1.6 - fs * 3.2, 0.0, 1.0);
-    col = mix(col, uHatch, (1.0 - w) * 0.6 * mix(0.26, line, crisp));
+    float line = 1.0 - smoothstep(0.26 - fs, 0.26 + fs, abs(fract(s) - 0.5) * 2.0);
+    col = mix(col, uHatch, (1.0 - w) * 0.6 * mix(0.26, line, clamp(1.6 - fs * 3.2, 0.0, 1.0)));
 
-    // curvas de nível do sinal
-    float c = vH * 11.0;
+#ifdef USE_HEAT
+    // curvas de nível do sinal (a altura 0..1 vem de uma textura: vale também com o piso plano)
+    float c = texture2D(uHgt, uv).r * 11.0;
     float fc = fwidth(c);
     float iso = 1.0 - smoothstep(0.0, 1.4 * fc, abs(fract(c + 0.5) - 0.5));
-    col *= 1.0 - 0.2 * iso * uContour * clamp(1.0 - fc * 3.5, 0.0, 1.0) * w;
-
+    col *= 1.0 - 0.2 * iso * clamp(1.0 - fc * 3.5, 0.0, 1.0) * w;
+#endif
+#ifdef USE_RELIEF
     // relevo: luz vinda de um lado
     vec3 n = normalize(vec3(-vG * uRelief, 1.0));
-    float lambert = dot(n, vec3(-0.46, -0.36, 0.81));
-    col *= clamp(1.0 + (lambert - 0.81) * 0.95, 0.62, 1.22);
-
-    // ondas do sinal saindo dos roteadores da casa (e o círculo tracejado de incerteza da posição)
+    col *= clamp(1.0 + (dot(n, vec3(-0.46, -0.36, 0.81)) - 0.81) * 0.95, 0.62, 1.22);
+#endif
+#if ROUTERS > 0
+    // ondas do sinal saindo dos roteadores da casa; r.z = raio da dúvida sobre a posição (um halo)
     float acc = 0.0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < ROUTERS; i++) {
       vec4 r = uRouters[i];
-      if (r.w > 0.0) {
-        vec2 dv = vPos.xy - r.xy;
-        float d = length(dv);
-        float ph = d / uRingGap - uTime * 0.42;
-        float band = pow(0.5 + 0.5 * cos(6.2831853 * ph), 10.0);
-        float fall = smoothstep(uRingReach, 0.15, d);
-        float fd = fwidth(d) / uRingGap;
-        acc += band * fall * fall * r.w * clamp(1.0 - fd * 3.0, 0.0, 1.0);
-        if (r.z > 0.0) {
-          float fw = max(fwidth(d), 0.0005);
-          float edge = 1.0 - smoothstep(fw * 0.8, fw * 2.2, abs(d - r.z));
-          float ang = atan(dv.y, dv.x) * r.z * 2.4;
-          float fa = fwidth(ang);
-          float dash = smoothstep(0.5 - fa, 0.5 + fa, abs(fract(ang) - 0.5) * 2.0);
-          acc += edge * dash * 0.9 * r.w * step(fa, 0.5);
-        }
-      }
+      float d = distance(vPos.xy, r.xy);
+      float wave = 0.5 + 0.5 * cos(6.2831853 * (d / uRingGap - uTime * 0.42));
+      float w2 = wave * wave;
+      float w4 = w2 * w2;
+      float fall = clamp((uRingReach - d) / uRingReach, 0.0, 1.0);
+      float fd = fwidth(d) / uRingGap;
+      acc += r.w * (w4 * w4 * w2 * fall * fall * clamp(1.0 - fd * 3.0, 0.0, 1.0) + 0.3 * (1.0 - smoothstep(r.z * 0.82, r.z, d)));
     }
     col = mix(col, uRingColor, clamp(acc * 0.5, 0.0, 0.7) * uRings);
+#endif
     if (!gl_FrontFacing) col = uSlab;
   }
   gl_FragColor = vec4(col, alpha * uFade);
@@ -388,6 +386,26 @@ export function webgl2Available(doc = typeof document !== 'undefined' ? document
   }
 }
 
+// Desenho por software (SwiftShader, llvmpipe): sem placa de vídeo, a suavização de serrilhado
+// (MSAA) custa o triplo do quadro. Sonda uma vez por página.
+let softwareGl = null;
+function isSoftwareRenderer(doc) {
+  if (softwareGl !== null) return softwareGl;
+  softwareGl = false;
+  try {
+    const gl = doc.createElement('canvas').getContext('webgl2');
+    if (gl) {
+      const ext = gl.getExtension('WEBGL_debug_renderer_info');
+      const name = String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+      softwareGl = /swiftshader|llvmpipe|softpipe|software/i.test(name);
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+    }
+  } catch {
+    /* sem WebGL2: quem chama cai no 2D */
+  }
+  return softwareGl;
+}
+
 /**
  * Cria o visualizador do mapa dentro de `container` (que deve ter tamanho definido).
  * @param {HTMLElement} container
@@ -475,6 +493,8 @@ export function createViewer(container, options = {}) {
     snapshot: () => impl.snapshot(),
     resize: () => impl.resize(),
     stats: () => impl.stats(),
+    /** Só para testes: as peças internas do visualizador 3D (null no 2D). */
+    _debug: () => (impl._debug ? impl._debug() : null),
     destroy() {
       if (destroyed) return;
       destroyed = true;
@@ -683,11 +703,12 @@ function createViewer3d(container, options = {}) {
   canvas.setAttribute('aria-label', options.label || 'Mapa 3D da casa feito com o sinal do Wi-Fi. Arraste para girar; use dois dedos para aproximar e mover.');
   canvas.tabIndex = 0;
 
-  const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, depth: true, stencil: false, premultipliedAlpha: true, preserveDrawingBuffer: false, powerPreference: 'default' });
+  const antialias = options.antialias ?? !isSoftwareRenderer(doc);
+  const gl = canvas.getContext('webgl2', { antialias, alpha: false, depth: true, stencil: false, premultipliedAlpha: true, preserveDrawingBuffer: false, powerPreference: 'default' });
   if (!gl) throw new Error('WebGL2 indisponível');
   const msaa = gl.getParameter(gl.SAMPLES) > 0;
 
-  const renderer = new WebGLRenderer({ canvas, context: gl, antialias: true });
+  const renderer = new WebGLRenderer({ canvas, context: gl, antialias });
   renderer.outputColorSpace = SRGBColorSpace;
   renderer.sortObjects = true;
   const scaleBar = createScaleBar(doc);
@@ -791,7 +812,7 @@ function createViewer3d(container, options = {}) {
     },
   });
   const ground = new Mesh(new PlaneGeometry(1, 1), groundMat);
-  ground.renderOrder = -10;
+  ground.renderOrder = 5; // depois dos pisos: o que eles cobrem nem chega a ser pintado
   ground.frustumCulled = false;
   scene.add(ground);
   let shadowTex = null;
@@ -1010,7 +1031,7 @@ function createViewer3d(container, options = {}) {
     const maskCanvas = doc.createElement('canvas');
     maskCanvas.width = nx * k;
     maskCanvas.height = ny * k;
-    const mg = maskCanvas.getContext('2d');
+    const mg = maskCanvas.getContext('2d', { willReadFrequently: true });
     mg.fillStyle = '#000';
     mg.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
     mg.fillStyle = '#fff';
@@ -1034,37 +1055,48 @@ function createViewer3d(container, options = {}) {
     mask.wrapS = ClampToEdgeWrapping;
     mask.wrapT = ClampToEdgeWrapping;
 
-    const makeColorTex = () => {
-      const tex = bin.add(new DataTexture(new Uint8Array(nx * ny * 4), nx, ny, RGBAFormat, UnsignedByteType));
-      tex.colorSpace = NoColorSpace;
-      tex.minFilter = LinearFilter;
-      tex.magFilter = LinearFilter;
-      tex.generateMipmaps = false;
-      tex.needsUpdate = true;
-      return tex;
-    };
-    const colA = makeColorTex();
-    const colB = makeColorTex();
+    const col = bin.add(new DataTexture(new Uint8Array(nx * ny * 4), nx, ny, RGBAFormat, UnsignedByteType));
+    col.colorSpace = NoColorSpace;
+    col.minFilter = LinearFilter;
+    col.magFilter = LinearFilter;
+    col.generateMipmaps = false;
+    col.needsUpdate = true;
 
-    // --- piso: malha na grade (com passo maior em grades grandes) + barranco do relevo + lateral da laje ---
-    const step = Math.max(1, Math.ceil(Math.max(nx, ny) / 110));
-    const gx = Math.ceil(nx / step);
-    const gy = Math.ceil(ny / step);
-    const need = new Uint8Array(gx * gy);
+    // --- piso: malha na grade (com passo maior em grades grandes) + barranco do relevo + lateral da laje.
+    // O miolo (quadros inteiros dentro do contorno) e a borda (quadros cortados pelo contorno) vão em
+    // malhas separadas: só a borda precisa consultar a máscara e descartar pixels. ---
+    const maskPx = mg.getImageData(0, 0, maskCanvas.width, maskCanvas.height).data;
+    const cellAny = new Uint8Array(nx * ny);
+    const cellFull = new Uint8Array(nx * ny);
     for (let iy = 0; iy < ny; iy++) {
       for (let ix = 0; ix < nx; ix++) {
-        if (!floor.inside[iy * nx + ix]) continue;
-        // a célula e as vizinhas: o contorno suavizado pode passar um pouco da área
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const qx = Math.floor((ix + dx) / step);
-            const qy = Math.floor((iy + dy) / step);
-            if (qx >= 0 && qy >= 0 && qx < gx && qy < gy) need[qy * gx + qx] = 1;
+        let any = 0;
+        let full = 1;
+        for (let v = iy * k; v < (iy + 1) * k; v++) {
+          let o = (v * maskCanvas.width + ix * k) * 4;
+          for (let u = 0; u < k; u++, o += 4) {
+            if (maskPx[o] > 8) any = 1;
+            if (maskPx[o] < 250) full = 0;
           }
         }
+        cellAny[iy * nx + ix] = any;
+        cellFull[iy * nx + ix] = full;
       }
     }
+    const hgt = bin.add(new DataTexture(new Uint8Array(nx * ny), nx, ny, RedFormat, UnsignedByteType));
+    hgt.colorSpace = NoColorSpace;
+    hgt.minFilter = LinearFilter;
+    hgt.magFilter = LinearFilter;
+    hgt.generateMipmaps = false;
+    hgt.unpackAlignment = 1;
+    hgt.needsUpdate = true;
+
+    const step = Math.max(1, Math.ceil(Math.max(nx, ny) / 72));
+    const gx = Math.ceil(nx / step);
+    const gy = Math.ceil(ny / step);
     const fb = meshBuilder({ position: 3, aH: 1, aG: 2, aKind: 1 });
+    const edgeIndex = [];
+    const interior = new Uint8Array(gx * gy);
     const vid = new Int32Array((gx + 1) * (gy + 1)).fill(-1);
     const vert = (qx, qy) => {
       const key = qy * (gx + 1) + qx;
@@ -1073,8 +1105,52 @@ function createViewer3d(container, options = {}) {
     };
     for (let qy = 0; qy < gy; qy++) {
       for (let qx = 0; qx < gx; qx++) {
-        if (!need[qy * gx + qx]) continue;
-        fb.quad(vert(qx, qy), vert(qx + 1, qy), vert(qx + 1, qy + 1), vert(qx, qy + 1));
+        // o quadro e uma célula em volta: a interpolação da máscara ainda cobre meio pixel além
+        let any = 0;
+        let full = 1;
+        for (let iy = qy * step - 1; iy <= (qy + 1) * step; iy++) {
+          for (let ix = qx * step - 1; ix <= (qx + 1) * step; ix++) {
+            const out = ix < 0 || iy < 0 || ix >= nx || iy >= ny;
+            if (out || !cellFull[iy * nx + ix]) full = 0;
+            if (!out && cellAny[iy * nx + ix]) any = 1;
+          }
+        }
+        if (!any) continue;
+        const a = vert(qx, qy);
+        const b = vert(qx + 1, qy);
+        const c = vert(qx + 1, qy + 1);
+        const d = vert(qx, qy + 1);
+        if (full) {
+          interior[qy * gx + qx] = 1;
+          fb.quad(a, b, c, d);
+        } else edgeIndex.push(a, b, c, a, c, d);
+      }
+    }
+    // Piso plano (sem relevo): o miolo vira poucos retângulos grandes em vez de milhares de quadros.
+    // Cada retângulo passa um fio de cabelo dos vizinhos para não abrir frestas nas emendas.
+    const ff = meshBuilder({ position: 3, aH: 1, aG: 2, aKind: 1 });
+    const used = new Uint8Array(gx * gy);
+    const eps = cell * 0.004;
+    for (let qy = 0; qy < gy; qy++) {
+      for (let qx = 0; qx < gx; qx++) {
+        if (!interior[qy * gx + qx] || used[qy * gx + qx]) continue;
+        let w = 1;
+        while (qx + w < gx && interior[qy * gx + qx + w] && !used[qy * gx + qx + w]) w++;
+        let h = 1;
+        grow: while (qy + h < gy) {
+          for (let j = 0; j < w; j++) {
+            const q = (qy + h) * gx + qx + j;
+            if (!interior[q] || used[q]) break grow;
+          }
+          h++;
+        }
+        for (let j = 0; j < h; j++) used.fill(1, (qy + j) * gx + qx, (qy + j) * gx + qx + w);
+        const x0 = bounds.minX + qx * step * cell - eps;
+        const y0 = bounds.minY + qy * step * cell - eps;
+        const x1 = bounds.minX + (qx + w) * step * cell + eps;
+        const y1 = bounds.minY + (qy + h) * step * cell + eps;
+        const flat = (x, y) => ff.vertex({ position: [x, y, 0], aH: 0, aG: [0, 0], aKind: 0 });
+        ff.quad(flat(x0, y0), flat(x1, y0), flat(x1, y1), flat(x0, y1));
       }
     }
     const surfaceCount = fb.count;
@@ -1114,40 +1190,56 @@ function createViewer3d(container, options = {}) {
         }
         prev = cur;
       }
+      // a lateral da laje também no piso plano
+      let last = null;
+      let start = null;
+      for (let j = 0; j <= ring.length; j++) {
+        let cur;
+        if (j === ring.length) cur = start;
+        else {
+          const p = ring[j];
+          cur = [ff.vertex({ position: [p[0], p[1], 0], aH: 0, aG: [0, 0], aKind: 2 }), ff.vertex({ position: [p[0], p[1], -SLAB], aH: 0, aG: [0, 0], aKind: 2 })];
+          if (!start) start = cur;
+        }
+        if (last) ff.quad(last[1], cur[1], cur[0], last[0]);
+        last = cur;
+      }
     }
     const floorGeom = bin.add(fb.build());
-    const floorMat = bin.add(
-      new ShaderMaterial({
-        vertexShader: FLOOR_VERT,
-        fragmentShader: FLOOR_FRAG,
-        side: DoubleSide,
-        alphaToCoverage: msaa,
-        uniforms: {
-          uColA: { value: colA },
-          uColB: { value: colB },
-          uMask: { value: mask },
-          uMix: { value: 1 },
-          uFade: { value: 1 },
-          uRelief: shared.uRelief,
-          uTime: shared.uTime,
-          uContour: { value: 0 },
-          uRings: shared.uRings,
-          uRingGap: { value: 0.85 * unit },
-          uRingReach: { value: 3.4 * unit },
-          uHatchFreq: { value: 2.4 / unit },
-          uOrigin: { value: new Vector2(bounds.minX, bounds.minY) },
-          uInvSize: { value: new Vector2(1 / (nx * cell), 1 / (ny * cell)) },
-          uNeutral: shared.uNeutral,
-          uHatch: shared.uHatch,
-          uSlab: shared.uSlab,
-          uRingColor: shared.uRingColor,
-          uRouters: { value: [new Vector4(), new Vector4(), new Vector4(), new Vector4()] },
-        },
-      }),
-    );
-    const floorMesh = bin.add(new Mesh(floorGeom, floorMat));
+    const flatGeom = bin.add(ff.build());
+    // a borda usa os mesmos vértices, com os seus próprios triângulos
+    const edgeGeom = bin.add(new BufferGeometry());
+    for (const name of ['position', 'aH', 'aG', 'aKind']) edgeGeom.setAttribute(name, floorGeom.attributes[name]);
+    edgeGeom.setIndex(new BufferAttribute(fb.count > 65535 ? new Uint32Array(edgeIndex) : new Uint16Array(edgeIndex), 1));
+    const floorUniforms = {
+      uCol: { value: col },
+      uMask: { value: mask },
+      uHgt: { value: hgt },
+      uFade: { value: 1 },
+      uRelief: shared.uRelief,
+      uTime: shared.uTime,
+      uRings: shared.uRings,
+      uRingGap: { value: 0.85 * unit },
+      uRingReach: { value: 3.4 * unit },
+      uHatchFreq: { value: 2.4 / unit },
+      uOrigin: { value: new Vector2(bounds.minX, bounds.minY) },
+      uInvSize: { value: new Vector2(1 / (nx * cell), 1 / (ny * cell)) },
+      uNeutral: shared.uNeutral,
+      uHatch: shared.uHatch,
+      uSlab: shared.uSlab,
+      uRingColor: shared.uRingColor,
+      uRouters: { value: [new Vector4(), new Vector4(), new Vector4(), new Vector4()] },
+    };
+    const floorMat = bin.add(new ShaderMaterial({ vertexShader: FLOOR_VERT, fragmentShader: FLOOR_FRAG, side: DoubleSide, uniforms: { ...floorUniforms }, defines: { ROUTERS: 0 } }));
+    const edgeMat = bin.add(new ShaderMaterial({ vertexShader: FLOOR_VERT, fragmentShader: FLOOR_FRAG, side: DoubleSide, alphaToCoverage: msaa, uniforms: { ...floorUniforms }, defines: { ROUTERS: 0, USE_MASK: 1 } }));
+    const floorMesh = bin.add(new Mesh(reliefNow > 0 || reliefTarget > 0 ? floorGeom : flatGeom, floorMat));
     floorMesh.frustumCulled = false; // o relevo mexe os vértices no shader
-    group.add(floorMesh);
+    const edgeMesh = bin.add(new Mesh(edgeGeom, edgeMat));
+    edgeMesh.frustumCulled = false;
+    // de cima para baixo: o andar de cima esconde o de baixo antes de ele ser pintado
+    floorMesh.renderOrder = -2 * i - 2;
+    edgeMesh.renderOrder = -2 * i - 1;
+    group.add(floorMesh, edgeMesh);
 
     // --- paredes: contorno de vidro e divisões internas tracejadas ---
     const wallH = clamp(0.085 * extent.radius, 0.4, 0.8);
@@ -1158,7 +1250,7 @@ function createViewer3d(container, options = {}) {
     }
     for (const w of inner) {
       const a = 0.25 + 0.6 * w.conf;
-      addWall(sheets, caps, w.points, false, { height: wallH * 0.5, capW: 0.045 * unit, capH: 0.02 * unit, sheet0: 0.03 * a, sheet1: 0.2 * a, capA: a, tone: 0, capTone: 2, dash: 0.42 * unit });
+      addWall(sheets, caps, w.points, false, { height: wallH * 0.5, capW: 0.045 * unit, capH: 0, sheet0: 0.03 * a, sheet1: 0.2 * a, capA: a, tone: 0, capTone: 2, dash: 0.42 * unit });
     }
     const wallUniforms = (cut) => ({
       uRelief: shared.uRelief,
@@ -1192,17 +1284,19 @@ function createViewer3d(container, options = {}) {
       markerGroup,
       rings,
       mask,
-      colA,
-      colB,
+      col,
+      hgt,
       floorGeom,
+      flatGeom,
+      edgeGeom,
       floorMat,
+      edgeMat,
+      floorUniforms,
       floorMesh,
+      edgeMesh,
       surfaceCount,
       cliffTop,
       step,
-      gx,
-      gy,
-      vid,
       sheetGeom,
       sheetMat,
       sheetMesh,
@@ -1217,6 +1311,21 @@ function createViewer3d(container, options = {}) {
       wallH,
       painted: false,
     };
+  }
+
+  // Liga ou desliga uma variante do shader do piso (miolo e borda juntos).
+  function setFloorDefine(fs, name, value) {
+    for (const mat of [fs.floorMat, fs.edgeMat]) {
+      const had = mat.defines[name];
+      if (value === false || value === null) {
+        if (had === undefined) continue;
+        delete mat.defines[name];
+      } else {
+        if (had === value) continue;
+        mat.defines[name] = value;
+      }
+      mat.needsUpdate = true;
+    }
   }
 
   // --- relevo: altura por célula (0..1), espalhada para fora da área e suavizada ---
@@ -1274,7 +1383,13 @@ function createViewer3d(container, options = {}) {
       }
       fs.heights = h;
     }
-    for (const fs of floorsState) applyHeights(fs);
+    for (const fs of floorsState) {
+      const data = fs.hgt.image.data;
+      if (fs.heights) for (let c = 0; c < data.length; c++) data[c] = Math.round(fs.heights[c] * 255);
+      else data.fill(0);
+      fs.hgt.needsUpdate = true;
+      applyHeights(fs);
+    }
     updateAnchors();
   }
 
@@ -1332,28 +1447,29 @@ function createViewer3d(container, options = {}) {
     }
   }
 
-  // --- cores do piso: a textura B é a atual; ao trocar, a anterior vai para A e as duas se fundem ---
+  // --- cores do piso: ao trocar (ambientes <-> sinal, outra rede), a textura vai da cor antiga à nova em alguns quadros ---
   function paintFloors(instant) {
     if (!model) return;
     for (const fs of floorsState) {
       const field = heat ? heat[fs.index] : null;
-      const a = fs.colA.image.data;
-      const b = fs.colB.image.data;
-      a.set(b);
-      paintFloorCells(model, fs.index, { heat: field, theme, rooms: layers.rooms, out: new Uint8ClampedArray(b.buffer, b.byteOffset, b.length) });
-      fs.colA.needsUpdate = true;
-      fs.colB.needsUpdate = true;
-      fs.floorMat.uniforms.uContour.value = field ? 1 : 0;
-      const first = instant || !fs.painted;
+      const target = paintFloorCells(model, fs.index, { heat: field, theme, rooms: layers.rooms });
+      setFloorDefine(fs, 'USE_HEAT', field ? 1 : false);
+      const data = fs.col.image.data;
+      const first = instant || !fs.painted || reduced();
       fs.painted = true;
-      const u = fs.floorMat.uniforms.uMix;
-      if (first) u.value = 1;
-      else {
-        u.value = 0;
-        tween(`mix${fs.index}`, 260, (k) => {
-          u.value = k;
-        });
+      if (first) {
+        tweens.delete(`mix${fs.index}`);
+        data.set(target);
+        fs.col.needsUpdate = true;
+        continue;
       }
+      const from = data.slice();
+      tween(`mix${fs.index}`, 260, (k) => {
+        const b = Math.round(k * 256);
+        const a = 256 - b;
+        for (let j = 0; j < data.length; j++) data[j] = (from[j] * a + target[j] * b) >> 8;
+        fs.col.needsUpdate = true;
+      });
     }
     invalidate();
   }
@@ -1371,7 +1487,7 @@ function createViewer3d(container, options = {}) {
       fs.pathGeom = null;
       fs.pathMat = null;
       fs.markerGroup.clear();
-      for (const v of fs.floorMat.uniforms.uRouters.value) v.set(0, 0, 0, 0);
+      for (const v of fs.floorUniforms.uRouters.value) v.set(0, 0, 0, 0);
       fs.routerCount = 0;
     }
     if (!model) return;
@@ -1491,9 +1607,9 @@ function createViewer3d(container, options = {}) {
         addLabel(bin, fs.markerGroup, fs.index, spec, [item.x, item.y, h + 0.22 * unit], { ay: 0, priority: item.repeat ? 58 : 60, layer: 'routers', pick });
         if (!item.clamped && fs.routerCount < 4) {
           const conf = Number.isFinite(ap.conf) ? clamp(ap.conf, 0, 1) : 0.5;
-          // posição pouco confiável: um círculo tracejado mostra até onde o roteador pode estar
+          // posição pouco confiável: um halo mostra até onde o roteador pode estar
           const doubt = conf < 0.7 ? expected * (0.6 + 1.6 * (1 - conf)) : 0;
-          fs.floorMat.uniforms.uRouters.value[fs.routerCount++].set(item.x, item.y, doubt, 0.55 + 0.45 * conf);
+          fs.floorUniforms.uRouters.value[fs.routerCount++].set(item.x, item.y, doubt, 0.55 + 0.45 * conf);
         }
       } else {
         const zTip = item.clamped ? 0.1 : 0.46 * unit;
@@ -1554,6 +1670,7 @@ function createViewer3d(container, options = {}) {
     ringMesh.position.z = -SLAB + 0.01;
     ringMesh.renderOrder = 1;
     lowest.markerGroup.add(ringMesh);
+    for (const fs of floorsState) setFloorDefine(fs, 'ROUTERS', fs.routerCount);
     updateAnchors();
   }
 
@@ -1635,11 +1752,28 @@ function createViewer3d(container, options = {}) {
     if (wantRelief !== reliefTarget) {
       reliefTarget = wantRelief;
       const from = reliefNow;
-      tween('relief', 520, (k) => {
-        reliefNow = from + (reliefTarget - from) * k;
-        shared.uRelief.value = reliefNow * RELIEF_MAX;
-        updateAnchors();
-      });
+      for (const fs of floorsState) {
+        setFloorDefine(fs, 'USE_RELIEF', 1);
+        fs.floorMesh.geometry = fs.floorGeom; // malha fina enquanto houver relevo
+      }
+      tween(
+        'relief',
+        520,
+        (k) => {
+          reliefNow = from + (reliefTarget - from) * k;
+          shared.uRelief.value = reliefNow * RELIEF_MAX;
+          updateAnchors();
+        },
+        () => {
+          if (reliefTarget !== 0) return;
+          for (const fs of floorsState) {
+            setFloorDefine(fs, 'USE_RELIEF', false);
+            fs.floorMesh.geometry = fs.flatGeom;
+          }
+        },
+      );
+    } else if (reliefNow > 0) {
+      for (const fs of floorsState) setFloorDefine(fs, 'USE_RELIEF', 1); // andares refeitos com o relevo já ligado
     }
     labelsDirty = true;
     invalidate();
@@ -1675,9 +1809,11 @@ function createViewer3d(container, options = {}) {
 
   function setFloorFade(fs) {
     const f = fs.fade;
-    fs.floorMat.uniforms.uFade.value = f;
+    fs.floorUniforms.uFade.value = f;
     fs.floorMat.transparent = f < 0.999;
+    fs.edgeMat.transparent = f < 0.999;
     fs.floorMesh.visible = f > 0.01;
+    fs.edgeMesh.visible = f > 0.01;
     fs.sheetMat.uniforms.uFade.value = f;
     fs.capMat.uniforms.uFade.value = Math.max(f, GHOST);
     if (fs.pathMat) fs.pathMat.uniforms.uFade.value = f;
@@ -2713,6 +2849,7 @@ function createViewer3d(container, options = {}) {
       return new Promise((resolve, reject) => out.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('não foi possível gerar a imagem'))), 'image/png'));
     },
     resize,
+    _debug: () => ({ renderer, scene, camera, controls, ground, floors: floorsState, labels, invalidate, shared }),
     stats() {
       const info = renderer.info;
       return {
@@ -2724,6 +2861,7 @@ function createViewer3d(container, options = {}) {
         motionScale,
         running: raf !== 0,
         contextLost,
+        antialias: msaa,
         geometries: info.memory.geometries,
         textures: info.memory.textures,
         programs: info.programs ? info.programs.length : 0,

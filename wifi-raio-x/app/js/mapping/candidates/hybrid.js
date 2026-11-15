@@ -5,8 +5,9 @@
 //                 Android repete, e transforma varreduras em "nós" (um ponto marcado = um nó).
 //   2. GROSSO   - grafo com "barras" entre nós seguidos no tempo (passo de quem anda, em metros) e
 //                 arestas entre nós de impressão digital parecida; a distância entre dois nós é o
-//                 caminho mais curto no grafo e o mapa sai de um MDS clássico (Isomap). O comprimento
-//                 das arestas por impressão digital é calibrado pela densidade do próprio levantamento.
+//                 caminho mais curto no grafo, com um teto dado pela ordem das impressões digitais, e
+//                 o mapa sai de um MDS clássico (Isomap). Os comprimentos que dependem da impressão
+//                 digital são calibrados pela densidade do próprio levantamento.
 //   3. ESCALA   - nos modos com tempo útil ela vem das barras; no modo de 30 s (sem tempo útil) vem de
 //                 um fator a priori misturado com a física do sinal perto dos roteadores da casa.
 //   4. FINO     - poucas voltas de refino: aprende o campo de cada rádio (lei de distância + resíduo
@@ -42,8 +43,6 @@ const DEFAULTS = {
   isoExclude: 3, // não liga por impressão digital quem está a até 3 varreduras no tempo (já há a barra)
   isoKappa: 1.4, // a ordem por impressão digital é ruidosa: o "mais parecido" raramente é o mais próximo
   rankCap: 1.5, // teto de distância pela ordem das impressões digitais (em espaçamentos por raiz do posto)
-  capLaw: 0,
-  capOnly: 0,
   isoLen0: 0.8, // sem calibração possível (modo de 30 s): comprimento por posto, em unidades do grafo
   isoLenStep: 0.3,
   isoFree: 2.5, // ponte entre pontos marcados seguidos quando o tempo não informa nada
@@ -112,13 +111,14 @@ function solveSurvey(survey, options) {
     if (typeof options.onProgress === 'function') {
       try {
         options.onProgress(f, label);
-      } catch (e) {
+      } catch {
         // quem escuta o progresso não derruba o cálculo
       }
     }
   };
   const prep = prepare(survey);
   if (prep.N === 0) return { points: [], aps: {}, scaleConf: 0 };
+  const keepStages = !!options.tune; // mapas intermediários só para quem está experimentando
   const stages = {};
   const info = {};
   const model = buildModel(prep);
@@ -129,8 +129,7 @@ function solveSurvey(survey, options) {
   X = coarseScale(model, X, T, info);
   let known = knownScale(prep, survey, X);
   if (known) X = X.map((p) => [p[0] * known, p[1] * known]);
-  stages.coarse = nodePointsToScans(prep, X);
-  if (T.initTruth) X = prep.nodes.map((nd) => [T.initTruth[nd.scans[0]].x, T.initTruth[nd.scans[0]].y]); // só diagnóstico
+  if (keepStages) stages.coarse = nodePointsToScans(prep, X);
 
   progress(0.4, 'refino');
   const doRefine = model.M >= 6 && model.active.length >= 2 && (timed || T.refineFree);
@@ -142,7 +141,7 @@ function solveSurvey(survey, options) {
     deadline,
     info,
     onRound: (r, Xr) => {
-      stages[`r${r + 1}`] = nodePointsToScans(prep, Xr);
+      if (keepStages) stages[`r${r + 1}`] = nodePointsToScans(prep, Xr);
       progress(0.4 + (0.45 * (r + 1)) / Math.max(1, T.rounds), 'refino');
     },
   });
@@ -153,9 +152,9 @@ function solveSurvey(survey, options) {
   info.sigma = Number(fit.sigmaMean.toFixed(2));
 
   progress(0.9, 'roteadores');
-  const solution = buildOutput(prep, model, X, fit, { timed, known: !!known, refined: doRefine }, T);
+  const solution = buildOutput(prep, model, X, fit, { timed, known: !!known }, T);
   info.ms = Math.round(now() - started);
-  solution.debug = { stages, info };
+  solution.debug = keepStages ? { stages, info } : { info };
   progress(1, 'pronto');
   return solution;
 }

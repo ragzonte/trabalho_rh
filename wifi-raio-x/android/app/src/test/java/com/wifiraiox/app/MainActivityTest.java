@@ -164,6 +164,67 @@ public class MainActivityTest extends AllSdks {
                 request("https://appassets.androidplatform.net/outra/coisa.js", false)).getStatusCode());
     }
 
+    /**
+     * A cópia da interface que ESTE build empacotou (tarefa copyWeb do Gradle). É ela, e não a pasta
+     * wifi-raio-x/app ao vivo, que serve de referência: o que importa é nada se perder da cópia até o APK.
+     */
+    private static java.io.File webAppDir() {
+        java.io.File dir = new java.io.File(System.getProperty("user.dir"), "build/generated/web/www");
+        assertTrue("cópia da interface não encontrada em " + dir, new java.io.File(dir, "index.html").isFile());
+        return dir;
+    }
+
+    private static void collect(java.io.File dir, String prefix, List<String> out) {
+        java.io.File[] children = dir.listFiles();
+        if (children == null) return;
+        Arrays.sort(children);
+        for (java.io.File f : children) {
+            if (f.getName().startsWith(".")) continue; // ocultos (.DS_Store, .gitkeep) ficam mesmo de fora do APK
+            if (f.isDirectory()) collect(f, prefix + f.getName() + "/", out);
+            else out.add(prefix + f.getName());
+        }
+    }
+
+    @Test
+    public void everyFileOfTheWebAppIsInsideTheApkAndServedWithAUsableType() throws Exception {
+        // O empacotador do Android descarta em silêncio arquivos e pastas que começam com "." e, por
+        // padrão, pastas que começam com "_" (ver androidResources no build.gradle): a página abriria
+        // faltando um módulo, e só no celular.
+        List<String> files = new ArrayList<>();
+        collect(webAppDir(), "", files);
+        assertTrue("a interface tem de estar lá: " + files.size(), files.size() >= 10);
+        assertTrue(files.contains("index.html"));
+        assertTrue(files.contains("js/bridge.js"));
+
+        MainActivity activity = launch();
+        WebViewClient client = shadowOf(activity.webView()).getWebViewClient();
+        Map<String, String> required = new HashMap<>();
+        required.put("js", "text/javascript");   // módulos ES e Web Workers recusam qualquer outro tipo
+        required.put("mjs", "text/javascript");
+        required.put("css", "text/css");
+        required.put("html", "text/html");
+        required.put("json", "application/json");
+        required.put("svg", "image/svg+xml");
+        required.put("wasm", "application/wasm"); // WebAssembly.instantiateStreaming exige este tipo
+        for (String path : files) {
+            String url = "https://appassets.androidplatform.net/assets/www/" + Uri.encode(path, "/");
+            WebResourceResponse r = client.shouldInterceptRequest(activity.webView(), request(url, false));
+            assertNotNull(path, r);
+            assertEquals(path + " ficou de fora do APK", 200, r.getStatusCode());
+            java.io.File source = new java.io.File(webAppDir(), path);
+            try (InputStream in = r.getData()) {
+                long length = 0;
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) length += n;
+                assertEquals(path + ": conteúdo empacotado diferente do arquivo", source.length(), length);
+            }
+            int dot = path.lastIndexOf('.');
+            String expected = dot < 0 ? null : required.get(path.substring(dot + 1).toLowerCase());
+            if (expected != null) assertEquals(path, expected, r.getMimeType());
+        }
+    }
+
     @Test
     public void mimeTable() {
         String[][] table = {
@@ -271,7 +332,7 @@ public class MainActivityTest extends AllSdks {
         assertEquals(callbacksBefore, Fixtures.shadowConnectivity().getNetworkCallbacks().size());
         assertTrue(shadowOf(web).wasOnPauseCalled());
 
-        controller.start().resume(); // volta para a frente
+        controller.restart().resume(); // volta para a frente (onRestart, onStart, onResume)
         assertEquals(receiversBefore + 2, ourReceivers().size());
         assertEquals(callbacksBefore + 1, Fixtures.shadowConnectivity().getNetworkCallbacks().size());
         assertTrue(shadowOf(web).wasOnResumeCalled());
@@ -295,11 +356,14 @@ public class MainActivityTest extends AllSdks {
         activity.bridge().call("watchRssi", "{}");
         activity.bridge().callAsync(5, "requestPermission", "{}");
         Fixtures.idle();
-        assertEquals(1, activity.bridge().pendingCalls());
+        Bridge bridge = activity.bridge();
+        assertEquals(1, bridge.pendingCalls());
         controller.destroy(); // o Android pode pular etapas quando mata a tela
         assertEquals(receiversBefore, ourReceivers().size());
         assertEquals(callbacksBefore, Fixtures.shadowConnectivity().getNetworkCallbacks().size());
-        assertEquals("ninguém fica esperando resposta", 0, activity.bridge().pendingCalls());
+        assertEquals("ninguém fica esperando resposta", 0, bridge.pendingCalls());
+        assertTrue(bridge.isDestroyed());
+        assertNull(activity.bridge());
     }
 
     @Test
@@ -541,7 +605,7 @@ public class MainActivityTest extends AllSdks {
         activity.onRequestPermissionsResult(Permissions.REQUEST_LOCATION, new String[0], new int[0]);
         Fixtures.idle();
 
-        controller.restart().start().resume();
+        controller.restart().resume();
         WebView second = activity.webView();
         assertNotNull("ao voltar, a página é refeita", second);
         assertFalse(activity.pageLost());
@@ -554,7 +618,7 @@ public class MainActivityTest extends AllSdks {
         org.robolectric.shadows.ShadowSystemClock.advanceBy(2, java.util.concurrent.TimeUnit.SECONDS);
         assertTrue(rendererGone(second));
         assertFalse(activity.isFinishing());
-        controller.restart().start().resume();
+        controller.restart().resume();
         assertNotNull(activity.webView());
     }
 
@@ -564,7 +628,7 @@ public class MainActivityTest extends AllSdks {
         MainActivity activity = launch();
         controller.pause().stop();
         assertTrue(rendererGone(activity.webView()));
-        controller.restart().start();
+        controller.restart();
         // refeita no onStart; mata de novo antes do resume para ficar sem página em primeiro plano
         org.robolectric.shadows.ShadowSystemClock.advanceBy(60, java.util.concurrent.TimeUnit.SECONDS);
         WebView rebuilt = activity.webView();
@@ -609,6 +673,112 @@ public class MainActivityTest extends AllSdks {
         // e uma exceção ao servir um arquivo vira resposta de erro, não queda (roda numa thread do WebView)
         WebResourceResponse r = client.shouldInterceptRequest(activity.webView(), request(WebClient.START_URL, true));
         assertEquals(500, r.getStatusCode());
+    }
+
+    // ------------------------------------------------------------ a página abriu?
+
+    private static void advance(long ms) {
+        org.robolectric.shadows.ShadowLooper.idleMainLooper(ms, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
+    @Test
+    public void aPageThatNeverComesAliveGetsAnExplanationAndAWayOut() {
+        // WebView antigo demais para os módulos da interface: nenhum script do app chega a rodar.
+        MainActivity activity = launch();
+        ShadowWebView web = shadowOf(activity.webView());
+        advance(MainActivity.PAGE_START_MS - 1000);
+        assertFalse("ainda dentro do prazo", Js.ALIVE_SCRIPT.equals(web.getLastEvaluatedJavascript()));
+        advance(1000);
+        assertEquals(Js.ALIVE_SCRIPT, web.getLastEvaluatedJavascript());
+        assertNull(activity.startProblemDialog());
+
+        web.getLastEvaluatedJavascriptCallback().onReceiveValue("false");
+        android.app.AlertDialog dialog = activity.startProblemDialog();
+        assertNotNull("em vez de ficar para sempre na tela de abertura", dialog);
+        assertTrue(dialog.isShowing());
+        String message = String.valueOf(shadowOf(dialog).getMessage());
+        assertTrue(message, message.contains("Android System WebView"));
+        assertTrue(message, message.contains("Play Store"));
+        assertFalse(activity.isFinishing());
+
+        // "Atualizar" leva à página do componente na loja
+        dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).performClick();
+        Fixtures.idle();
+        Intent store = shadowOf(activity).getNextStartedActivity();
+        assertNotNull(store);
+        assertEquals(Intent.ACTION_VIEW, store.getAction());
+        assertEquals("market://details?id=com.google.android.webview", store.getDataString());
+        assertFalse(dialog.isShowing());
+        assertNull(activity.startProblemDialog());
+
+        // o aviso aparece uma vez só por página, mesmo que ela continue parada
+        advance(MainActivity.PAGE_START_MS * 3);
+        assertNull(activity.startProblemDialog());
+    }
+
+    @Test
+    public void aHealthyPageIsCheckedOnceAndNeverBothered() {
+        MainActivity activity = launch();
+        ShadowWebView web = shadowOf(activity.webView());
+        advance(MainActivity.PAGE_START_MS);
+        android.webkit.ValueCallback<String> answer = web.getLastEvaluatedJavascriptCallback();
+        answer.onReceiveValue("true");
+        assertNull(activity.startProblemDialog());
+        assertNull(org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog());
+        advance(MainActivity.PAGE_START_MS * 6);
+        assertSame("não pergunta de novo", answer, web.getLastEvaluatedJavascriptCallback());
+
+        // sair e voltar não reabre a questão
+        controller.pause().stop();
+        controller.restart().resume();
+        advance(MainActivity.PAGE_START_MS * 2);
+        assertNull(org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog());
+
+        // uma recarga da página, sim: a página nova tem de mostrar que roda
+        shadowOf(activity.webView()).getWebViewClient().onPageStarted(activity.webView(), WebClient.START_URL, null);
+        advance(MainActivity.PAGE_START_MS);
+        assertEquals(Js.ALIVE_SCRIPT, web.getLastEvaluatedJavascript());
+        assertTrue(answer != web.getLastEvaluatedJavascriptCallback());
+    }
+
+    @Test
+    public void aSlowPageDismissesTheWarningByItselfOnceItStarts() {
+        MainActivity activity = launch();
+        ShadowWebView web = shadowOf(activity.webView());
+        advance(MainActivity.PAGE_START_MS);
+        web.getLastEvaluatedJavascriptCallback().onReceiveValue("false");
+        android.app.AlertDialog dialog = activity.startProblemDialog();
+        assertTrue(dialog.isShowing());
+
+        advance(MainActivity.PAGE_RECHECK_MS); // pergunta de novo enquanto o aviso está na tela
+        web.getLastEvaluatedJavascriptCallback().onReceiveValue("false");
+        assertTrue(dialog.isShowing());
+        advance(MainActivity.PAGE_RECHECK_MS);
+        web.getLastEvaluatedJavascriptCallback().onReceiveValue("true"); // a página acordou
+        assertFalse(dialog.isShowing());
+        assertNull(activity.startProblemDialog());
+    }
+
+    @Test
+    public void theWarningNeverOutlivesTheScreenAndIsNotAskedInTheBackground() {
+        MainActivity activity = launch();
+        ShadowWebView web = shadowOf(activity.webView());
+        controller.pause().stop(); // saiu do app antes do prazo: fora da tela a página pode estar suspensa
+        advance(MainActivity.PAGE_START_MS * 2);
+        assertFalse(Js.ALIVE_SCRIPT.equals(web.getLastEvaluatedJavascript()));
+
+        controller.restart().resume();
+        advance(MainActivity.PAGE_START_MS);
+        assertEquals("de volta à tela, o prazo recomeça", Js.ALIVE_SCRIPT, web.getLastEvaluatedJavascript());
+        android.webkit.ValueCallback<String> answer = web.getLastEvaluatedJavascriptCallback();
+        answer.onReceiveValue("null"); // qualquer coisa que não seja true
+        android.app.AlertDialog dialog = activity.startProblemDialog();
+        assertTrue(dialog.isShowing());
+
+        controller.pause().stop().destroy();
+        assertFalse("um diálogo aberto numa tela destruída vazaria a janela", dialog.isShowing());
+        answer.onReceiveValue("false"); // resposta atrasada depois de tudo encerrado: não lança, não mostra nada
+        assertNull(activity.startProblemDialog());
     }
 
     @Test

@@ -23,8 +23,10 @@
 //                do roteador; rede com vários BSSIDs = o maior entre eles), nas células de dentro;
 //                c>.5 = só onde a confiança do campo passa de 0,5; viés = média (estimado - real);
 //   rot          erro de posição do roteador da casa (mediana entre os aparelhos), em metros;
-//   parP / parR  divisões internas: fração do comprimento estimado que tem parede real a até 0,6 m,
-//                e fração das paredes internas reais com divisão estimada a até 0,75 m;
+//   parP / parR  divisões internas: fração do comprimento estimado que tem parede real a até 0,6 m
+//                (parPc = a mesma fração pesada pela confiança de cada divisão: maior que parP quando a
+//                confiança separa as divisões certas das erradas), e fração das paredes internas reais
+//                com divisão estimada a até 0,75 m;
 //   errE / errR  erro de posição esperado (quality.expectedErrorM) x erro mediano real dos pontos.
 //
 // Só o conjunto de desenvolvimento: o holdout é para julgar solucionadores, não para ajustar o mapa.
@@ -317,6 +319,8 @@ export function evaluateMap(scenario, solution, options = {}) {
   // Divisões internas x paredes reais.
   let wallLen = 0;
   let wallHit = 0;
+  let confLen = 0;
+  let confHit = 0;
   const innerByFloor = [];
   for (let k = 0; k < world.floors; k++) {
     const fi = floorIndex(k);
@@ -331,8 +335,13 @@ export function evaluateMap(scenario, solution, options = {}) {
         const steps = Math.max(1, Math.round(len / 0.2));
         for (let s = 0; s < steps; s++) {
           const u = (s + 0.5) / steps;
+          const hit = world.wallDistance(p1.x + (p2.x - p1.x) * u, p1.y + (p2.y - p1.y) * u, k) <= 0.6;
           wallLen += len / steps;
-          if (world.wallDistance(p1.x + (p2.x - p1.x) * u, p1.y + (p2.y - p1.y) * u, k) <= 0.6) wallHit += len / steps;
+          confLen += (w.conf * len) / steps;
+          if (hit) {
+            wallHit += len / steps;
+            confHit += (w.conf * len) / steps;
+          }
         }
       }
     }
@@ -381,6 +390,7 @@ export function evaluateMap(scenario, solution, options = {}) {
     routerErr: routerErr.length ? quantile(routerErr, 0.5) : null,
     routerFloorOk: routerErr.length ? floorOk / routerErr.length : null,
     wallP: wallLen ? wallHit / wallLen : null,
+    wallPConf: confLen ? confHit / confLen : null,
     wallR: realLen ? realHit / realLen : null,
     expErr: model.quality.expectedErrorM,
     realErr: quantile(errs, 0.5),
@@ -682,7 +692,7 @@ export async function runMapBench(run) {
   return { source, results, groups: by('group'), modes: by('mode'), total: summarise(results) };
 }
 
-const SUMMARY_KEYS = ['iou', 'ratio', 'ari', 'ariIn', 'rooms', 'roomsTrue', 'heatRmse', 'heatRmseConf', 'heatBias', 'heatConfShare', 'routerErr', 'wallP', 'wallR', 'expErr', 'realErr', 'buildMs', 'heatMs'];
+const SUMMARY_KEYS = ['iou', 'ratio', 'ari', 'ariIn', 'rooms', 'roomsTrue', 'heatRmse', 'heatRmseConf', 'heatBias', 'heatConfShare', 'routerErr', 'wallP', 'wallPConf', 'wallR', 'expErr', 'realErr', 'buildMs', 'heatMs'];
 
 /** Médias das medidas de uma lista de resultados (as falhas ficam de fora e são contadas). */
 export function summarise(list) {
@@ -775,7 +785,7 @@ function f(v, width, digits = 2) {
 }
 
 const HEADER =
-  'cenário'.padEnd(32) + ' var' + '   IoU' + ' razão' + '   ARI' + ' ARIin' + '   amb' + ' calor' + '  c>.5' + '  viés' + '   rot' + '  parP' + '  parR' + '  errE' + '  errR' + '  mapa ms' + ' calor ms';
+  'cenário'.padEnd(32) + ' var' + '   IoU' + ' razão' + '   ARI' + ' ARIin' + '   amb' + ' calor' + '  c>.5' + '  viés' + '   rot' + '  parP' + ' parPc' + '  parR' + '  errE' + '  errR' + '  mapa ms' + ' calor ms';
 
 function row(r) {
   if (!r.ok) return `${r.name.padEnd(32)}${String(r.scans).padStart(4)}  FALHOU: ${String(r.error).split('\n')[0].slice(0, 100)}`;
@@ -792,6 +802,7 @@ function row(r) {
     f(r.heatBias, 6, 1) +
     f(r.routerErr, 6, 1) +
     f(r.wallP, 6) +
+    f(r.wallPConf, 6) +
     f(r.wallR, 6) +
     f(r.expErr, 6, 1) +
     f(r.realErr, 6, 1) +
@@ -801,7 +812,7 @@ function row(r) {
 }
 
 const SUMMARY_HEADER =
-  'grupo'.padEnd(18) + '  n' + ' falhas' + '   IoU' + ' razão' + '   ARI' + ' ARIin' + '      amb' + ' calor' + '  c>.5' + '  viés' + '   rot' + '  parP' + '  parR' + '  errE' + '  errR' + '  mapa ms' + ' calor ms';
+  'grupo'.padEnd(18) + '  n' + ' falhas' + '   IoU' + ' razão' + '   ARI' + ' ARIin' + '      amb' + ' calor' + '  c>.5' + '  viés' + '   rot' + '  parP' + ' parPc' + '  parR' + '  errE' + '  errR' + '  mapa ms' + ' calor ms';
 
 function summaryRow(name, a) {
   return (
@@ -818,6 +829,7 @@ function summaryRow(name, a) {
     f(a.heatBias, 6, 1) +
     f(a.routerErr, 6, 1) +
     f(a.wallP, 6) +
+    f(a.wallPConf, 6) +
     f(a.wallR, 6) +
     f(a.expErr, 6, 1) +
     f(a.realErr, 6, 1) +

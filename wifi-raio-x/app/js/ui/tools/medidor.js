@@ -20,7 +20,7 @@
 
 import { h, patch, mount as render, sheet, toast, cssVar, fmtDbm, fmtPct, fmtMeters, fmtAgo, fmtNum, fmtBand, THIN, MINUS } from '../dom.js';
 import { icon } from '../icons.js';
-import { apRow, signalBars, ssidLabel, button, switchRow, listRow, spinner, banner } from '../components.js';
+import { apRow, signalBars, ssidLabel, button, iconButton, switchRow, listRow, spinner, banner } from '../components.js';
 import { signalLevel, qualityPct, indoorDistance } from '../../core/signal.js';
 import { createGauge } from '../charts/gauge.js';
 import { useToolsCss } from './conexao.js';
@@ -564,7 +564,7 @@ export async function mount(root, ctx) {
   render(
     root,
     targetHost,
-    h('section.card.mtr-instrument', null, gaugeHost, metaHost, statsHost),
+    h('section.card.mtr-instrument', null, iconButton('help', 'Como ler o medidor', () => openHelp(), { muted: true, class: 'icon-btn icon-btn--muted mtr-help' }), gaugeHost, metaHost, statsHost),
     h('section.card.mtr-chartcard', null, chartHead, chartHost),
     huntHost,
     rttHost,
@@ -1088,7 +1088,7 @@ export async function mount(root, ctx) {
     const conn = t.conn;
     return [
       h(
-        'div.card.card--flush.list',
+        'div.card.card--flush.list.mtr-sheetcard',
         { key: 'follow' },
         listRow({
           key: 'follow',
@@ -1102,7 +1102,7 @@ export async function mount(root, ctx) {
       h('p.mtr-pick__hint', { key: 'hint' }, `As outras redes só mudam a cada busca (${cadenceText(state)}).`),
       state.aps.length
         ? h(
-            'div.card.card--flush.list',
+            'div.card.card--flush.list.mtr-sheetcard',
             { key: 'list' },
             state.aps.map((ap) =>
               h(
@@ -1114,6 +1114,44 @@ export async function mount(root, ctx) {
           )
         : h('p.t-sm.muted.center', { key: 'empty' }, state.scan.seq === 0 ? 'Procurando redes…' : 'Nenhuma rede ao alcance agora.'),
     ];
+  }
+
+  /** "Como ler o medidor": o que é dBm, o que cada número quer dizer e como caçar o roteador. */
+  function openHelp() {
+    const levels = [
+      [-45, `de ${fmtDbm(-50)} para cima`, 'Sinal de sobra para qualquer uso'],
+      [-55, `até ${fmtDbm(-60)}`, 'Vídeo em 4K, jogos e chamadas'],
+      [-64, `até ${fmtDbm(-67)}`, 'Bom para chamadas de vídeo'],
+      [-72, `até ${fmtDbm(-75)}`, 'Navega bem; o vídeo pode perder qualidade'],
+      [-80, `até ${fmtDbm(-82)}`, 'Lento e sujeito a travadas'],
+      [-90, `abaixo de ${fmtDbm(-82)}`, 'Conexão instável, pode cair'],
+    ];
+    sheet({
+      title: 'Como ler o medidor',
+      content: [
+        h(
+          'div.prose',
+          null,
+          h('p', null, h('strong', null, 'dBm'), ' é a unidade da força do sinal. O número é sempre negativo: quanto mais perto de zero, mais forte.'),
+        ),
+        h(
+          'div.card.card--flush.list.mtr-sheetcard',
+          null,
+          levels.map(([rssi, range, use]) => {
+            const level = signalLevel(rssi);
+            return listRow({ key: level.key, dense: true, lead: signalBars(rssi), title: `${level.label} · ${range}`, subtitle: use });
+          }),
+        ),
+        h(
+          'ul.prose',
+          null,
+          h('li', null, h('strong', null, 'Qualidade'), ' é o mesmo sinal numa escala de 0 a 100%.'),
+          h('li', null, 'O ', h('strong', null, 'tracinho no arco'), ' marca o sinal mais forte desde que você abriu ou zerou a medição.'),
+          h('li', null, 'A ', h('strong', null, 'distância'), ' é uma estimativa pelo sinal: uma parede no caminho muda bastante o resultado.'),
+          h('li', null, 'No ', h('strong', null, 'caça-roteador'), ', ande devagar. Enquanto o app disser “mais perto”, continue nessa direção; os bipes e a vibração aceleram conforme o sinal sobe.'),
+        ),
+      ],
+    });
   }
 
   function openPicker() {

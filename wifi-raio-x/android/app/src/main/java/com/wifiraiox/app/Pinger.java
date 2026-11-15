@@ -138,7 +138,10 @@ final class Pinger {
             if (job.cancelled) return PingStats.summary(host, "icmp", 0, new ArrayList<>());
 
             Outcome icmp = icmp(job, host, address, count, timeoutMs, events);
-            boolean icmpAnswered = icmp != null && (!icmp.replies.isEmpty() || icmp.exit == 0);
+            // Só vale o que foi lido linha a linha. Um ping que termina bem sem nenhuma resposta
+            // reconhecida fala um dialeto que não entendemos: melhor medir pelas sondas do que
+            // devolver "100% de perda" para um destino que respondeu.
+            boolean icmpAnswered = icmp != null && !icmp.replies.isEmpty();
             if (icmpAnswered || job.cancelled) {
                 return finish(host, "icmp", icmp == null ? new Outcome() : icmp, events);
             }

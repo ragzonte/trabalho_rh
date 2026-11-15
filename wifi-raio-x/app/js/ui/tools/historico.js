@@ -159,8 +159,10 @@ export async function mount(root, ctx) {
     patch(el.empty);
     ensurePicked(state);
     const picked = memo.picked || [];
-    const labels = seriesLabels(state.aps);
-    for (const [bssid, label] of labels) memo.names.set(bssid, label);
+    // rótulos: os das redes ao alcance agora, mais os já conhecidos das escolhidas que sumiram
+    const names = seriesLabels(state.aps);
+    for (const bssid of picked) if (!names.has(bssid) && memo.names.has(bssid)) names.set(bssid, memo.names.get(bssid));
+    memo.names = names;
 
     // séries
     const connected = state.aps.find((ap) => ap.connected) || null;

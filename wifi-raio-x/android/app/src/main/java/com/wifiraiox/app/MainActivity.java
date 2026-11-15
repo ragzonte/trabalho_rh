@@ -2,8 +2,10 @@ package com.wifiraiox.app;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -34,6 +36,9 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     private static final long RESTORE_CHECK_MS = 400;
     /** Uma página refeita que morre de novo antes disto está em laço: melhor fechar do que insistir. */
     static final long RENDERER_LOOP_MS = 10_000;
+    /** A interface monta em 1 ou 2 segundos; passado este prazo sem sinal dela, algo a impede de rodar. */
+    static final long PAGE_START_MS = 10_000;
+    static final long PAGE_RECHECK_MS = 3_000;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     /** Só na thread da interface. null = sem página (WebView ausente, tela encerrada ou renderizador morto). */
@@ -49,6 +54,11 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     private boolean backPending;
     private long restoreWindowStart = -RESTORE_WINDOW_MS;
     private int restores;
+    /** A página atual já mostrou que está rodando (ver checkPageStarted). */
+    private boolean pageAlive;
+    private boolean startProblemShown;
+    private AlertDialog startProblem;
+    private final Runnable pageStartCheck = this::checkPageStarted;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -82,6 +92,9 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         created.setPageUrl(WebClient.START_URL);
         view.loadUrl(WebClient.START_URL);
+        pageAlive = false;
+        startProblemShown = false;
+        watchPageStart(PAGE_START_MS);
         return true;
     }
 
@@ -102,6 +115,7 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
         web = null;
         backPending = false;
         main.removeCallbacksAndMessages(null);
+        dismissStartProblem();
         if (view == null) return;
         try {
             if (view.getParent() instanceof ViewGroup) ((ViewGroup) view.getParent()).removeView(view);
@@ -157,6 +171,7 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
         started = true;
         if (pageLost) restorePage(); // o renderizador morreu enquanto o app estava fora da tela
         else startPage();
+        if (web != null && !pageAlive) watchPageStart(PAGE_START_MS); // a conferência não roda fora da tela
     }
 
     /** WebView e ponte passam a acompanhar a tela visível. */
@@ -246,6 +261,106 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
         }
     }
 
+    // ------------------------------------------------------------------ a página abriu?
+
+    /*
+     * Ninguém garante que a página consiga rodar: num aparelho com o WebView parado numa versão
+     * antiga (comum em Android 7 a 9 sem atualizações da loja) os módulos da interface nem são
+     * interpretados e a tela ficaria para sempre na abertura, sem explicação. Depois de um prazo
+     * folgado perguntamos à página se ela está de pé; se não estiver, um aviso diz o que fazer.
+     */
+
+    private void watchPageStart(long delayMs) {
+        main.removeCallbacks(pageStartCheck);
+        main.postDelayed(pageStartCheck, delayMs);
+    }
+
+    private void checkPageStarted() {
+        final WebView asked = web;
+        if (asked == null || pageAlive || !started || isFinishing() || isDestroyed()) return;
+        try {
+            asked.evaluateJavascript(Js.ALIVE_SCRIPT, value -> onPageAliveAnswer(asked, "true".equals(value)));
+        } catch (RuntimeException ignored) {
+            // WebView em encerramento
+        }
+    }
+
+    private void onPageAliveAnswer(WebView asked, boolean alive) {
+        if (asked != web || isFinishing() || isDestroyed()) return;
+        if (alive) {
+            pageAlive = true;
+            dismissStartProblem(); // demorou, mas abriu
+            return;
+        }
+        showStartProblem();
+        if (startProblem != null) watchPageStart(PAGE_RECHECK_MS); // se a página acordar, o aviso some sozinho
+    }
+
+    private void showStartProblem() {
+        if (startProblemShown || !started) return;
+        startProblemShown = true;
+        try {
+            int theme = getResources().getBoolean(R.bool.light_theme)
+                    ? android.R.style.Theme_Material_Light_Dialog_Alert
+                    : android.R.style.Theme_Material_Dialog_Alert;
+            startProblem = new AlertDialog.Builder(this, theme)
+                    .setTitle(R.string.page_stuck_title)
+                    .setMessage(getString(R.string.page_stuck_message, webViewVersion()))
+                    .setPositiveButton(R.string.page_stuck_update, (dialog, which) -> openWebViewInStore())
+                    .setNegativeButton(R.string.page_stuck_wait, null)
+                    .setOnDismissListener(dialog -> startProblem = null)
+                    .show();
+        } catch (RuntimeException e) {
+            startProblem = null; // a janela já não aceita diálogos (tela de saída)
+        }
+    }
+
+    private void dismissStartProblem() {
+        AlertDialog dialog = startProblem;
+        startProblem = null;
+        if (dialog == null) return;
+        try {
+            dialog.dismiss();
+        } catch (RuntimeException ignored) {
+            // janela já destruída
+        }
+    }
+
+    /** Versão do motor do WebView ("51", "119"...), tirada do texto com que ele se identifica. */
+    private String webViewVersion() {
+        try {
+            String agent = web == null ? null : web.getSettings().getUserAgentString();
+            int at = agent == null ? -1 : agent.indexOf("Chrome/");
+            if (at >= 0) {
+                int end = at + 7;
+                while (end < agent.length() && Character.isDigit(agent.charAt(end))) end++;
+                if (end > at + 7) return agent.substring(at + 7, end);
+            }
+        } catch (RuntimeException ignored) {
+            // sem versão: o aviso sai do mesmo jeito
+        }
+        return getString(R.string.page_stuck_unknown_version);
+    }
+
+    /** Abre a página do componente na loja. No Android 7 o WebView é o próprio Chrome, quando ele está ativo. */
+    private void openWebViewInStore() {
+        String pkg = Build.VERSION.SDK_INT >= 26 ? Api26.webViewPackage() : null;
+        if (pkg == null) pkg = Build.VERSION.SDK_INT < 26 && chromeEnabled() ? "com.android.chrome" : "com.google.android.webview";
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=" + pkg)));
+        } catch (RuntimeException noStore) {
+            openExternal(Uri.parse("https://play.google.com/store/apps/details?id=" + pkg));
+        }
+    }
+
+    private boolean chromeEnabled() {
+        try {
+            return getPackageManager().getApplicationInfo("com.android.chrome", 0).enabled;
+        } catch (PackageManager.NameNotFoundException | RuntimeException e) {
+            return false;
+        }
+    }
+
     // ------------------------------------------------------------------ JsSink
 
     /** Executa na página atual, seja ela qual for (a ponte usa evalOn, presa ao próprio WebView). */
@@ -275,6 +390,10 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     public void onPageUrl(String url) {
         Bridge current = bridge;
         if (current != null) current.setPageUrl(url);
+        if (WebClient.isAppUrl(url)) {
+            pageAlive = false; // recarga: a página nova ainda tem de mostrar que roda
+            watchPageStart(PAGE_START_MS);
+        }
         // Um site externo ocupou a página principal (o conteúdo dele foi barrado, sobrou uma página vazia): volta para o app.
         if (url != null && (url.startsWith("http:") || url.startsWith("https:")) && !WebClient.isAppUrl(url)) reloadAppPage();
     }
@@ -374,5 +493,9 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
 
     boolean pageLost() {
         return pageLost;
+    }
+
+    AlertDialog startProblemDialog() {
+        return startProblem;
     }
 }

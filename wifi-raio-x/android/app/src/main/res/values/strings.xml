@@ -3,6 +3,11 @@
     <string name="app_name">WiFi Raio-X</string>
     <string name="share_file_title">Salvar ou compartilhar</string>
     <string name="webview_missing">O componente WebView do Android não está disponível. Atualize o “Android System WebView” e abra o app de novo.</string>
+    <string name="page_stuck_title">A tela do app não abriu</string>
+    <string name="page_stuck_message">O WiFi Raio-X não conseguiu montar a tela neste aparelho. O componente do Android que a desenha (“Android System WebView”, versão %1$s) pode estar desatualizado. Atualize-o pela Play Store (em alguns aparelhos, o que se atualiza é o Chrome) e abra o app de novo.</string>
+    <string name="page_stuck_update">Atualizar</string>
+    <string name="page_stuck_wait">Agora não</string>
+    <string name="page_stuck_unknown_version">desconhecida</string>
     <string name="page_crashed">A tela do WiFi Raio-X parou de funcionar duas vezes seguidas. Abra o app de novo.</string>
     <string name="no_app_for_link">Nenhum aplicativo instalado abre este link.</string>
 </resources>

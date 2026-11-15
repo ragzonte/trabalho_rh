@@ -64,6 +64,7 @@ public class LifecycleWalkthroughTest extends AllSdks {
     @Before
     public void setUp() {
         RecordingWebView.page = new Fixtures.Page();
+        ShadowSystemClock.advanceBy(1, TimeUnit.HOURS); // um celular ligado há algum tempo
         Fixtures.denyLocation();
         receiversBefore = ourReceivers().size();
         callbacksBefore = Fixtures.shadowConnectivity().getNetworkCallbacks().size();
@@ -87,6 +88,11 @@ public class LifecycleWalkthroughTest extends AllSdks {
         controller = Robolectric.buildActivity(MainActivity.class).setup();
         activity = controller.get();
         return activity;
+    }
+
+    /** Volta para a frente depois de um onStop, como o Android faz: onRestart, onStart, onResume. */
+    private void comeBack() {
+        controller.restart().resume();
     }
 
     private void rationale(boolean show) {
@@ -131,6 +137,18 @@ public class LifecycleWalkthroughTest extends AllSdks {
             Thread.sleep(20);
         }
         throw new AssertionError("o evento " + name + " não chegou");
+    }
+
+    /** O Android termina a varredura: a lista passa a existir e o aviso chega. Devolve o evento 'scan' entregue. */
+    private JSONObject scanFinishes(List<ScanResult> results) throws Exception {
+        int before = page().events("scan").size();
+        Fixtures.wifi().setScanResults(results);
+        Intent done = new Intent(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
+        done.putExtra(WifiManager.EXTRA_RESULTS_UPDATED, true);
+        activity.sendBroadcast(done);
+        JSONObject event = awaitEvent("scan");
+        assertEquals("um aviso, um evento", before + 1, page().events("scan").size());
+        return event;
     }
 
     private static void settle() {
@@ -201,12 +219,8 @@ public class LifecycleWalkthroughTest extends AllSdks {
         assertEquals(0, activity.bridge().pendingCalls());
         assertListening(); // o callback de rede foi registrado de novo, não duplicado
 
-        Fixtures.wifi().setScanResults(twoNetworks());
         assertEquals(true, async(3, "scan", "{}").get("accepted"));
-        Intent done = new Intent(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
-        done.putExtra(WifiManager.EXTRA_RESULTS_UPDATED, true);
-        activity.sendBroadcast(done);
-        JSONObject scan = awaitEvent("scan");
+        JSONObject scan = scanFinishes(twoNetworks());
         assertEquals("request", scan.get("source"));
         assertEquals(2, scan.getJSONArray("aps").length());
     }
@@ -244,7 +258,7 @@ public class LifecycleWalkthroughTest extends AllSdks {
         assertNothingRegistered();
         Fixtures.grantLocation();
         page().clear();
-        controller.start().resume();
+        comeBack();
         Fixtures.idle();
         assertEquals("granted", page().lastEvent("status").get("permission"));
         assertEquals(true, page().lastEvent("status").get("canScan"));
@@ -356,7 +370,7 @@ public class LifecycleWalkthroughTest extends AllSdks {
         launch();
         WebView web = activity.webView();
         Bridge bridge = activity.bridge();
-        Fixtures.wifi().setScanResults(twoNetworks());
+        List<ScanResult> heard = twoNetworks();
         assertEquals(true, async(1, "scan", "{}").get("accepted"));
 
         RuntimeEnvironment.setQualifiers("+land");
@@ -375,14 +389,12 @@ public class LifecycleWalkthroughTest extends AllSdks {
         assertListening();
 
         // a lista pedida antes de girar chega normalmente
-        Intent done = new Intent(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
-        done.putExtra(WifiManager.EXTRA_RESULTS_UPDATED, true);
-        activity.sendBroadcast(done);
-        JSONObject scan = awaitEvent("scan");
+        JSONObject scan = scanFinishes(heard);
         assertEquals("request", scan.get("source"));
         assertEquals(true, scan.get("fresh"));
         assertEquals(2, scan.getJSONArray("aps").length());
-        assertEquals(700L, scan.getJSONArray("aps").getJSONObject(0).getLong("ageMs"));
+        long age = scan.getJSONArray("aps").getJSONObject(0).getLong("ageMs");
+        assertTrue("idade pelo carimbo do Android (o relógio de teste anda uns ms a cada giro): " + age, age >= 700 && age < 800);
     }
 
     @Test
@@ -413,7 +425,7 @@ public class LifecycleWalkthroughTest extends AllSdks {
         assertEquals(before, page().events("rssi").size());
         assertTrue(shadowOf(web).wasOnPauseCalled());
 
-        controller.start().resume();
+        comeBack();
         Fixtures.idle();
         assertListening();
         assertEquals("ao voltar, o relógio do sinal retoma", before + 1, page().events("rssi").size());
@@ -542,7 +554,7 @@ public class LifecycleWalkthroughTest extends AllSdks {
         controller.pause().stop();
         Fixtures.setLocationEnabled(true);
         page().clear();
-        controller.start().resume();
+        comeBack();
         Fixtures.idle();
         assertEquals(true, page().lastEvent("status").get("canScan"));
     }
@@ -605,7 +617,7 @@ public class LifecycleWalkthroughTest extends AllSdks {
         activity.sendBroadcast(new Intent(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
         activity.sendBroadcast(new Intent(WifiManager.WIFI_STATE_CHANGED_ACTION));
         assertEquals(0, awaitEvent("scan").getJSONArray("aps").length());
-        controller.pause().stop().start().resume().pause().stop().destroy();
+        controller.pause().stop().restart().resume().pause().stop().destroy();
         assertNothingRegistered();
     }
 
@@ -637,7 +649,7 @@ public class LifecycleWalkthroughTest extends AllSdks {
         ShadowLooper.idleMainLooper(3, TimeUnit.SECONDS);
         assertEquals("sem o serviço de rede não há callback para registrar", callbacksBefore,
                 connectivity.getNetworkCallbacks().size());
-        controller.pause().stop().start().resume();
+        controller.pause().stop().restart().resume();
         RuntimeEnvironment.setQualifiers("+land");
         controller.configurationChange();
         controller.pause().stop().destroy();
@@ -651,7 +663,7 @@ public class LifecycleWalkthroughTest extends AllSdks {
         for (int i = 0; i < 5; i++) {
             controller.pause().stop();
             assertNothingRegistered();
-            controller.start().resume();
+            comeBack();
             assertListening();
         }
         // um processo novo por cima do mesmo aparelho: várias telas seguidas não acumulam registros

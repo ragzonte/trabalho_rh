@@ -57,7 +57,26 @@
 
 /* o "instrumento": mostrador, qualidade/distância e os números da medição */
 .mtr-instrument {
+  position: relative;
   padding-top: var(--sp-5);
+}
+
+/* "como ler o medidor": no canto que o arco deixa livre */
+.mtr-help {
+  position: absolute;
+  z-index: 1; /* por cima da caixa (vazia nesse canto) do canvas do mostrador */
+  top: 2px;
+  right: 2px;
+  margin: 0;
+}
+
+.mtr-instrument > .mtr-help + * {
+  margin-top: 0;
+}
+
+/* dentro de um painel quem rola é o painel: os cartões não encolhem para caber */
+.mtr-sheetcard {
+  flex: none;
 }
 
 .mtr-gauge {
@@ -110,10 +129,11 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-3);
-  min-height: 36px;
+  min-height: var(--tap);
 }
 
 .mtr-stats__head .btn {
+  min-height: var(--tap);
   margin-right: -8px;
 }
 
@@ -377,6 +397,7 @@
 }
 
 .mtr-rtt__busy > .btn {
+  min-height: var(--tap);
   margin-left: auto;
 }
 
@@ -773,12 +794,13 @@
   overflow-wrap: anywhere;
 }
 
-/* dentro do painel "ver tudo" quem rola é o painel */
+/* dentro do painel "ver tudo" quem rola para baixo é o painel (a planilha ainda rola para o lado) */
 .exp-preview__text--full {
+  flex: none;
   max-height: none;
-  padding: 0;
+  padding: 0 0 var(--sp-2);
   overflow-x: auto;
-  overflow-y: visible;
+  overflow-y: hidden;
 }
 
 .exp-preview__more {
@@ -796,8 +818,4 @@
 .exp-actions > .btn {
   flex: 1;
   min-width: 0;
-}
-
-.exp-options {
-  margin-top: 0;
 }

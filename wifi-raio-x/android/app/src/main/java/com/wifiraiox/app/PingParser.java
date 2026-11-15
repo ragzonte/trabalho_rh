@@ -4,9 +4,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Lê a saída do ping do Android, linha a linha. Dois dialetos existem por aí:
+ * Lê a saída do ping do Android, linha a linha. Os dialetos que existem por aí:
  *   iputils: "64 bytes from 8.8.8.8: icmp_seq=1 ttl=117 time=14.2 ms"
  *   toybox:  "64 bytes from 8.8.8.8: icmp_seq=1 ttl=117 time=14 ms"
+ *   busybox: "64 bytes from 8.8.8.8: seq=0 ttl=117 time=14.253 ms"
  * e as linhas de erro ("From 192.168.0.1 icmp_seq=2 Destination Host Unreachable") não têm tempo.
  */
 final class PingParser {
@@ -24,8 +25,9 @@ final class PingParser {
         }
     }
 
-    // Versões antigas do iputils escreviam icmp_req em vez de icmp_seq.
-    private static final Pattern SEQ = Pattern.compile("icmp_(?:seq|req)=(\\d{1,9})");
+    // Versões antigas do iputils escreviam icmp_req em vez de icmp_seq; o ping do busybox (ROMs
+    // alternativas) escreve só "seq=0".
+    private static final Pattern SEQ = Pattern.compile("\\b(?:icmp_seq|icmp_req|seq)=(\\d{1,9})");
     private static final Pattern TIME = Pattern.compile("time[=<]\\s*(\\d+(?:[.,]\\d+)?)\\s*(ms|usec|us|s)?");
     private static final Pattern TRANSMITTED = Pattern.compile("(\\d{1,9}) packets transmitted");
 

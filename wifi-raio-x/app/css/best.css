@@ -1,0 +1,893 @@
+/* Melhor Wi-Fi: a recomendação, o ranking das redes, o diagnóstico e os painéis da tela.
+ *
+ * Carregada sob demanda por ui/screens/best.js. Só usa os tokens e as peças de css/app.css;
+ * nada daqui muda a aparência de uma peça fora desta tela (tudo começa com "best-").
+ *
+ *   1. Base da tela e a nota em anel
+ *   2. Recomendação
+ *   3. Ranking
+ *   4. Diagnóstico
+ *   5. Painéis (do que a nota é feita, minhas redes)
+ */
+
+/* ------------------------------------------------------------------------ */
+/* 1. Base da tela e a nota em anel                                          */
+/* ------------------------------------------------------------------------ */
+
+/* região vazia não ocupa lugar (nem o espaçamento da coluna) */
+.best-region:empty {
+  display: none;
+}
+
+.best-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.best-section > .section-h {
+  margin-top: var(--sp-3);
+}
+
+.best-caption {
+  padding: 0 4px;
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.best-section > .section-h + .best-caption {
+  margin-top: -6px;
+}
+
+.best-caption--center {
+  text-align: center;
+}
+
+.best-subtitle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+  padding: 0 4px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.best-subtitle__count {
+  font-weight: 500;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Degraus de cor da nota (1 = melhor): os mesmos cinco tons da escala de sinal. */
+.best-tone-1 {
+  --tone: var(--sig-1);
+}
+
+.best-tone-2 {
+  --tone: var(--sig-2);
+}
+
+.best-tone-3 {
+  --tone: var(--sig-3);
+}
+
+.best-tone-4 {
+  --tone: var(--sig-4);
+}
+
+.best-tone-5 {
+  --tone: var(--sig-5);
+}
+
+/* Nota em anel: o número vai dentro, o arco mostra quanto de 100. */
+.best-ring {
+  position: relative;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+}
+
+.best-ring > svg,
+.best-ring__num {
+  grid-area: 1 / 1;
+}
+
+.best-ring__track {
+  stroke: var(--surface-3);
+}
+
+.best-ring__value {
+  stroke: var(--tone, var(--accent));
+}
+
+.best-ring__num {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.best-ring--sm .best-ring__num {
+  font-size: 13px;
+}
+
+.best-ring--lg .best-ring__num {
+  font-size: var(--fs-lg);
+}
+
+.best-ring--xl .best-ring__num {
+  font-size: var(--fs-xl);
+}
+
+/* ------------------------------------------------------------------------ */
+/* 2. Recomendação                                                           */
+/* ------------------------------------------------------------------------ */
+
+.best-hero {
+  --hero: var(--muted);
+  --hero-soft: var(--surface-2);
+}
+
+.best-hero--good {
+  --hero: var(--good);
+  --hero-soft: var(--good-soft);
+  border-color: var(--good-line);
+}
+
+.best-hero--accent {
+  --hero: var(--accent-text);
+  --hero-soft: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+.best-hero__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+}
+
+.best-hero__top {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+}
+
+.best-hero__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--hero-soft);
+  color: var(--hero);
+}
+
+.best-hero__titles {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.best-hero__eyebrow {
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.best-hero__headline {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 26px;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+/* a nota da conexão atual, ao lado do veredito */
+.best-hero__score {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 64px;
+  margin: -2px -4px -2px 0;
+  padding: 2px 4px;
+  border-radius: var(--r-md);
+}
+
+.best-hero__score:active {
+  background: var(--surface-2);
+}
+
+.best-hero__score-word {
+  color: var(--tone, var(--muted));
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.best-hero__text {
+  font-size: var(--fs-sm);
+  line-height: 21px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.best-hero__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.best-hero__age {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.best-hero__age.warning {
+  color: var(--warning);
+}
+
+/* de onde -> para onde */
+.best-compare {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 6px;
+}
+
+.best-compare--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.best-compare__arrow {
+  align-self: center;
+  color: var(--muted);
+}
+
+.best-side {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  text-align: left;
+  transition: opacity 120ms var(--ease);
+}
+
+.best-side:active {
+  opacity: 0.8;
+}
+
+.best-side--target {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.best-side__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.best-side__label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.best-side--target .best-side__label {
+  color: var(--accent-text);
+}
+
+.best-side__name {
+  display: flex;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.best-side__where {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 6px;
+  min-height: 18px;
+  font-size: var(--fs-xs);
+  line-height: 18px;
+  color: var(--muted);
+}
+
+.best-side__where > .badge--plain {
+  gap: 4px;
+}
+
+.best-side__speed {
+  margin-top: 2px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  line-height: 22px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.best-side__gain {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--good);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.best-side__chev {
+  flex: none;
+  color: var(--muted);
+}
+
+/* atalho para o diagnóstico, no pé do cartão */
+.best-hero__diag {
+  --tone: var(--info);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 12px 10px var(--sp-4);
+  border-top: 1px solid var(--line);
+  background: var(--info-soft);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 20px;
+  text-align: left;
+  transition: opacity 120ms var(--ease);
+}
+
+.best-hero__diag:active {
+  opacity: 0.8;
+}
+
+.best-hero__diag:focus-visible {
+  outline-offset: -3px;
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+}
+
+.best-hero__diag--critical {
+  --tone: var(--critical);
+  background: var(--critical-soft);
+}
+
+.best-hero__diag--warning {
+  --tone: var(--warning);
+  background: var(--warning-soft);
+}
+
+.best-hero__diag--good {
+  --tone: var(--good);
+  background: none;
+}
+
+.best-hero__diag-icon {
+  flex: none;
+  color: var(--tone);
+}
+
+.best-hero__diag-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.best-hero__diag > .icon:last-child {
+  color: var(--muted);
+}
+
+.best-skel-hero {
+  height: 188px;
+  border-radius: var(--r-lg);
+}
+
+/* ------------------------------------------------------------------------ */
+/* 3. Ranking                                                                */
+/* ------------------------------------------------------------------------ */
+
+.best-filters {
+  flex-wrap: nowrap;
+}
+
+.best-filters__edit {
+  margin-left: auto;
+}
+
+/* Linha do ranking: a nota (anel + palavra) | nome e velocidade; onde ela está e os prós e
+   contras correm por baixo, na largura toda. */
+.best-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  grid-template-areas:
+    'ring name speed'
+    'ring where where'
+    'ring notes notes';
+  align-items: start;
+  column-gap: var(--sp-3);
+  row-gap: 2px;
+  padding-block: var(--sp-3);
+}
+
+.best-row__ring {
+  grid-area: ring;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding-top: 1px;
+}
+
+.best-row__word {
+  color: var(--tone, var(--muted));
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.best-row__name {
+  grid-area: name;
+}
+
+.best-row__speed {
+  grid-area: speed;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  line-height: 22px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.best-row__where {
+  grid-area: where;
+}
+
+.best-row__connected {
+  gap: 3px;
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.best-row__notes {
+  grid-area: notes;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  min-width: 0;
+  margin-top: 4px;
+}
+
+/* a rede em uso ganha a mesma marca lateral da lista de redes */
+.best-row--connected::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+.best-row--stale > .best-row__ring,
+.best-row--stale > .best-row__name,
+.best-row--stale > .best-row__speed,
+.best-row--stale > .best-row__where,
+.best-row--stale > .best-row__notes {
+  opacity: 0.6;
+}
+
+/* Pró, contra ou aviso: ícone + frase curta (o ícone muda de forma, não só de cor). */
+.best-note {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 5px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+  text-align: left;
+}
+
+.best-note > .icon {
+  margin-top: 3px;
+}
+
+.best-note--pro > .icon {
+  color: var(--good);
+}
+
+.best-note--con > .icon {
+  color: var(--warning);
+}
+
+.best-note--warn {
+  color: var(--warning);
+}
+
+.best-note__text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* na lista o aviso ocupa no máximo duas linhas; a frase inteira está no painel */
+.best-row .best-note--warn {
+  flex-basis: 100%;
+}
+
+.best-row .best-note--warn .best-note__text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+.best-more {
+  gap: 6px;
+}
+
+/* ------------------------------------------------------------------------ */
+/* 4. Diagnóstico                                                            */
+/* ------------------------------------------------------------------------ */
+
+.best-diag {
+  --tone: var(--info);
+  --tone-soft: var(--info-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.best-diag > * + * {
+  margin-top: 0;
+}
+
+.best-diag--critical {
+  --tone: var(--critical);
+  --tone-soft: var(--critical-soft);
+  border-color: var(--critical-line);
+}
+
+.best-diag--warning {
+  --tone: var(--warning);
+  --tone-soft: var(--warning-soft);
+  border-color: var(--warning-line);
+}
+
+.best-diag--good {
+  --tone: var(--good);
+  --tone-soft: var(--good-soft);
+  border-color: var(--good-line);
+}
+
+.best-diag__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.best-diag__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-md);
+  background: var(--tone-soft);
+  color: var(--tone);
+}
+
+.best-diag__titles {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.best-diag__kind {
+  color: var(--tone);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.best-diag__title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+}
+
+.best-diag__text,
+.best-fold__text {
+  font-size: var(--fs-sm);
+  line-height: 21px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.best-diag__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: 2px;
+}
+
+/* "Bom saber": observações recolhidas, uma linha cada */
+.best-fold {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.best-fold + .best-fold::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: var(--sp-4);
+  right: var(--sp-4);
+  border-top: 1px solid var(--line);
+}
+
+.best-fold__head {
+  min-height: 52px;
+}
+
+.best-fold__icon {
+  color: var(--info);
+}
+
+.best-fold__title {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.best-fold__body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 var(--sp-4) 14px calc(var(--sp-4) + 28px + var(--sp-3));
+}
+
+/* ------------------------------------------------------------------------ */
+/* 5. Painéis                                                                */
+/* ------------------------------------------------------------------------ */
+
+.best-sheet-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  unicode-bidi: isolate;
+}
+
+.best-sheet-title.ssid--hidden {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.best-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 4px 0;
+}
+
+.best-sheet-head__body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.best-sheet-head__word {
+  color: var(--tone, var(--muted));
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.best-sheet-head__speed {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  line-height: 34px;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.best-sheet-head__hint {
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.best-badges {
+  gap: 6px;
+}
+
+/* as quatro partes da nota */
+.best-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.best-parts > * + *,
+.best-why > * + * {
+  margin-top: 0;
+}
+
+.best-part {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.best-part__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  line-height: 20px;
+}
+
+.best-part__label {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  align-self: center;
+}
+
+.best-part__label > .icon {
+  color: var(--muted);
+}
+
+.best-part__headline {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.best-part__value {
+  flex: none;
+  min-width: 3ch;
+  font-weight: 700;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.best-part__text {
+  font-size: var(--fs-xs);
+  line-height: 17px;
+  color: var(--muted);
+}
+
+/* a conta, passo a passo */
+.best-why {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.best-why__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  counter-reset: best-step;
+  font-size: var(--fs-sm);
+  line-height: 21px;
+  color: var(--muted);
+}
+
+.best-why__steps > li {
+  position: relative;
+  min-height: 24px;
+  padding-left: 34px;
+  counter-increment: best-step;
+  overflow-wrap: anywhere;
+}
+
+.best-why__steps > li::before {
+  content: counter(best-step);
+  position: absolute;
+  left: 0;
+  top: -1px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.best-why__steps > li:last-child {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.best-why__notes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
+}
+
+.best-why__foot {
+  font-size: var(--fs-xs);
+  line-height: 17px;
+  color: var(--muted);
+}
+
+/* pontos de acesso da rede */
+.best-ap .row__title {
+  gap: var(--sp-2);
+}
+
+.best-ap__best {
+  color: var(--good);
+  font-weight: 600;
+}
+
+/* linha "Esta rede é minha" e as do seletor de redes */
+.best-own[data-on='1'] .row__icon {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.best-pick {
+  position: relative;
+}
+
+.best-pick + .best-pick::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: var(--sp-4);
+  right: var(--sp-4);
+  border-top: 1px solid var(--line);
+}
+
+.best-pick .row__title > .ssid {
+  min-width: 0;
+}

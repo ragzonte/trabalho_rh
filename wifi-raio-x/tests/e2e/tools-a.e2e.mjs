@@ -389,7 +389,8 @@ test('medidor: ?bssid= abre noutra rede, avisa que ela só muda a cada busca e a
     await waitForScans(page, 2);
     const conn = await connectedBssid(page);
     const other = await appState(page, (s) => s.aps.find((ap) => !ap.connected && !ap.stale && ap.ssid && ap.rssi > -80 && !ap.own).bssid);
-    await goto(page, `/ferramentas/medidor?bssid=${other}`);
+    // com os dois-pontos codificados, do jeito que a tela Redes monta o endereço
+    await goto(page, `/ferramentas/medidor?bssid=${encodeURIComponent(other)}`);
     await page.waitForFunction((id) => document.querySelector('.view > .screen').dataset.target === id, other);
     let d = await data(page);
     assert.equal(d.live, '');
@@ -423,6 +424,36 @@ test('medidor: ?bssid= abre noutra rede, avisa que ela só muda a cada busca e a
   });
 });
 
+test('medidor: "como ler o medidor" explica dBm e as faixas, sem cortar nada numa tela pequena', T, async () => {
+  await withApp(env, { params: { ...FAST, walk: 'still' }, route: '/ferramentas/medidor', viewport: 'small' }, async ({ page }) => {
+    await waitForScans(page, 1);
+    await page.waitForFunction(() => Number(document.querySelector('.view > .screen').dataset.samples) >= 3);
+    assert.equal(await page.textContent('.topbar__title'), 'Medidor de sinal', 'o título cabe inteiro na barra de cima');
+    const title = await page.evaluate(() => {
+      const el = document.querySelector('.topbar__title');
+      return el.scrollWidth <= el.clientWidth;
+    });
+    assert.equal(title, true, 'sem reticências no título');
+    assert.equal(await page.getAttribute('.mtr-help', 'aria-label'), 'Como ler o medidor');
+    await page.click('.mtr-help');
+    await page.locator('.sheet').waitFor();
+    assert.equal(await page.textContent('.sheet__title'), 'Como ler o medidor');
+    const body = await page.textContent('.sheet__body');
+    assert.match(body, /dBm é a unidade da força do sinal/);
+    assert.match(body, /quanto mais perto de zero, mais forte/);
+    for (const word of ['Excelente', 'Ótimo', 'Bom', 'Regular', 'Fraco', 'Muito fraco', 'Qualidade', 'tracinho no arco', 'estimativa', 'caça-roteador']) assert.ok(body.includes(word), `explica "${word}"`);
+    assert.equal(await page.locator('.sheet .mtr-sheetcard .row').count(), 6);
+    const clipped = await page.evaluate(() => {
+      const card = document.querySelector('.sheet .mtr-sheetcard');
+      return card.scrollHeight - card.clientHeight;
+    });
+    assert.ok(clipped <= 1, 'a tabela das faixas aparece inteira (o painel rola, o cartão não encolhe)');
+    await shot(page, 'tools-a-medidor-ajuda');
+    assert.equal(await back(page), true);
+    await page.locator('.sheet').waitFor({ state: 'detached' });
+  });
+});
+
 test('medidor: escolher a rede no painel, voltar à conectada, e o "voltar" fecha o painel', T, async () => {
   await withApp(env, { params: FAST, route: '/ferramentas/medidor' }, async ({ page }) => {
     await waitForScans(page, 2);
@@ -435,6 +466,9 @@ test('medidor: escolher a rede no painel, voltar à conectada, e o "voltar" fech
     assert.match(await page.textContent('.sheet__body'), /As outras redes só mudam a cada busca/);
     const rows = await page.evaluate(() => ({ shown: document.querySelectorAll('.sheet .mtr-pick').length, aps: window.__wrx.app.store.get().aps.length }));
     assert.equal(rows.shown, rows.aps, 'uma linha por sinal');
+    // a lista inteira é alcançável: quem rola é o painel, e nenhum cartão fica cortado
+    const clipped = await page.evaluate(() => Array.from(document.querySelectorAll('.sheet .mtr-sheetcard')).map((el) => el.scrollHeight - el.clientHeight));
+    assert.ok(clipped.every((d) => d <= 1), `cartões do painel sem corte: ${clipped}`);
     assert.equal(await page.locator('.sheet .mtr-pick--on').count(), 0, 'seguindo a conectada, nenhuma linha fica marcada');
     await shot(page, 'tools-a-medidor-escolher');
 
@@ -646,6 +680,56 @@ test('medidor: nome de rede hostil é só texto; rede que sumiu e celular descon
 // ---------------------------------------------------------------------------
 // Detalhes da conexão
 // ---------------------------------------------------------------------------
+
+test('conexão: máscara, validade do endereço e montagem das linhas (funções puras)', T, async () => {
+  await withApp(env, { params: FAST, route: '/ferramentas/sobre' }, async ({ page }) => {
+    const r = await page.evaluate(async () => {
+      const m = await import('./js/ui/tools/conexao.js');
+      const full = m.describeConnection(
+        { connected: true, ssid: 'Casa', bssid: 'aa:bb:cc:00:11:22', rssi: -61, frequency: 2437, linkSpeed: 72, txSpeed: 65, rxSpeed: 72, maxTxSpeed: 144, maxRxSpeed: 144, wifiStandard: 4, securityType: 2, ip: '10.0.0.7', prefix: 22, gateway: '10.0.0.1', dns: ['1.1.1.1', '', '8.8.8.8'], ipv6: [], iface: 'wlan0', mtu: 1500, leaseSec: 86_400, validated: true, metered: false },
+        null,
+      );
+      const bare = m.describeConnection({ connected: true }, null);
+      return {
+        masks: [24, 0, 32, 20, 30, 33, -1, '24', 2.5].map((p) => m.maskOf(p)),
+        leases: [86_400, 172_800, 7200, 3600, 5400, 0, -5, null].map((x) => m.leaseText(x)),
+        groups: full.groups.map((g) => [g.id, g.rows.map((row) => row.label), g.textRows.map((row) => row.label)]),
+        mask: full.groups[2].rows.find((row) => row.field === 'mask'),
+        channel: full.channel,
+        band: full.band,
+        speed: full.speed,
+        text: m.connectionText(full),
+        bare: { groups: bare.groups.map((g) => [g.id, g.rows.map((row) => `${row.label}=${row.text}`)]), speed: bare.speed, text: m.connectionText(bare) },
+      };
+    });
+    assert.deepEqual(r.masks, ['255.255.255.0', '0.0.0.0', '255.255.255.255', '255.255.240.0', '255.255.255.252', null, null, null, null]);
+    assert.deepEqual(r.leases.slice(0, 4), ['1 dia', '2 dias', '2 horas', '1 hora']);
+    assert.match(r.leases[4], /^1\sh 30\smin$/);
+    assert.deepEqual(r.leases.slice(5), [null, null, null]);
+    assert.deepEqual(r.groups, [
+      ['rede', ['Nome da rede', 'BSSID', 'Segurança', 'Padrão', 'Internet', 'Franquia de dados'], []],
+      ['sinal', ['Sinal', 'Qualidade', 'Distância do roteador', 'Faixa', 'Canal', 'Frequência'], ['Velocidade do enlace (receber)', 'Velocidade do enlace (enviar)']],
+      ['enderecos', ['IP do celular', 'Máscara de sub-rede', 'Roteador (gateway)', 'DNS 1', 'DNS 2', 'Interface', 'MTU', 'Endereço válido por'], []],
+    ]);
+    assert.equal(r.mask.text, '255.255.252.0');
+    assert.match(r.mask.hint, /^Prefixo \/22: cabem até 1\.022 aparelhos nesta rede\.$/);
+    assert.equal(r.channel, 6, 'sem o Ap da varredura, o canal sai da frequência');
+    assert.equal(r.band, '2.4');
+    assert.deepEqual({ rx: r.speed.rx, tx: r.speed.tx, maxRx: r.speed.maxRx, maxTx: r.speed.maxTx }, { rx: 72, tx: 65, maxRx: 144, maxTx: 144 });
+    assert.ok(r.speed.usable > 30 && r.speed.usable < 72, 'a velocidade útil é uma fração da taxa do enlace');
+    const lines = r.text.split('\n');
+    assert.equal(lines[0], 'Detalhes da conexão Wi-Fi');
+    assert.ok(lines.includes('  Nome da rede: Casa'));
+    assert.ok(lines.includes('  Máscara de sub-rede: 255.255.252.0 (/22)'));
+    assert.ok(lines.includes('  DNS 2: 8.8.8.8'), 'DNS vazio é pulado');
+    assert.ok(lines.some((l) => l.startsWith('  Velocidade do enlace (receber): 72')));
+    assert.equal(lines[lines.length - 1], 'Gerado no celular pelo WiFi Raio-X.');
+    // conexão sem dado nenhum além de "conectado": nada quebra e nada é inventado
+    assert.deepEqual(r.bare.groups, [['rede', ['Nome da rede=O Android não informou']]]);
+    assert.deepEqual(r.bare.speed, { rx: null, tx: null, maxRx: null, maxTx: null, usable: null });
+    assert.equal(/undefined|NaN/.test(r.bare.text), false);
+  });
+});
 
 test('conexão: todos os campos, agrupados, batem com o que o celular informa', T, async () => {
   await withApp(env, { params: { ...FAST, walk: 'still' }, route: '/ferramentas/conexao' }, async ({ page }) => {
@@ -878,6 +962,12 @@ test('exportar: o relatório traz conexão, melhor rede, melhor canal, diagnóst
     await page.locator('.sheet').waitFor();
     assert.equal(await page.textContent('.sheet__title'), 'Relatório em texto');
     assert.ok((await page.textContent('.sheet .exp-preview__text')).includes('Nada foi enviado para a internet.'));
+    const cut = await page.evaluate(() => {
+      const pre = document.querySelector('.sheet .exp-preview__text');
+      const body = document.querySelector('.sheet .sheet__body');
+      return { pre: pre.scrollHeight - pre.clientHeight, scrolls: body.scrollHeight > body.clientHeight };
+    });
+    assert.ok(cut.pre <= 1 && cut.scrolls, 'o relatório inteiro rola dentro do painel');
     assert.equal(await page.locator('.sheet img').count(), 0);
     await shot(page, 'tools-a-exportar-painel');
     assert.equal(await back(page), true);

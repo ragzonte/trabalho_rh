@@ -65,6 +65,19 @@ public class PingParserTest {
     }
 
     @Test
+    public void busyboxDialectCountsFromZeroWithoutTheIcmpPrefix() {
+        PingParser.Reply r = PingParser.parseLine("64 bytes from 142.250.218.14: seq=0 ttl=117 time=10.253 ms");
+        assertEquals(0, r.seq);
+        assertTrue(r.ok);
+        assertEquals(10.253, r.ms, 1e-9);
+        r = PingParser.parseLine("64 bytes from 192.168.0.1: seq=12 ttl=64 time=1.1 ms");
+        assertEquals(12, r.seq);
+        // "seq=" solto dentro de outra palavra não conta
+        assertNull(PingParser.parseLine("64 bytes from 8.8.8.8: subseq=3 time=1 ms"));
+        assertEquals(2, PingParser.parseTransmitted("2 packets transmitted, 2 packets received, 0% packet loss"));
+    }
+
+    @Test
     public void everythingElseIsNotAboutAPacket() {
         String[] noise = {
             null, "", "PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.", "Ping 8.8.8.8 (8.8.8.8): 56(84) bytes.",

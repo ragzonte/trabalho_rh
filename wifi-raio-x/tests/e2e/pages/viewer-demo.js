@@ -13,6 +13,8 @@
 //   &walker=1               marcador "você está aqui"
 //   &ui=0                   esconde os controles (o mapa ocupa a página toda)
 //   &ambient=0              sem pulsação
+//   &aa=1 | &aa=0           força a suavização de serrilhado (sem o parâmetro: desligada só em WebGL por software)
+//   &maxdpr=1               teto da densidade de pixels
 //
 // Para os testes: window.__demo = { viewer, model, fake, picks, state, ready, apply(estado) }.
 
@@ -52,6 +54,8 @@ const viewer = createViewer($('stage'), {
   theme: state.theme,
   renderer: params.get('renderer') || 'auto',
   ambient: params.get('ambient') !== '0',
+  antialias: params.has('aa') ? params.get('aa') !== '0' : undefined,
+  maxPixelRatio: num('maxdpr', 2),
   contextRestoreMs: num('restoreMs', 4000),
   onPick(pick) {
     picks.push(pick);

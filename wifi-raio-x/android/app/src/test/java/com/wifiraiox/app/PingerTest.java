@@ -137,6 +137,35 @@ public class PingerTest {
     }
 
     @Test
+    public void aPingThatSucceedsInAnUnknownDialectIsMeasuredByTheProbesInstead() throws Exception {
+        // saída que não reconhecemos, mas o programa diz que deu certo (saída 0)
+        String alien = String.join("\n",
+                "echo 'resposta de 8.8.8.8: bytes=32 tempo=14ms TTL=117'",
+                "echo 'resposta de 8.8.8.8: bytes=32 tempo=15ms TTL=117'",
+                "echo '2 packets transmitted, 2 received, 0% packet loss'",
+                "exit 0");
+        JSONObject s = run(pinger(fakePing(alien), LITERAL, (address, timeoutMs) -> 9.0), "8.8.8.8", 2, 500);
+        assertEquals("não inventa 100% de perda para quem respondeu", 2, s.get("received"));
+        assertEquals("tcp", s.get("method"));
+        assertEquals(0.0, s.getDouble("lossPct"), 1e-9);
+
+        // o dialeto do busybox é entendido direto: conta a partir de zero
+        replies.clear();
+        String busybox = String.join("\n",
+                "echo 'PING 8.8.8.8 (8.8.8.8): 56 data bytes'",
+                "echo '64 bytes from 8.8.8.8: seq=0 ttl=117 time=10.2 ms'",
+                "echo '64 bytes from 8.8.8.8: seq=1 ttl=117 time=11.4 ms'",
+                "echo '2 packets transmitted, 2 packets received, 0% packet loss'",
+                "exit 0");
+        s = run(pinger(fakePing(busybox), LITERAL), "8.8.8.8", 2, 500);
+        assertEquals("icmp", s.get("method"));
+        assertEquals(2, s.get("sent"));
+        assertEquals(2, s.get("received"));
+        assertEquals(1, replies.get(0).get("seq"));
+        assertEquals(2, replies.get(1).get("seq"));
+    }
+
+    @Test
     public void countAndTimeoutAreClamped() throws Exception {
         run(pinger(fakePing("exit 0"), LITERAL), "8.8.8.8", 100000, 999999);
         List<String> args = Files.readAllLines(argsFile.toPath());

@@ -785,6 +785,32 @@ test('antes da primeira lista: esqueleto; sem nenhuma rede: aviso amigável com 
   });
 });
 
+test('lista guardada pelo celular (sem busca nova): a idade aparece na tela e em cada linha', T, async () => {
+  await withApp(env, { params: FAST }, async ({ page }) => {
+    await ready(page, 2);
+    // o app acabou de abrir e o Android só entregou a lista em cache, lida há 45 s
+    await page.evaluate(async () => {
+      const app = window.__wrx.app;
+      const { status, info, connection } = app.store.get();
+      const last = await app.bridge.lastScan();
+      app.scanLoop.stop();
+      app.store.resetScanData();
+      app.store.setStatus(status);
+      app.store.setInfo(info);
+      app.store.setConnection(connection);
+      app.store.ingestScan({ ts: Date.now(), fresh: false, source: 'cache', aps: last.aps.map((a) => ({ ...a, ageMs: 45_000 + (a.ageMs % 3000) })) });
+    });
+    await settle(page);
+    const rows = await page.locator('.net-row').count();
+    assert.ok(rows > 3);
+    assert.match(await page.textContent('.net-caption__text'), /^\d+ redes · lista de há 4\d\s*s$/, 'a idade da lista vem escrita junto da contagem');
+    assert.equal(await page.locator('.net-row.row--stale').count(), rows, 'todas as linhas aparecem como leitura velha');
+    assert.match(await page.locator('.net-row__age').first().textContent(), /visto há 4\d\s*s/);
+    assert.match(await page.textContent('.topbar__status'), /há 4\d\s*s/, 'e a barra de cima diz o mesmo');
+    await shot(page, 'redes-lista-em-cache');
+  });
+});
+
 test('sem conexão: cartão calmo com o botão do Wi-Fi; a lista continua', T, async () => {
   await withApp(env, { params: FAST }, async ({ page }) => {
     await ready(page, 2);

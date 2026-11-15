@@ -9,6 +9,13 @@ final class Js {
     static final String BACK_SCRIPT =
             "window.__wrx && window.__wrx.back ? window.__wrx.back() : false";
 
+    /**
+     * A página chegou a rodar? app/js/bridge.js instala window.__wrx assim que os módulos da
+     * interface são carregados; se isso não aconteceu, nenhum script do app está de pé.
+     */
+    static final String ALIVE_SCRIPT =
+            "!!(window.__wrx && typeof window.__wrx.emit === 'function')";
+
     private Js() {}
 
     /**
