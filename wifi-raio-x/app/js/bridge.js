@@ -191,9 +191,10 @@
 // A speedTest       {mode}                      -> SpeedSummary       mode: 'full' (~8 s por direção) | 'light' (~3 s, gasta poucos dados);
 //                                                                     usa https://speed.cloudflare.com (__down?bytes=N e __up); emite 'speed'
 //
+// (O simulador emite ainda um evento próprio com a posição da pessoa virtual: veja js/sim/backend.js.)
+//
 // Eventos: 'scan' ScanEvent · 'rssi' RssiSample · 'status' Status · 'connection' Connection
 //          'ping' PingReply · 'lan' LanDevice · 'lanProgress' {done:number,total:number} · 'speed' SpeedProgress
-//          'sim' {t,x,y,z,floor,room,heading,moving,mode,world}  (só no simulador: onde está a pessoa virtual)
 // ---------------------------------------------------------------------------
 
 const listeners = new Map(); // nome do evento -> Set<função>

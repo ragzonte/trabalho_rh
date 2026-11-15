@@ -10,6 +10,10 @@
 //
 // Com node:test, prefira withApp(env, opções, async (app) => { ... }): fecha e confere sozinho.
 //
+// Demais ajudas: goto(page, rota) · waitForScreen(page, rota) · back(page) (o "voltar" do Android)
+// · settle(page) · simState(page, {wifi:false}) · simEval(page, (sim) => ...) · appState(page, (s) => ...)
+// · waitForScans(page, n) · horizontalOverflow(page) · shot(page, nome) · VIEWPORTS · TABS
+//
 // O que conta como erro pode ser liberado caso a caso com `allow` (textos ou expressões
 // regulares comparados com "mensagem + endereço"), para testes que provocam o erro de propósito.
 

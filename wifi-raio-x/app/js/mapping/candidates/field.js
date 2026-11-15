@@ -11,18 +11,22 @@ const DEFAULTS = {
   smacofIters: 120,
   weightPower: 2,
   crossFloorWeight: 0.3,
-  walkSpeed: 0.45, // m/s: corda mediana entre varreduras seguidas de quem anda fazendo o levantamento
+  walkSpeed: 0.48, // m/s: corda mediana entre varreduras seguidas de quem anda fazendo o levantamento
   dbToM: 0.45,
   defaultRadius: 3.5,
   initMode: 1, // 0: MDS direto; 1: desdobrado (Isomap)
-  isoK: 6,
+  isoK: 8,
+  isoCrossK: 4,
   isoSmooth: 0.5,
-  isoLen: 1,
+  isoLen: 0,
   isoFloorQ: 0.1,
   isoWeightPower: 2,
   refine: 1,
   h: 1.0, // largura do núcleo dos campos (m)
-  hStart: 0,
+  hRel: 0,
+  hMin: 0.6,
+  hMax: 4,
+  hStart: 0, // fator inicial (>1: começa com campos mais lisos)
   hHold: 1,
   lambda: 0.5, // encolhimento da previsão quando há poucos vizinhos
   sigma: 4, // dB
@@ -31,7 +35,7 @@ const DEFAULTS = {
   motionSlack: 0.5,
   motionPad: 0,
   targetRadius: 0,
-  springW: 0,
+  springW: 1,
   orderW: 0,
   orderHop: 1.0,
   labelW: 0,
@@ -49,6 +53,7 @@ const DEFAULTS = {
   nDefault: 2.5,
   apDz: 0.6,
   farPenalty: 0.02,
+  registerRounds: 2,
   physW: 0.3,
   physN: 2.2,
   physQ: 0.85,
@@ -354,8 +359,15 @@ function embedIso(data, P) {
     for (let b = 0; b < M; b++) if (b !== a && floorIdx[b] === floorIdx[a]) order[n++] = b;
     const cand = Array.from(order.subarray(0, n)).sort((p, q) => DS[a * M + p] - DS[a * M + q]);
     for (let q = 0; q < Math.min(P.isoK, cand.length); q++) setEdge(a, cand[q]);
+    if (NF > 1 && P.isoCrossK > 0) {
+      // Outros andares: com o nível centrado por andar, o lugar mais parecido costuma estar na mesma vertical.
+      n = 0;
+      for (let b = 0; b < M; b++) if (floorIdx[b] !== floorIdx[a]) order[n++] = b;
+      const cross = Array.from(order.subarray(0, n)).sort((p, q) => DS[a * M + p] - DS[a * M + q]);
+      for (let q = 0; q < Math.min(P.isoCrossK, cross.length); q++) setEdge(a, cross[q]);
+    }
   }
-  for (let p = 1; p < seq.length; p++) if (seq[p] !== seq[p - 1] && floorIdx[seq[p]] === floorIdx[seq[p - 1]]) setEdge(seq[p], seq[p - 1]);
+  for (let p = 1; p < seq.length; p++) if (seq[p] !== seq[p - 1]) setEdge(seq[p], seq[p - 1]);
   edgeVals.sort((p, q) => p - q);
   const floor2 = edgeVals.length ? edgeVals[Math.floor(edgeVals.length * P.isoFloorQ)] : 0;
   const med2 = edgeVals.length ? edgeVals[edgeVals.length >> 1] : 1;
@@ -375,10 +387,11 @@ function embedIso(data, P) {
       }
     }
   }
-  // MDS por andar sobre as distâncias geodésicas.
+  // MDS sobre as distâncias geodésicas (todos os andares juntos quando há arestas entre andares).
   const X = new Float64Array(2 * M);
-  const byFloor = Array.from({ length: NF }, () => []);
-  for (let a = 0; a < M; a++) byFloor[floorIdx[a]].push(a);
+  const joint = NF > 1 && P.isoCrossK > 0;
+  const byFloor = joint ? [Array.from({ length: M }, (_, a) => a)] : Array.from({ length: NF }, () => []);
+  if (!joint) for (let a = 0; a < M; a++) byFloor[floorIdx[a]].push(a);
   for (const list of byFloor) {
     const n = list.length;
     if (n === 0) continue;
@@ -408,73 +421,169 @@ function embedIso(data, P) {
       X[2 * a + 1] = Z[2 * q + 1];
     });
   }
-  if (NF > 1) alignFloors(data, X, S, byFloor, seq);
+  if (joint) return X;
+  if (NF > 1) registerFloors(data, X);
   return X;
 }
 
-// Encaixa os andares uns sobre os outros: cada nó de um andar "aponta" para os nós do andar de
-// referência com impressão digital (centrada por andar) mais parecida; a escada amarra a translação.
-function alignFloors(data, X, S, byFloor, seq) {
-  const { M, R, floorIdx } = data;
+// Gradiente médio (dB/m) do nível de cada rádio num andar: regressão linear do nível sobre (x, y).
+// Um vizinho distante, ou um roteador num canto, "aponta" para o mesmo lado em todos os andares.
+function floorGradients(data, X, f) {
+  const { M, R, F, floorIdx, floorLevel } = data;
+  const cens = floorLevel - 2;
+  const idx = [];
+  for (let a = 0; a < M; a++) if (floorIdx[a] === f) idx.push(a);
+  const n = idx.length;
+  let cx = 0;
+  let cy = 0;
+  for (const a of idx) {
+    cx += X[2 * a];
+    cy += X[2 * a + 1];
+  }
+  cx /= n || 1;
+  cy /= n || 1;
+  let sxx = 0;
+  let sxy = 0;
+  let syy = 0;
+  for (const a of idx) {
+    const x = X[2 * a] - cx;
+    const y = X[2 * a + 1] - cy;
+    sxx += x * x;
+    sxy += x * y;
+    syy += y * y;
+  }
+  const det = sxx * syy - sxy * sxy;
+  const g = new Array(R).fill(null);
+  if (n < 6 || !(det > 1e-9)) return g;
+  for (let k = 0; k < R; k++) {
+    let heard = 0;
+    let my = 0;
+    for (const a of idx) {
+      const v = F[a * R + k];
+      if (!Number.isNaN(v)) heard++;
+      my += Number.isNaN(v) ? cens : v;
+    }
+    if (heard < 0.3 * n) continue;
+    my /= n;
+    let bx = 0;
+    let by = 0;
+    for (const a of idx) {
+      const v = F[a * R + k];
+      const y = (Number.isNaN(v) ? cens : v) - my;
+      bx += (X[2 * a] - cx) * y;
+      by += (X[2 * a + 1] - cy) * y;
+    }
+    g[k] = [(syy * bx - sxy * by) / det, (sxx * by - sxy * bx) / det];
+  }
+  return g;
+}
+
+// Encaixa os andares uns sobre os outros (cada andar se move como um corpo rígido):
+// rotação e espelho pelos gradientes dos rádios ouvidos nos dois andares, translação pela escada
+// (quem acabou de trocar de andar está perto de onde estava).
+function registerFloors(data, X) {
+  const { M, R, floorIdx, scans, nodeOfScan } = data;
+  const NF = data.floorList.length;
+  if (NF < 2) return;
+  const count = new Float64Array(NF);
+  for (let a = 0; a < M; a++) count[floorIdx[a]]++;
   let ref = 0;
-  byFloor.forEach((l, f) => {
-    if (l.length > byFloor[ref].length) ref = f;
-  });
+  for (let f = 1; f < NF; f++) if (count[f] > count[ref]) ref = f;
   const done = new Set([ref]);
-  const dist2 = (a, b) => {
-    let s = 0;
-    for (let k = 0; k < R; k++) {
-      const e = S[a * R + k] - S[b * R + k];
-      s += e * e;
-    }
-    return s;
-  };
-  // Do andar mais próximo do de referência para fora.
-  const todo = byFloor.map((_, f) => f).filter((f) => f !== ref).sort((p, q) => Math.abs(p - ref) - Math.abs(q - ref));
+  const todo = [];
+  for (let f = 0; f < NF; f++) if (f !== ref) todo.push(f);
+  todo.sort((p, q) => Math.abs(p - ref) - Math.abs(q - ref));
+  // Trocas de andar ao longo da caminhada.
+  const ties = [];
+  for (let i = 1; i < scans.length; i++) {
+    const a = nodeOfScan[i - 1];
+    const b = nodeOfScan[i];
+    if (floorIdx[a] !== floorIdx[b]) ties.push([a, b]);
+  }
   for (const f of todo) {
-    const list = byFloor[f];
-    if (!list.length) continue;
-    const anchors = [];
-    for (let a = 0; a < M; a++) if (done.has(floorIdx[a])) anchors.push(a);
-    const src = [];
-    const dst = [];
-    const wts = [];
-    for (const a of list) {
-      const cand = anchors.map((b) => [dist2(a, b), b]).sort((p, q) => p[0] - q[0]).slice(0, 5);
-      let tx = 0;
-      let ty = 0;
-      for (const [, b] of cand) {
-        tx += X[2 * b];
-        ty += X[2 * b + 1];
-      }
-      src.push([X[2 * a], X[2 * a + 1]]);
-      dst.push([tx / cand.length, ty / cand.length]);
-      wts.push(1);
+    if (count[f] < 1) continue;
+    // Andar já encaixado mais próximo.
+    let near = ref;
+    for (const d of done) if (Math.abs(d - f) < Math.abs(near - f)) near = d;
+    const g0 = floorGradients(data, X, near);
+    const g1 = floorGradients(data, X, f);
+    let a = 0;
+    let b = 0;
+    let am = 0;
+    let bm = 0;
+    for (let k = 0; k < R; k++) {
+      if (!g0[k] || !g1[k]) continue;
+      const [px, py] = g1[k];
+      const [qx, qy] = g0[k];
+      a += px * qx + py * qy;
+      b += px * qy - py * qx;
+      am += px * qx - py * qy;
+      bm += px * qy + py * qx;
     }
-    // Escada: quem acabou de trocar de andar está perto de onde estava.
-    for (let p = 1; p < seq.length; p++) {
-      const a = seq[p - 1];
-      const b = seq[p];
-      const fa = floorIdx[a];
-      const fb = floorIdx[b];
-      if (fa === fb) continue;
-      const w = 0.15 * list.length;
-      if (fb === f && done.has(fa)) {
-        src.push([X[2 * b], X[2 * b + 1]]);
-        dst.push([X[2 * a], X[2 * a + 1]]);
-        wts.push(w);
-      } else if (fa === f && done.has(fb)) {
-        src.push([X[2 * a], X[2 * a + 1]]);
-        dst.push([X[2 * b], X[2 * b + 1]]);
-        wts.push(w);
+    const plain = Math.hypot(a, b);
+    const mirrored = Math.hypot(am, bm);
+    let c = 1;
+    let sn = 0;
+    let m = 1;
+    if (plain > 1e-9 || mirrored > 1e-9) {
+      const mirror = mirrored > plain;
+      const ang = mirror ? Math.atan2(bm, am) : Math.atan2(b, a);
+      c = Math.cos(ang);
+      sn = Math.sin(ang);
+      m = mirror ? -1 : 1;
+    }
+    // Gira em torno do centro do andar e depois translada.
+    let cx = 0;
+    let cy = 0;
+    let rx = 0;
+    let ry = 0;
+    let rn = 0;
+    for (let q = 0; q < M; q++) {
+      if (floorIdx[q] === f) {
+        cx += X[2 * q];
+        cy += X[2 * q + 1];
+      } else if (floorIdx[q] === near) {
+        rx += X[2 * q];
+        ry += X[2 * q + 1];
+        rn++;
       }
     }
-    const fit = rigidFit(src, dst, wts);
-    for (const a of list) {
-      const x = X[2 * a];
-      const y = X[2 * a + 1];
-      X[2 * a] = fit.a * x + fit.b * y + fit.tx;
-      X[2 * a + 1] = fit.c * x + fit.d * y + fit.ty;
+    cx /= count[f];
+    cy /= count[f];
+    for (let q = 0; q < M; q++) {
+      if (floorIdx[q] !== f) continue;
+      const x = X[2 * q] - cx;
+      const y = (X[2 * q + 1] - cy) * m;
+      X[2 * q] = c * x - sn * y;
+      X[2 * q + 1] = sn * x + c * y;
+    }
+    let tx = 0;
+    let ty = 0;
+    let tn = 0;
+    for (const [p, q] of ties) {
+      const fp = floorIdx[p];
+      const fq = floorIdx[q];
+      if (fp === f && done.has(fq)) {
+        tx += X[2 * q] - X[2 * p];
+        ty += X[2 * q + 1] - X[2 * p + 1];
+        tn++;
+      } else if (fq === f && done.has(fp)) {
+        tx += X[2 * p] - X[2 * q];
+        ty += X[2 * p + 1] - X[2 * q + 1];
+        tn++;
+      }
+    }
+    if (tn > 0) {
+      tx /= tn;
+      ty /= tn;
+    } else if (rn > 0) {
+      tx = rx / rn; // sem escada registrada: centro sobre centro
+      ty = ry / rn;
+    }
+    for (let q = 0; q < M; q++) {
+      if (floorIdx[q] !== f) continue;
+      X[2 * q] += tx;
+      X[2 * q + 1] += ty;
     }
     done.add(f);
   }
@@ -1130,8 +1239,14 @@ function refineFields(data, X0, P, dbg, diss) {
   for (let o = 0; o < P.outer; o++) {
     // Do grosso para o fino: campos muito lisos primeiro (estrutura global), detalhe depois.
     const frac = P.outer > 1 ? Math.min(1, o / Math.max(1, P.outer - 1 - P.hHold)) : 1;
-    const h = P.hStart > 0 ? P.hStart * Math.pow(P.h / P.hStart, frac) : P.h;
+    // Largura do núcleo: proporcional ao espaçamento típico entre pontos do mesmo andar
+    // (com poucos pontos por metro quadrado o campo só pode ser aprendido em escala mais grossa).
+    const spacing = radiusOf(X) * Math.sqrt((2 * Math.PI * NF) / M);
+    const hEnd = P.hRel > 0 ? Math.max(P.hMin, Math.min(P.hMax, P.hRel * spacing)) : P.h;
+    const h = P.hStart > 0 ? P.hStart * hEnd * Math.pow(1 / P.hStart, frac) : hEnd;
     inv2h2 = 1 / (2 * h * h);
+    dbg.h = h;
+    if (NF > 1 && o > 0 && o <= P.registerRounds) registerFloors(data, X);
     const rmsRadius = radiusOf(X);
     // Salto típico entre vizinhos: raio do disco equivalente / raiz do número de pontos.
     hopScale = Math.max(0.3, P.orderHop * rmsRadius * Math.SQRT2 * Math.sqrt(Math.PI / M));

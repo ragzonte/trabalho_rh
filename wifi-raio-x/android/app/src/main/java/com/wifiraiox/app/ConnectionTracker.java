@@ -206,6 +206,11 @@ final class ConnectionTracker {
         return ConnectionMapper.rssiSample(connectionInfo(), tracked, System.currentTimeMillis());
     }
 
+    /** A rede Wi-Fi em uso (para prender conexões a ela), ou null fora do Wi-Fi. */
+    Network wifiNetwork() {
+        return snapshot().network;
+    }
+
     /** Endereço e máscara do celular no Wi-Fi, para a varredura da rede local. null fora do Wi-Fi ou sem IPv4. */
     LanTarget lanTarget() {
         Snapshot s = snapshot();

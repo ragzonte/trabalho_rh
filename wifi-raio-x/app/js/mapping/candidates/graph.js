@@ -608,6 +608,28 @@ function equalizePace(X, M, N, opt) {
   return X.map((_, a) => apply(a));
 }
 
+// Quanto os passos esperados a posteriori (step2 = E|passo|²) excedem os do modelo de caminhada.
+// 1 = o tamanho do mapa bate com a caminhada. Soma sobre soma: os passos longos mandam, e o tremor
+// de posição (que infla os passos curtos, de parado para parado) pesa pouco.
+function stepRatio(step2, motion, N, mode) {
+  let num = 0;
+  let den = 0;
+  for (let a = 0; a + 1 < N; a++) {
+    if (mode === 1) {
+      num += step2[a];
+      den += 2 / motion.e[a];
+    } else if (mode === 2) {
+      if (motion.L[a] < 0.5) continue;
+      num += (step2[a] * motion.e[a]) / 2;
+      den += 1;
+    } else {
+      num += (step2[a] * motion.e[a]) / 2;
+      den += 1;
+    }
+  }
+  return den > 0 ? num / den : 1;
+}
+
 // Modelo de movimento entre nós seguidos, pelo tempo de caminhada tau:
 // comprimento esperado do passo L = PACE * tau / (1 + tau / STRAIGHT_S)  (curvas e paradas encurtam a corda).
 const PACE = 0.62; // m/s: passo de quem anda dentro de casa olhando o celular (faixa típica 0,4 a 0,9)
@@ -640,7 +662,7 @@ function motionModel(P, opt) {
 // EM do modelo linear: y_ak = b_k[andar] + g_k . x_a + ruído;  x_{a+1} = x_a + passo
 // ---------------------------------------------------------------------------
 
-const IMPUTE_VAR = 36; // dB²: incerteza extra de um "não ouvi" tratado como leitura no limiar
+let IMPUTE_VAR = 36; // dB²: incerteza extra de um "não ouvi" tratado como leitura no limiar
 
 function emLinear(P, X, iters, stages) {
   const { N, K, y, c, nodes, floorDbm } = P;
@@ -696,8 +718,8 @@ function emLinear(P, X, iters, stages) {
       }
       for (let p = 0; p < m; p++) for (let r = 0; r < p; r++) A[p * m + r] = A[r * m + p];
       // Prior fraco no gradiente (dB/m) e no nível, para rádios pouco ouvidos não explodirem.
-      A[0] += 0.05;
-      A[m + 1] += 0.05;
+      A[0] += P.opt.gRidge ?? 0.05;
+      A[m + 1] += P.opt.gRidge ?? 0.05;
       // Nível de cada zona: encolhe para o nível médio do rádio (a diferença entre zonas é a perda nas paredes).
       const level = P.zones ? rhsMean(rhs, A, m) : floorDbm + 10;
       for (let f = 2; f < m; f++) {
@@ -715,6 +737,14 @@ function emLinear(P, X, iters, stages) {
         res += w * (e * e + th[0] * th[0] * cov[a][0] + 2 * th[0] * th[1] * cov[a][1] + th[1] * th[1] * cov[a][2]);
       }
       psi[k] = Math.max(1, (res + 4 * 9) / (sw + 4));
+    }
+    // Encolhe o ruído de cada rádio para o ruído comum: sem isso o EM "decora" dois ou três rádios
+    // (ruído -> 0) e o mapa passa a ser só deles (caso de Heywood da análise fatorial).
+    const pool = P.opt.psiPool ?? 0;
+    if (pool > 0) {
+      let lg = 0;
+      for (const k of use) lg += Math.log(psi[k]) / use.length;
+      for (const k of use) psi[k] = Math.exp(pool * lg + (1 - pool) * Math.log(psi[k]));
     }
   };
   const Jxx = new Float64Array(N);
@@ -749,9 +779,7 @@ function emLinear(P, X, iters, stages) {
     }
     const step2 = chainSolve(N, Jxx, Jxy, Jyy, hx, hy, motion, X, cov);
     // Razão entre o passo esperado a posteriori e o do modelo (1 = a escala do mapa bate com a caminhada).
-    let ratio = 0;
-    for (let a = 0; a + 1 < N; a++) ratio += (step2[a] * motion.e[a]) / 2;
-    return ratio;
+    return stepRatio(step2, motion, N, P.opt.ratioMode ?? 1) * Math.max(1, N - 1);
   };
   // Correções das leituras (somadas a o.v): atraso dentro da varredura e sombra do corpo.
   const band = P.radios.map((r) => r.band);
@@ -863,6 +891,267 @@ function emLinear(P, X, iters, stages) {
 // Campos não lineares: plano + bases radiais numa grade, com validação "deixa um de fora"
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// EM com campo radial: y_ak = nivel_k[andar] - 10 n_k log10(sqrt(|x_a - ap_d|² + h²))
+// ---------------------------------------------------------------------------
+
+// O plano é o limite de um roteador muito distante. Para um roteador perto (o da casa) o campo
+// é radial e muito mais forte: aqui cada APARELHO ganha uma posição, comum aos seus rádios, e cada
+// rádio a sua inclinação n e o seu nível por andar (que engole a potência e a perda da laje).
+const AP_CLEARANCE = 1.0; // m: distância mínima efetiva (altura do roteador em relação ao celular)
+const SLOPE_PRIOR = 3; // expoente de perda típico dentro de casa, com paredes (2 = espaço livre, 4+ = muito obstruído)
+const SLOPE_MIN = 1.2;
+const SLOPE_MAX = 6;
+
+function emRadial(P, lin, opt, stages) {
+  const { N, y, c, floorDbm, radios } = P;
+  const { X, cov, floors, fIdx, use } = lin;
+  const F = floors.length;
+  const motion = motionModel(P, { ring: 0, iso: 0, rw2: P.opt.rw2 ?? 1.3 });
+  // aparelhos e as linhas (nó, valor, peso relativo) de cada rádio
+  const devIndex = new Map();
+  const devs = [];
+  for (const k of use) {
+    const key = radios[k].device;
+    let d = devIndex.get(key);
+    if (d === undefined) {
+      d = devs.length;
+      devIndex.set(key, d);
+      devs.push({ radios: [], x: 0, y: 0 });
+    }
+    devs[d].radios.push(k);
+  }
+  const devOf = new Int32Array(P.K).fill(-1);
+  devs.forEach((dv, d) => dv.radios.forEach((k) => (devOf[k] = d)));
+  const psi = Float64Array.from(lin.psi);
+  const slope = new Float64Array(P.K).fill(SLOPE_PRIOR);
+  const level = Array.from({ length: P.K }, () => new Float64Array(F));
+  const rows = new Array(P.K);
+  for (const k of use) {
+    const list = [];
+    for (let a = 0; a < N; a++) {
+      if (c[a][k] > 0) list.push({ a, v: y[a][k], w: c[a][k], imp: false });
+      else list.push({ a, v: floorDbm - 2, w: 1, imp: true });
+    }
+    rows[k] = list;
+  }
+  // centro e raio do mapa
+  const frame = () => {
+    let cx = 0;
+    let cy = 0;
+    for (let a = 0; a < N; a++) {
+      cx += X[a][0] / N;
+      cy += X[a][1] / N;
+    }
+    let r2 = 0;
+    for (let a = 0; a < N; a++) r2 += ((X[a][0] - cx) ** 2 + (X[a][1] - cy) ** 2) / N;
+    return { cx, cy, R: Math.max(0.5, Math.sqrt(r2)) };
+  };
+  // Ajusta os rádios de um aparelho para uma posição candidata; devolve o custo (soma de resíduos²/psi).
+  const Sw = new Float64Array(F);
+  const Sy = new Float64Array(F);
+  const St = new Float64Array(F);
+  const tBuf = new Float64Array(N);
+  const fitDevice = (d, ax, ay, commit) => {
+    let cost = 0;
+    for (let a = 0; a < N; a++) {
+      const dx = X[a][0] - ax;
+      const dy = X[a][1] - ay;
+      tBuf[a] = 5 * Math.log10(dx * dx + dy * dy + AP_CLEARANCE * AP_CLEARANCE);
+    }
+    for (const k of devs[d].radios) {
+      Sw.fill(0);
+      Sy.fill(0);
+      St.fill(0);
+      let Stt = 0;
+      let Sty = 0;
+      const wImp = psi[k] / (psi[k] + IMPUTE_VAR);
+      for (const r of rows[k]) {
+        const w = r.imp ? wImp : r.w;
+        const f = fIdx[r.a];
+        const t = tBuf[r.a];
+        Sw[f] += w;
+        Sy[f] += w * r.v;
+        St[f] += w * t;
+        Stt += w * t * t;
+        Sty += w * t * r.v;
+      }
+      // y = L_f - n t  =>  elimina L_f = (Sy_f + n St_f) / Sw_f
+      let den = Stt + opt.slopeRidge;
+      let num = -Sty + opt.slopeRidge * SLOPE_PRIOR;
+      for (let f = 0; f < F; f++) {
+        if (Sw[f] <= 0) continue;
+        den -= (St[f] * St[f]) / Sw[f];
+        num += (St[f] * Sy[f]) / Sw[f];
+      }
+      const n = Math.min(SLOPE_MAX, Math.max(SLOPE_MIN, den > 1e-9 ? num / den : SLOPE_PRIOR));
+      let sse = 0;
+      let sw = 0;
+      for (const r of rows[k]) {
+        const w = r.imp ? wImp : r.w;
+        const f = fIdx[r.a];
+        const L = Sw[f] > 0 ? (Sy[f] + n * St[f]) / Sw[f] : floorDbm;
+        const e = r.v - L + n * tBuf[r.a];
+        sse += w * e * e;
+        sw += w;
+      }
+      cost += sse / psi[k];
+      if (commit) {
+        slope[k] = n;
+        for (let f = 0; f < F; f++) level[k][f] = Sw[f] > 0 ? (Sy[f] + n * St[f]) / Sw[f] : floorDbm;
+        // ruído do rádio: resíduo + o que a incerteza de posição põe no campo
+        let extra = 0;
+        const gk = (10 * n) / Math.LN10;
+        for (const r of rows[k]) {
+          const w = r.imp ? wImp : r.w;
+          const dx = X[r.a][0] - ax;
+          const dy = X[r.a][1] - ay;
+          const q = gk / (dx * dx + dy * dy + AP_CLEARANCE * AP_CLEARANCE);
+          const S = cov[r.a];
+          extra += w * q * q * (dx * dx * S[0] + 2 * dx * dy * S[1] + dy * dy * S[2]);
+        }
+        psi[k] = Math.max(1, (sse + extra + 4 * 9) / (sw + 4));
+      }
+    }
+    return cost;
+  };
+  // partida: o plano de cada aparelho vira um roteador distante na direção do gradiente
+  {
+    const fr = frame();
+    for (const dv of devs) {
+      let gx = 0;
+      let gy = 0;
+      let sw = 0;
+      for (const k of dv.radios) {
+        gx += lin.g[k][0] / lin.psi[k];
+        gy += lin.g[k][1] / lin.psi[k];
+        sw += 1 / lin.psi[k];
+      }
+      gx /= sw;
+      gy /= sw;
+      const mag = Math.hypot(gx, gy);
+      const dist = mag > 1e-6 ? Math.min(8 * fr.R, Math.max(2, (4.34 * SLOPE_PRIOR) / mag)) : 8 * fr.R;
+      dv.x = fr.cx + (mag > 1e-6 ? (gx / mag) * dist : dist);
+      dv.y = fr.cy + (mag > 1e-6 ? (gy / mag) * dist : 0);
+    }
+  }
+  const DIRS = [
+    [1, 0],
+    [0.7071, 0.7071],
+    [0, 1],
+    [-0.7071, 0.7071],
+    [-1, 0],
+    [-0.7071, -0.7071],
+    [0, -1],
+    [0.7071, -0.7071],
+  ];
+  const RADII = [0, 0.4, 0.8, 1.2, 1.7, 2.5, 4, 7];
+  const mStep = (it) => {
+    const fr = frame();
+    devs.forEach((dv, d) => {
+      let best = fitDevice(d, dv.x, dv.y, false);
+      if (it % opt.globalEvery === 0) {
+        // busca global: anéis em volta do mapa (inclusive dentro dele)
+        for (const rr of RADII) {
+          for (let j = 0; j < (rr === 0 ? 1 : 12); j++) {
+            const ang = (j * Math.PI) / 6 + rr;
+            const ax = fr.cx + rr * fr.R * Math.cos(ang);
+            const ay = fr.cy + rr * fr.R * Math.sin(ang);
+            const cst = fitDevice(d, ax, ay, false);
+            if (cst < best - 1e-9) {
+              best = cst;
+              dv.x = ax;
+              dv.y = ay;
+            }
+          }
+        }
+      }
+      // busca local em padrão, com passo proporcional à distância ao mapa
+      const far = Math.max(fr.R, Math.hypot(dv.x - fr.cx, dv.y - fr.cy));
+      for (const stepSize of [0.3 * far, 0.08 * far, 0.02 * far]) {
+        let improved = true;
+        let guard = 0;
+        while (improved && guard++ < 4) {
+          improved = false;
+          for (const [ux, uy] of DIRS) {
+            const cst = fitDevice(d, dv.x + ux * stepSize, dv.y + uy * stepSize, false);
+            if (cst < best - 1e-9) {
+              best = cst;
+              dv.x += ux * stepSize;
+              dv.y += uy * stepSize;
+              improved = true;
+            }
+          }
+        }
+      }
+      fitDevice(d, dv.x, dv.y, true);
+    });
+    const pool = P.opt.psiPoolR ?? P.opt.psiPool ?? 0;
+    if (pool > 0) {
+      let lg = 0;
+      for (const k of use) lg += Math.log(psi[k]) / use.length;
+      for (const k of use) psi[k] = Math.exp(pool * lg + (1 - pool) * Math.log(psi[k]));
+    }
+  };
+  const Jxx = new Float64Array(N);
+  const Jxy = new Float64Array(N);
+  const Jyy = new Float64Array(N);
+  const hx = new Float64Array(N);
+  const hy = new Float64Array(N);
+  const eStep = () => {
+    for (let a = 0; a < N; a++) {
+      Jxx[a] = opt.damp;
+      Jxy[a] = 0;
+      Jyy[a] = opt.damp;
+      hx[a] = opt.damp * X[a][0];
+      hy[a] = opt.damp * X[a][1];
+    }
+    for (const k of use) {
+      const dv = devs[devOf[k]];
+      const gk = (10 * slope[k]) / Math.LN10;
+      const wImp = 1 / (psi[k] + IMPUTE_VAR);
+      for (const r of rows[k]) {
+        const a = r.a;
+        const dx = X[a][0] - dv.x;
+        const dy = X[a][1] - dv.y;
+        const r2 = dx * dx + dy * dy + AP_CLEARANCE * AP_CLEARANCE;
+        const f = level[k][fIdx[a]] - 5 * slope[k] * Math.log10(r2);
+        const fx = (-gk * dx) / r2;
+        const fy = (-gk * dy) / r2;
+        const w = r.imp ? wImp : r.w / psi[k];
+        const rr = r.v - f + fx * X[a][0] + fy * X[a][1];
+        Jxx[a] += w * fx * fx;
+        Jxy[a] += w * fx * fy;
+        Jyy[a] += w * fy * fy;
+        hx[a] += w * fx * rr;
+        hy[a] += w * fy * rr;
+      }
+    }
+    const step2 = chainSolve(N, Jxx, Jxy, Jyy, hx, hy, motion, X, cov);
+    return stepRatio(step2, motion, N, P.opt.ratioMode ?? 1);
+  };
+  for (let it = 0; it < opt.iters; it++) {
+    mStep(it);
+    const ratio = eStep();
+    if (ratio > 0 && Number.isFinite(ratio)) {
+      const sc = Math.min(1.15, Math.max(0.87, 1 / Math.sqrt(ratio)));
+      for (let a = 0; a < N; a++) {
+        X[a][0] *= sc;
+        X[a][1] *= sc;
+        cov[a][0] *= sc * sc;
+        cov[a][1] *= sc * sc;
+        cov[a][2] *= sc * sc;
+      }
+      for (const dv of devs) {
+        dv.x *= sc;
+        dv.y *= sc;
+      }
+    }
+    if (stages && (it === 4 || it === 14 || it === 29 || it === opt.iters - 1)) stages[`r${it + 1}`] = X.map((p) => [p[0], p[1]]);
+  }
+  return { X, cov, devs, devOf, slope, level, psi };
+}
+
 // Nível médio ponderado das leituras de um rádio, a partir das somas já acumuladas da regressão.
 function rhsMean(rhs, A, m) {
   let sy = 0;
@@ -913,6 +1202,8 @@ function fieldStage(P, lin, opt, stages) {
   const hx = new Float64Array(N);
   const hy = new Float64Array(N);
   let info = '';
+  let cvFirst = 0;
+  let cvLast = 0;
   const fz = {};
   for (let it = 0; it < opt.iters; it++) {
     const frac = opt.iters > 1 ? it / (opt.iters - 1) : 1;
@@ -1119,7 +1410,7 @@ function fieldStage(P, lin, opt, stages) {
     } else {
       // Passeio aleatório gaussiano + ponto fixo de escala do EM (passo esperado = passo do modelo).
       const step2 = chainSolve(N, Jxx, Jxy, Jyy, hx, hy, motion, X, cov);
-      for (let a = 0; a + 1 < N; a++) ratio += (step2[a] * motion.e[a]) / 2 / Math.max(1, N - 1);
+      ratio = stepRatio(step2, motion, N, P.opt.ratioMode ?? 1);
       if (ratio > 0 && Number.isFinite(ratio)) {
         const sc = Math.min(1.1, Math.max(0.9, 1 / Math.sqrt(ratio)));
         for (let a = 0; a < N; a++) {
@@ -1132,11 +1423,13 @@ function fieldStage(P, lin, opt, stages) {
       let cv = 0;
       for (let u = 0; u < U; u++) cv += psi[u] / U;
       if (P.opt.trace) info += ` ${cv.toFixed(1)}`;
+      if (it === 0) cvFirst = cv;
+      cvLast = cv;
     }
     if (stages && (it === 4 || it === 14 || it === opt.iters - 1)) stages[`f${it + 1}`] = X.map((p) => [p[0], p[1]]);
     if (it === opt.iters - 1) info += ` M=${M} sig=${sigma.toFixed(2)} psi=${(psi.reduce((s, v) => s + v, 0) / U).toFixed(1)} ratio=${ratio.toFixed(2)}`;
   }
-  return { X, cov, info };
+  return { X, cov, info, cvFirst, cvLast };
 }
 
 function cholesky(A, m) {
@@ -1176,6 +1469,7 @@ function cholSolve(L, b, m) {
 function solveInner(survey, options) {
   const P = prepare(survey);
   P.opt = options;
+  if (options.imputeVar !== undefined) IMPUTE_VAR = options.imputeVar;
   if (options.__rooms) {
     // DEV: zonas = cômodos reais (remover antes de entregar)
     let prev = 'x';
@@ -1239,6 +1533,12 @@ function solveInner(survey, options) {
     nodeStages.tinit = X.map((p) => [p[0], p[1]]);
   }
   let info = '';
+  if (options.radial !== 0) {
+    const rad = emRadial(P, lin, { iters: options.rIters ?? 40, slopeRidge: options.slopeRidge ?? 2, damp: options.rDamp ?? 0.05, globalEvery: options.globalEvery ?? 10 }, nodeStages);
+    X = rad.X;
+    const mPsi = (arr) => lin.use.reduce((t, k) => t + arr[k], 0) / lin.use.length;
+    info += ` psiLin=${mPsi(lin.psi).toFixed(1)} psiRad=${mPsi(rad.psi).toFixed(1)}`;
+  }
   if (options.scaleStats) {
     // DEV: estatísticas de passo do caminho estimado, para estudar estimadores de escala
     const mm = motionModel(P, { ring: 1, iso: 0.25 });
@@ -1285,6 +1585,7 @@ function solveInner(survey, options) {
     X = lin.X;
   }
   if (options.field !== 0) {
+    const keep = X.map((p) => [p[0], p[1]]);
     const fs = fieldStage(
       P,
       lin,
@@ -1297,7 +1598,7 @@ function solveInner(survey, options) {
         ridge: options.ridge ?? 1,
         ridgeLin: 0.05,
         damp: options.damp ?? 0.5,
-        ring: options.ring ?? 1,
+        ring: options.ring ?? 0,
         temper: options.temper ?? 1,
         lags: options.lags ?? 3,
         lagWeight: options.lagWeight ?? 1,
@@ -1307,7 +1608,15 @@ function solveInner(survey, options) {
       nodeStages,
     );
     X = fs.X;
-    info = fs.info;
+    info += fs.info + ` cv=${fs.cvFirst.toFixed(1)}->${fs.cvLast.toFixed(1)}`;
+    // Só vale a pena se os campos curvos explicam bem melhor as leituras (validação cruzada).
+    if (!(fs.cvLast < (options.cvGate ?? 0.8) * fs.cvFirst)) {
+      for (let a = 0; a < N; a++) {
+        X[a][0] = keep[a][0];
+        X[a][1] = keep[a][1];
+      }
+      info += ' (rejeitado)';
+    }
   }
   info += ` beta=${lin.beta.map((v) => v.toFixed(1)).join('/')}`;
 

@@ -375,6 +375,24 @@ function prepare(survey, scanIdx) {
     visits.push({ node: nodeOf[i], floor: scanFloor[i] });
   }
 
+  // Cômodos batizados pelo usuário: nós com o mesmo nome (no mesmo andar) estão no mesmo cômodo.
+  const roomOf = new Map();
+  for (let i = 0; i < N; i++) {
+    const label = typeof scans[i].label === 'string' ? scans[i].label.trim().toLowerCase() : '';
+    if (!label || scans[i].spot == null) continue;
+    const key = `${scanFloor[i]}|${label}`;
+    if (!roomOf.has(key)) roomOf.set(key, new Set());
+    roomOf.get(key).add(nodeOf[i]);
+  }
+  const rooms = [];
+  for (const set of roomOf.values()) if (set.size >= 2) rooms.push(Int32Array.from(set));
+  // Sequência dos pontos marcados, na ordem em que foram visitados.
+  const spotOrder = [];
+  for (let i = 0; i < N; i++) {
+    if (scans[i].spot == null) continue;
+    if (!spotOrder.length || spotOrder[spotOrder.length - 1] !== nodeOf[i]) spotOrder.push(nodeOf[i]);
+  }
+
   // Trincas de varreduras seguidas andando (ritmo regular): base do prior de "andar reto".
   const triples = [];
   for (let i = 2; i < N; i++) {
@@ -385,7 +403,7 @@ function prepare(survey, scanIdx) {
     triples.push({ a: nodeOf[i - 2], b: nodeOf[i - 1], c: nodeOf[i], dt: 0.5 * (d1 + d2) });
   }
 
-  return { scans, N, P, NF, floorList, nodeOf, scanFloor, nodeFloor, radios, devices, R, obs, radioCount, edges, triples, visits, links, visitOf, radioOfId };
+  return { scans, N, P, NF, floorList, nodeOf, scanFloor, nodeFloor, radios, devices, R, obs, radioCount, edges, triples, visits, links, visitOf, radioOfId, rooms, spotOrder };
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +622,9 @@ function buildModel(prep, cfg) {
     C: cNode.length, cNode: Int32Array.from(cNode), cRad: Int32Array.from(cRad),
     zFloor, radDev, p0Ref, edges, triples: prep.triples, nodeFloor: prep.nodeFloor,
     sigA: new Float64Array(RA).fill(cfg.sigma),
+    rooms: prep.rooms,
+    spotOrder: prep.spotOrder,
+    hop: 0,
     known: prep.known || [],
   };
 }
@@ -786,6 +807,36 @@ function costAndGrad(model, cfg, theta, grad) {
       grad[2 * kd.a + 1] += g * dy;
       grad[2 * kd.b] -= g * dx;
       grad[2 * kd.b + 1] -= g * dy;
+    }
+  }
+
+  // --- cômodos: pontos com o mesmo nome não ficam longe do centro do grupo ---
+  if (cfg.roomWeight > 0 && model.hop > 0) {
+    for (const nodes of model.rooms) {
+      // Quem marca pontos espalha-os pelo cômodo: n pontos ocupam uma área ~ n·(espaçamento)².
+      const radius = cfg.roomK * model.hop * Math.sqrt(nodes.length);
+      let mx = 0;
+      let my = 0;
+      for (const i of nodes) {
+        mx += theta[2 * i];
+        my += theta[2 * i + 1];
+      }
+      mx /= nodes.length;
+      my /= nodes.length;
+      // Mantendo o centro fixo no gradiente (aproximação): o termo é pequeno e o centro quase não muda.
+      for (const i of nodes) {
+        const dx = theta[2 * i] - mx;
+        const dy = theta[2 * i + 1] - my;
+        const dist = Math.sqrt(dx * dx + dy * dy + 1e-9);
+        const ex = (dist - radius) / model.hop;
+        if (ex <= 0) continue;
+        cost += 0.5 * cfg.roomWeight * ex * ex;
+        if (grad) {
+          const g = (cfg.roomWeight * ex) / (dist * model.hop);
+          grad[2 * i] += g * dx;
+          grad[2 * i + 1] += g * dy;
+        }
+      }
     }
   }
 
@@ -1732,6 +1783,80 @@ function averageMembers(model, members, out) {
   }
 }
 
+/** Espaçamento típico entre pontos marcados consecutivos, no mapa atual (0 se não houver). */
+function spotHop(model, theta) {
+  const order = model.spotOrder;
+  const hops = [];
+  for (let k = 1; k < order.length; k++) {
+    const a = order[k - 1];
+    const b = order[k];
+    hops.push(Math.hypot(theta[2 * a] - theta[2 * b], theta[2 * a + 1] - theta[2 * b + 1]));
+  }
+  return hops.length >= 4 ? median(hops) : 0;
+}
+
+/** Diagnósticos de uma solução (só para estudo): critérios que poderiam distinguir soluções. */
+function diagnostics(survey, prep, model, cfg, theta) {
+  const { RA, NF, oA, oR, p0Index, M, oNode, oRad, oFloor, oY, zFloor, radDev } = model;
+  const { scans, nodeOf, N } = prep;
+  const eps2 = NEAR_M * NEAR_M;
+  const out = {};
+  // rumo de cada nó andando (direção entre vizinhos no tempo)
+  const hx = new Float64Array(model.P);
+  const hy = new Float64Array(model.P);
+  const hasH = new Uint8Array(model.P);
+  for (let i = 1; i < N - 1; i++) {
+    if (scans[i].spot != null) continue;
+    const a = nodeOf[i - 1];
+    const b = nodeOf[i + 1];
+    const dx = theta[2 * b] - theta[2 * a];
+    const dy = theta[2 * b + 1] - theta[2 * a + 1];
+    const l = Math.hypot(dx, dy);
+    if (l < 0.3) continue;
+    hx[nodeOf[i]] = dx / l;
+    hy[nodeOf[i]] = dy / l;
+    hasH[nodeOf[i]] = 1;
+  }
+  // correlação entre o resíduo e "roteador às costas"
+  let sxy = 0, sxx = 0, syy = 0, sx = 0, sy = 0, cnt = 0, sse = 0, accel = 0, accN = 0;
+  for (let m = 0; m < M; m++) {
+    const i = oNode[m];
+    const a = oRad[m];
+    const d3 = oA + 3 * radDev[a];
+    const dx = theta[d3] - theta[2 * i];
+    const dy = theta[d3 + 1] - theta[2 * i + 1];
+    const dz = zFloor[oFloor[m]] - theta[d3 + 2];
+    const q = dx * dx + dy * dy + dz * dz + eps2;
+    const e = oY[m] - (theta[p0Index[a * NF + oFloor[m]]] - (5 * theta[oR + 2 * a] * Math.log(q)) / LN10 - theta[oR + 2 * a + 1] * Math.sqrt(q));
+    sse += Math.min(e * e, 144);
+    if (!hasH[i]) continue;
+    const rho = Math.hypot(dx, dy);
+    if (rho < 0.5) continue;
+    const ahead = (dx * hx[i] + dy * hy[i]) / rho;
+    const behind = (1 - ahead) / 2;
+    const x = behind * behind * (rho / Math.sqrt(q));
+    const ce = clamp(e, -12, 12);
+    sx += x; sy += ce; sxx += x * x; syy += ce * ce; sxy += x * ce; cnt++;
+  }
+  const cov = sxy / cnt - (sx / cnt) * (sy / cnt);
+  const vx = sxx / cnt - (sx / cnt) ** 2;
+  const vy = syy / cnt - (sy / cnt) ** 2;
+  out.bodySlope = cov / vx; // dB por unidade de "às costas" (esperado: negativo, ~ -5)
+  out.bodyCorr = cov / Math.sqrt(vx * vy);
+  out.rms = Math.sqrt(sse / M);
+  for (const t of model.triples) {
+    const ax = theta[2 * t.a] - 2 * theta[2 * t.b] + theta[2 * t.c];
+    const ay = theta[2 * t.a + 1] - 2 * theta[2 * t.b + 1] + theta[2 * t.c + 1];
+    accel += ax * ax + ay * ay;
+    accN++;
+  }
+  out.accelRms = Math.sqrt(accel / Math.max(1, accN));
+  const steps = [];
+  for (const e of prep.edges) if (e.kind === 0 && e.dt < 8) steps.push(Math.hypot(theta[2 * e.a] - theta[2 * e.b], theta[2 * e.a + 1] - theta[2 * e.b + 1]));
+  out.stepCv = steps.length ? Math.sqrt(steps.reduce((t, v) => t + v * v, 0) / steps.length - (steps.reduce((t, v) => t + v, 0) / steps.length) ** 2) / (steps.reduce((t, v) => t + v, 0) / steps.length) : NaN;
+  return out;
+}
+
 /** Raio quadrático médio dos nós em torno do centro. */
 function cloudRadius(theta, P) {
   let mx = 0;
@@ -1780,6 +1905,8 @@ const DEFAULT_CFG = {
   p0SigmaLo: 40,
   zSigma: 1.0,
   farSigma: 60,
+  roomWeight: 0, // pontos do mesmo cômodo (nome dado pelo usuário) ficam juntos
+  roomK: 0.6, // raio livre do cômodo = roomK · espaçamento · raiz(nº de pontos)
   maxIter: 300,
   rounds: 3,
   ensemble: 1,
@@ -1950,8 +2077,10 @@ function solveInner(survey, options) {
   };
   let res = { f: Infinity, iter: 0 };
   const notes = [];
+  const study = {};
   const runSlam = (th, rounds) => {
     for (let round = 0; round < rounds; round++) {
+      model.hop = spotHop(model, th);
       for (let i = 0; i < model.size; i++) u[i] = th[i] / scale[i];
       res = lbfgs(fg, u, { maxIter: cfg.maxIter, deadline, memory: 10 });
       for (let i = 0; i < model.size; i++) th[i] = u[i] * scale[i];
@@ -2005,6 +2134,7 @@ function solveInner(survey, options) {
       if (now() > deadline) break;
     }
   }
+  if (options.debug) study.diag = diagnostics(survey, prep, model, cfg, theta);
   let sizeAfterSlam = cloudRadius(theta, P).r;
   if (anchored && model.known.length === 0 && cfg.turnCorrection > 0) {
     // Casa pequena obriga a virar antes de completar um passo: a corda entre duas varreduras
@@ -2019,7 +2149,6 @@ function solveInner(survey, options) {
   snapshot('slam');
   progress(0.6, 'ajuste');
 
-  const study = {};
   if (options.debug) study.evidence = scaleEvidence(survey, prep, model, cfg, theta);
   if (cfg.scaleStudy) {
     // Estudo de escala: itera só o q do HMM com as emissões paradas e vê onde ele assenta.

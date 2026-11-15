@@ -626,7 +626,9 @@ test('erro ao montar uma tela: aviso com "tentar de novo", o resto do app e as b
 
       // as outras telas e o laço de buscas não foram afetados
       await page.click('.bottomnav__item[data-tab="redes"]');
-      await page.waitForFunction(() => document.querySelector('.view .row') !== null);
+      await waitForScreen(page, '/redes');
+      await page.waitForFunction(() => document.querySelector('.view > .screen').childElementCount > 0);
+      assert.equal(await page.locator('.view .empty__icon--critical').count(), 0);
       await page.waitForFunction(() => !window.__wrx.app.store.get().scan.scanning);
       await page.waitForTimeout(1600);
       const seq = await appState(page, (s) => s.scan.seq);

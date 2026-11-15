@@ -27,11 +27,13 @@ const DEFAULTS = {
   pauseProb: 0.08,
   iters: 0, // voltas de relocalização numa grade (forward-backward)
   roundsB: 6,
-  sweepsB: 3,
+  sweepsB: 6,
   roundsC: 6,
-  sweepsC: 3,
+  sweepsC: 8,
   accSigma: 1.0, // desvio típico da "aceleração" entre três varreduras seguidas de quem anda (m)
   damping: 0.3,
+  stepSize: 0.7,
+  walkW: 0, // peso da mola "passo de tamanho típico" entre varreduras de quem anda
   maxStep: 0.6, // quanto um nó anda por varrida, no máximo (m)
   freeW: 0.3, // peso do a priori de pulo curto entre pontos marcados no modo de 30 s
   freeScale: 2.5,
@@ -1076,7 +1078,7 @@ function forwardBackward(model, grid, logE, T) {
 }
 
 // ---------------------------------------------------------------------------
-// Refino contínuo: posições por descida de Gauss-Newton, nó a nó
+// Refino contínuo: sobe o gradiente COMPLETO da previsão cruzada dos campos
 // ---------------------------------------------------------------------------
 
 // Variável = posição a descobrir. Nós do mesmo ponto marcado dividem a variável.
@@ -1118,235 +1120,387 @@ function boundsOf(X, margin) {
 }
 
 /**
- * Voltas de [ajusta a lei de distância -> varre os nós movendo cada um para onde as suas leituras
- * combinam melhor com o campo aprendido dos OUTROS nós -> corrige a métrica].
- * useResidual = false: só a lei de distância (física); true: mais o resíduo suave (impressão digital).
+ * Voltas de [ajusta a lei de distância -> passos de gradiente nas posições -> corrige a métrica].
+ *
+ * O que se minimiza é o erro com que o campo de cada rádio, aprendido dos OUTROS nós (núcleo
+ * gaussiano sobre o resíduo da lei de distância), prevê as leituras de cada nó. O gradiente é o
+ * completo: cada nó é empurrado para onde as suas leituras combinam com o campo E para onde as
+ * suas leituras ajudam (ou param de atrapalhar) a previsão dos vizinhos. É esta segunda parte que
+ * separa lugares diferentes que o mapa grosso tinha amontoado.
+ * useResidual = false: só a lei de distância (física).
  */
 function refineContinuous(model, X0, T, opts) {
-  const { M, K, val, nObs, nCens, active, floors, floorIdx, missLevel, nodes, trans } = model;
+  const { M, K, val, nObs, nCens, active, floors, floorIdx, missLevel, trans } = model;
   const vars = model.vars || (model.vars = buildVariables(model));
   const { varOf, members, P } = vars;
   const A = active.length;
   let X = X0.map((p) => [p[0], p[1]]);
-  // Uma posição por variável (média dos nós que a dividem).
-  const V = new Array(P);
   const syncVars = () => {
     for (let p = 0; p < P; p++) {
+      if (members[p].length < 2) continue;
       let sx = 0;
       let sy = 0;
       for (const a of members[p]) {
         sx += X[a][0];
         sy += X[a][1];
       }
-      V[p] = [sx / members[p].length, sy / members[p].length];
-      for (const a of members[p]) X[a] = V[p];
+      for (const a of members[p]) X[a] = [sx / members[p].length, sy / members[p].length];
     }
   };
   syncVars();
   const sig2 = new Float64Array(A).fill(T.sigmaNoise * T.sigmaNoise);
   const sf2 = T.sigmaField * T.sigmaField;
   const lam = T.lambda;
-  const resid = new Float64Array(M * A);
-  const wgt = new Float64Array(M * A);
-  const accN = new Float64Array(A);
-  const accD = new Float64Array(A);
-  const accNx = new Float64Array(A);
-  const accNy = new Float64Array(A);
-  const accDx = new Float64Array(A);
-  const accDy = new Float64Array(A);
+  const MA = M * A;
+  const resid = new Float64Array(MA); // leitura - lei de distância, na posição atual do nó
+  const wgt = new Float64Array(MA); // peso do nó como dado do campo
+  const tgt = new Float64Array(MA); // valor-alvo quando o nó é quem está sendo previsto (NaN = sem dado)
+  const tgtS = new Float64Array(MA); // variância própria do alvo
+  const tgtC = new Uint8Array(MA); // 1 = censura (não ouviu)
+  const bGx = new Float64Array(MA); // gradiente da lei de distância na posição do nó
+  const bGy = new Float64Array(MA);
+  const baseV = new Float64Array(MA);
+  const accD = new Float64Array(MA);
+  const accN = new Float64Array(MA);
+  const cE = new Float64Array(MA);
+  const cV = new Float64Array(MA);
+  const aR = new Float64Array(MA);
+  const aInv = new Float64Array(MA);
+  const aVf = new Float64Array(MA);
+  const pX = new Float64Array(MA);
+  const pY = new Float64Array(MA);
+  const tB = new Float64Array(MA);
+  const gX = new Float64Array(M);
+  const gY = new Float64Array(M);
+  const hXX = new Float64Array(M);
+  const hXY = new Float64Array(M);
+  const hYY = new Float64Array(M);
   let params = null;
   let heldOut = 0;
   let sigmaMean = 0;
   const wAcc = 1 / (T.accSigma * T.accSigma);
 
-  for (let round = 0; round < opts.rounds; round++) {
-    const h = opts.h1 + (opts.h0 - opts.h1) * (opts.rounds > 1 ? 1 - round / (opts.rounds - 1) : 0);
+  // Alvos (não mudam com a posição).
+  for (let a = 0; a < M; a++) {
+    for (let q = 0; q < A; q++) {
+      const k = active[q];
+      const i = a * A + q;
+      tgt[i] = NaN;
+      if (nObs[a * K + k] > 0) {
+        tgt[i] = val[a * K + k];
+        tgtC[i] = 0;
+      } else if (nCens[a * K + k] > 0) {
+        tgt[i] = missLevel;
+        tgtC[i] = 1;
+      }
+    }
+  }
+
+  // Custo e gradiente para as posições X (com a lei de distância `params` fixa).
+  const evaluate = (h, wantGrad) => {
     const inv2h2 = 1 / (2 * h * h);
     const cut2 = 6.8 * h * h;
-    params = fitBases(model, X, boundsOf(X, T.gridMargin));
-    // Resíduo de cada leitura em relação à lei de distância, na posição atual.
-    const baseOf = (q, a, x, y) => {
-      const p = params[active[q]];
+    // Lei de distância, resíduo e peso de cada nó.
+    for (let a = 0; a < M; a++) {
       const f = floorIdx[a];
-      const dz = 0.5 + FLOOR_HEIGHT * Math.abs(floors[f] - floors[p.af]);
-      const dx = x - p.ax;
-      const dy = y - p.ay;
-      const d2 = Math.max(0.25, dx * dx + dy * dy + dz * dz);
-      return { b: p.level[f] - 5 * p.n * Math.log10(d2), gx: (-4.3429 * p.n * dx) / d2, gy: (-4.3429 * p.n * dy) / d2 };
-    };
-    const updateResiduals = () => {
+      for (let q = 0; q < A; q++) {
+        const k = active[q];
+        const p = params[k];
+        const i = a * A + q;
+        const dz = 0.5 + FLOOR_HEIGHT * Math.abs(floors[f] - floors[p.af]);
+        const dx = X[a][0] - p.ax;
+        const dy = X[a][1] - p.ay;
+        const d2 = Math.max(0.25, dx * dx + dy * dy + dz * dz);
+        const b = p.level[f] - 5 * p.n * Math.log10(d2);
+        baseV[i] = b;
+        bGx[i] = (-4.3429 * p.n * dx) / d2;
+        bGy[i] = (-4.3429 * p.n * dy) / d2;
+        resid[i] = 0;
+        wgt[i] = 0;
+        if (nObs[a * K + k] > 0) {
+          resid[i] = val[a * K + k] - b;
+          wgt[i] = nObs[a * K + k];
+          tgtS[i] = sig2[q] / nObs[a * K + k];
+        } else if (nCens[a * K + k] > 0) {
+          tgtS[i] = sig2[q] * 2;
+          // Censura: como dado, só puxa o campo para baixo onde a lei de distância prevê sinal audível.
+          const e = missLevel - 2 - b;
+          if (e < 0) {
+            resid[i] = e;
+            wgt[i] = 0.3 * nCens[a * K + k];
+          }
+        }
+      }
+    }
+    // Passo 1: num/den do núcleo em cada nó (sem os nós que dividem a mesma variável).
+    accD.fill(0);
+    accN.fill(0);
+    if (opts.useResidual) {
       for (let a = 0; a < M; a++) {
-        for (let q = 0; q < A; q++) {
-          const k = active[q];
-          resid[a * A + q] = 0;
-          wgt[a * A + q] = 0;
-          if (nObs[a * K + k] > 0) {
-            resid[a * A + q] = val[a * K + k] - baseOf(q, a, X[a][0], X[a][1]).b;
-            wgt[a * A + q] = nObs[a * K + k];
-          } else if (nCens[a * K + k] > 0) {
-            // Censura: só puxa o campo para baixo onde a lei de distância prevê sinal audível.
-            const e = missLevel - 2 - baseOf(q, a, X[a][0], X[a][1]).b;
-            if (e < 0) {
-              resid[a * A + q] = e;
-              wgt[a * A + q] = 0.3 * nCens[a * K + k];
+        const ra = a * A;
+        for (let b = a + 1; b < M; b++) {
+          if (floorIdx[b] !== floorIdx[a] || varOf[b] === varOf[a]) continue;
+          const dx = X[a][0] - X[b][0];
+          const dy = X[a][1] - X[b][1];
+          const d2 = dx * dx + dy * dy;
+          if (d2 > cut2) continue;
+          const w = Math.exp(-d2 * inv2h2);
+          const rb = b * A;
+          for (let q = 0; q < A; q++) {
+            const wb = wgt[rb + q];
+            if (wb > 0) {
+              accD[ra + q] += w * wb;
+              accN[ra + q] += w * wb * resid[rb + q];
+            }
+            const wa = wgt[ra + q];
+            if (wa > 0) {
+              accD[rb + q] += w * wa;
+              accN[rb + q] += w * wa * resid[ra + q];
             }
           }
         }
       }
-    };
+    }
+    // Erro de previsão de cada alvo e coeficientes do gradiente.
+    let cost = 0;
+    let ll = 0;
+    let llN = 0;
+    const errS = new Float64Array(A);
+    const errN = new Float64Array(A);
+    for (let i = 0; i < MA; i++) {
+      cE[i] = 0;
+      cV[i] = 0;
+      if (Number.isNaN(tgt[i])) continue;
+      const q = i % A;
+      const dn = accD[i] + lam;
+      const r = opts.useResidual ? accN[i] / dn : 0;
+      const vf = opts.useResidual ? (sf2 * lam) / dn : sf2;
+      const v = tgtS[i] + vf;
+      const e = tgt[i] - (baseV[i] + r);
+      aR[i] = r;
+      aInv[i] = 1 / dn;
+      aVf[i] = vf;
+      if (tgtC[i]) {
+        // Não ouviu: só custa se o campo previsto ali é audível.
+        if (e >= 0) continue;
+        cost += (0.5 * e * e) / v;
+        cE[i] = e / v;
+        continue;
+      }
+      const z = Math.abs(e) / Math.sqrt(v);
+      let wr = 1;
+      let quad = z * z;
+      if (z > T.zCap) {
+        // Leitura aberrante: cauda linear.
+        wr = T.zCap / z;
+        quad = 2 * T.zCap * z - T.zCap * T.zCap;
+      }
+      const c = 0.5 * quad + 0.5 * Math.log(v);
+      cost += c;
+      ll -= c;
+      llN++;
+      errS[q] += e * e - vf;
+      errN[q] += 1;
+      cE[i] = (wr * e) / v;
+      cV[i] = 0.5 * (1 / v - (wr * e * e) / (v * v));
+    }
+    const stats = { ll: llN ? ll / llN : 0, errS, errN };
+    if (!wantGrad) return { cost: cost + motionCost(), stats };
 
-    for (let sweep = 0; sweep < opts.sweeps; sweep++) {
-      updateResiduals();
-      const errS = new Float64Array(A);
-      const errN = new Float64Array(A);
-      let llSum = 0;
-      let llN = 0;
-      for (let step = 0; step < P; step++) {
-        const p = sweep % 2 === 0 ? step : P - 1 - step;
+    gX.fill(0);
+    gY.fill(0);
+    hXX.fill(0);
+    hXY.fill(0);
+    hYY.fill(0);
+    pX.fill(0);
+    pY.fill(0);
+    tB.fill(0);
+    // Passo 2: contribuições de cada par (alvo a, dado b) nos dois sentidos.
+    if (opts.useResidual) {
+      const invh2 = 2 * inv2h2;
+      for (let a = 0; a < M; a++) {
+        const ra = a * A;
+        for (let b = a + 1; b < M; b++) {
+          if (floorIdx[b] !== floorIdx[a] || varOf[b] === varOf[a]) continue;
+          const dx = X[a][0] - X[b][0];
+          const dy = X[a][1] - X[b][1];
+          const d2 = dx * dx + dy * dy;
+          if (d2 > cut2) continue;
+          const w = Math.exp(-d2 * inv2h2);
+          const rb = b * A;
+          // S = soma dos coeficientes que multiplicam a derivada do núcleo.
+          let sAB = 0; // alvo a, dado b
+          let sBA = 0; // alvo b, dado a
+          for (let q = 0; q < A; q++) {
+            const wb = wgt[rb + q];
+            const ia = ra + q;
+            if (wb > 0 && (cE[ia] !== 0 || cV[ia] !== 0)) {
+              const a1 = cE[ia] * aInv[ia];
+              const dev = wb * (resid[rb + q] - aR[ia]);
+              sAB += -a1 * dev - cV[ia] * aVf[ia] * aInv[ia] * wb;
+              // d(pred_a)/d(x_a) pelo núcleo (para a curvatura) e efeito de mexer b na lei de distância de b.
+              pX[ia] += -w * dx * invh2 * dev * aInv[ia];
+              pY[ia] += -w * dy * invh2 * dev * aInv[ia];
+              tB[rb + q] += a1 * w * wb;
+            }
+            const wa = wgt[ra + q];
+            const ib = rb + q;
+            if (wa > 0 && (cE[ib] !== 0 || cV[ib] !== 0)) {
+              const a1 = cE[ib] * aInv[ib];
+              const dev = wa * (resid[ra + q] - aR[ib]);
+              sBA += -a1 * dev - cV[ib] * aVf[ib] * aInv[ib] * wa;
+              pX[ib] += w * dx * invh2 * dev * aInv[ib];
+              pY[ib] += w * dy * invh2 * dev * aInv[ib];
+              tB[ra + q] += a1 * w * wa;
+            }
+          }
+          // dk/dx_a = -k (x_a - x_b)/h²; dk/dx_b = +k (x_a - x_b)/h². O núcleo é simétrico.
+          const s = (sAB + sBA) * w * invh2;
+          gX[a] -= s * dx;
+          gY[a] -= s * dy;
+          gX[b] += s * dx;
+          gY[b] += s * dy;
+        }
+      }
+    }
+    // Termos diretos (lei de distância no próprio nó), efeito indireto pela lei de distância e curvatura.
+    for (let a = 0; a < M; a++) {
+      for (let q = 0; q < A; q++) {
+        const i = a * A + q;
+        if (cE[i] !== 0) {
+          gX[a] -= cE[i] * bGx[i];
+          gY[a] -= cE[i] * bGy[i];
+          const px = bGx[i] + pX[i];
+          const py = bGy[i] + pY[i];
+          const wv = Math.abs(cE[i]) > 0 ? Math.min(1, Math.abs(cE[i] / (tgt[i] - baseV[i] - aR[i] || 1e-9))) : 0; // = wr/v
+          hXX[a] += wv * px * px;
+          hXY[a] += wv * px * py;
+          hYY[a] += wv * py * py;
+        }
+        // Mexer o nó muda o resíduo dele (= leitura - lei de distância ali), que entra na previsão dos outros.
+        // Para dado de censura o resíduo também acompanha a lei de distância.
+        if (tB[i] !== 0) {
+          gX[a] += tB[i] * bGx[i];
+          gY[a] += tB[i] * bGy[i];
+        }
+      }
+    }
+    return { cost: cost + motionCost(true), stats };
+  };
+
+  // Custo (e gradiente/curvatura, se pedido) dos termos de movimento.
+  const motionCost = (withGrad) => {
+    let cost = 0;
+    const lim = 1.5 * T.accSigma;
+    for (let c0 = 1; c0 + 1 < M; c0++) {
+      // Aceleração (caminho suave) nas trincas de quem anda.
+      if (trans[c0 - 1].type !== 'walk' || trans[c0].type !== 'walk') continue;
+      const cx = X[c0 - 1][0] - 2 * X[c0][0] + X[c0 + 1][0];
+      const cy = X[c0 - 1][1] - 2 * X[c0][1] + X[c0 + 1][1];
+      const cn = Math.hypot(cx, cy);
+      // Curva fechada é permitida: cauda linear.
+      cost += wAcc * (cn > lim ? lim * cn - 0.5 * lim * lim : 0.5 * cn * cn);
+      if (withGrad) {
+        const wr = wAcc * (cn > lim ? lim / cn : 1);
+        gX[c0 - 1] += wr * cx;
+        gY[c0 - 1] += wr * cy;
+        gX[c0] -= 2 * wr * cx;
+        gY[c0] -= 2 * wr * cy;
+        gX[c0 + 1] += wr * cx;
+        gY[c0 + 1] += wr * cy;
+        hXX[c0 - 1] += wr;
+        hYY[c0 - 1] += wr;
+        hXX[c0] += 4 * wr;
+        hYY[c0] += 4 * wr;
+        hXX[c0 + 1] += wr;
+        hYY[c0 + 1] += wr;
+      }
+    }
+    for (let a = 0; a + 1 < M; a++) {
+      // Molas de primeira ordem entre nós seguidos.
+      const b = a + 1;
+      if (varOf[a] === varOf[b]) continue;
+      const tr = trans[a];
+      const dx = X[b][0] - X[a][0];
+      const dy = X[b][1] - X[a][1];
+      const d = Math.hypot(dx, dy);
+      let k1 = 0;
+      let target = 0;
+      if (tr.type === 'arrive') {
+        k1 = 1 / (T.arriveSigma * tr.dt * T.arriveSigma * tr.dt);
+      } else if (tr.type === 'leave') {
+        k1 = 1 / (T.leaveSigma * tr.dt * T.leaveSigma * tr.dt);
+        target = T.leaveSpeed * tr.dt;
+      } else if (tr.type === 'free') {
+        // Pulo entre pontos marcados no modo de 30 s: curto é mais provável, cauda longa.
+        cost += T.freeW * Math.log(1 + (d * d) / (T.freeScale * T.freeScale));
+        k1 = (2 * T.freeW) / (T.freeScale * T.freeScale + d * d);
+        if (withGrad) {
+          gX[a] -= k1 * dx;
+          gY[a] -= k1 * dy;
+          gX[b] += k1 * dx;
+          gY[b] += k1 * dy;
+          hXX[a] += k1;
+          hYY[a] += k1;
+          hXX[b] += k1;
+          hYY[b] += k1;
+        }
+        continue;
+      } else if (T.walkW > 0) {
+        // Andando: passo perto do tamanho típico (mola fraca; a escala fina vem da correção da métrica).
+        k1 = T.walkW / (T.walkSigma * tr.dt * T.walkSigma * tr.dt);
+        target = T.walkSpeed * tr.dt;
+      }
+      const vmax = T.vMax * tr.dt + 0.3;
+      if (d > vmax) {
+        // Ninguém anda tão rápido.
+        k1 = Math.max(k1, 4);
+        target = Math.max(target, vmax);
+      }
+      if (!(k1 > 0)) continue;
+      const e = d - target;
+      cost += 0.5 * k1 * e * e;
+      if (withGrad) {
+        const f = d > 1e-6 ? (k1 * e) / d : 0;
+        gX[a] -= f * dx;
+        gY[a] -= f * dy;
+        gX[b] += f * dx;
+        gY[b] += f * dy;
+        const kk = target > 0 ? k1 * 0.6 : k1;
+        hXX[a] += kk;
+        hYY[a] += kk;
+        hXX[b] += kk;
+        hYY[b] += kk;
+      }
+    }
+    return cost;
+  };
+
+  const trace = [];
+  for (let round = 0; round < opts.rounds; round++) {
+    const h = opts.h1 + (opts.h0 - opts.h1) * (opts.rounds > 1 ? 1 - round / (opts.rounds - 1) : 0);
+    params = fitBases(model, X, boundsOf(X, T.gridMargin));
+    let alpha = T.stepSize;
+    let cur = evaluate(h, true);
+    for (let it = 0; it < opts.sweeps; it++) {
+      // Passo de Newton por variável (curvatura em bloco 2x2), amortecido; recua se o custo subir.
+      const prev = X.map((p) => [p[0], p[1]]);
+      const stepX = new Float64Array(P);
+      const stepY = new Float64Array(P);
+      for (let p = 0; p < P; p++) {
         let gx = 0;
         let gy = 0;
         let hxx = 0;
         let hxy = 0;
         let hyy = 0;
-        const x = V[p][0];
-        const y = V[p][1];
         for (const a of members[p]) {
-          // --- campo aprendido dos outros nós (sem os que dividem esta variável) ---
-          if (opts.useResidual) {
-            accN.fill(0);
-            accD.fill(0);
-            accNx.fill(0);
-            accNy.fill(0);
-            accDx.fill(0);
-            accDy.fill(0);
-            for (let b = 0; b < M; b++) {
-              if (varOf[b] === p || floorIdx[b] !== floorIdx[a]) continue;
-              const dx = x - X[b][0];
-              const dy = y - X[b][1];
-              const d2 = dx * dx + dy * dy;
-              if (d2 > cut2) continue;
-              const w = Math.exp(-d2 * inv2h2);
-              const wx = -w * dx * 2 * inv2h2;
-              const wy = -w * dy * 2 * inv2h2;
-              const rb = b * A;
-              for (let q = 0; q < A; q++) {
-                const wq = wgt[rb + q];
-                if (wq > 0) {
-                  const e = resid[rb + q];
-                  accN[q] += w * wq * e;
-                  accD[q] += w * wq;
-                  accNx[q] += wx * wq * e;
-                  accNy[q] += wy * wq * e;
-                  accDx[q] += wx * wq;
-                  accDy[q] += wy * wq;
-                }
-              }
-            }
-          }
-          for (let q = 0; q < A; q++) {
-            const k = active[q];
-            const m = nObs[a * K + k];
-            const c = nCens[a * K + k];
-            if (!(m > 0) && !(c > 0)) continue;
-            const base = baseOf(q, a, x, y);
-            let pred = base.b;
-            let px = base.gx;
-            let py = base.gy;
-            let vf = sf2;
-            if (opts.useResidual) {
-              const dn = accD[q] + lam;
-              const r = accN[q] / dn;
-              pred += r;
-              px += (accNx[q] - r * accDx[q]) / dn;
-              py += (accNy[q] - r * accDy[q]) / dn;
-              vf = (sf2 * lam) / dn;
-            }
-            let e;
-            let v;
-            let w = 1;
-            if (m > 0) {
-              e = val[a * K + k] - pred;
-              v = sig2[q] / m + vf;
-              errS[q] += e * e - vf;
-              errN[q] += 1;
-              const z = Math.abs(e) / Math.sqrt(v);
-              llSum += -0.5 * Math.min(z * z, 2 * T.zCap * z - T.zCap * T.zCap) - 0.5 * Math.log(v);
-              llN++;
-              if (z > T.zCap) w = T.zCap / z; // leitura aberrante: pesa menos
-            } else {
-              // Não ouviu: só reclama se o campo previsto ali é audível.
-              e = missLevel - pred;
-              if (e >= 0) continue;
-              v = (sig2[q] + vf) * 2;
-              w = Math.min(c, 2) * 0.5;
-            }
-            const wv = w / v;
-            gx -= wv * e * px;
-            gy -= wv * e * py;
-            hxx += wv * px * px;
-            hxy += wv * px * py;
-            hyy += wv * py * py;
-          }
-          // --- movimento ---
-          // Aceleração (caminho suave) nas trincas de quem anda: centradas em a-1, a e a+1.
-          for (let c0 = a - 1; c0 <= a + 1; c0++) {
-            if (c0 < 1 || c0 + 1 >= M) continue;
-            if (trans[c0 - 1].type !== 'walk' || trans[c0].type !== 'walk') continue;
-            const cx = X[c0 - 1][0] - 2 * X[c0][0] + X[c0 + 1][0];
-            const cy = X[c0 - 1][1] - 2 * X[c0][1] + X[c0 + 1][1];
-            const cn = Math.hypot(cx, cy);
-            const lim = 1.5 * T.accSigma;
-            const wr = wAcc * (cn > lim ? lim / cn : 1); // curva fechada é permitida: cauda linear
-            const coef = c0 === a ? -2 : 1;
-            gx += wr * coef * cx;
-            gy += wr * coef * cy;
-            hxx += wr * coef * coef;
-            hyy += wr * coef * coef;
-          }
-          // Molas de primeira ordem com o nó anterior e o seguinte.
-          for (const b of [a - 1, a + 1]) {
-            if (b < 0 || b >= M || varOf[b] === p) continue;
-            const tr = trans[Math.min(a, b)];
-            const dx = x - X[b][0];
-            const dy = y - X[b][1];
-            const d = Math.hypot(dx, dy);
-            let k1 = 0; // rigidez
-            let target = 0;
-            if (tr.type === 'arrive') {
-              k1 = 1 / (T.arriveSigma * tr.dt * T.arriveSigma * tr.dt);
-            } else if (tr.type === 'leave') {
-              k1 = 1 / (T.leaveSigma * tr.dt * T.leaveSigma * tr.dt);
-              target = T.leaveSpeed * tr.dt;
-            } else if (tr.type === 'free') {
-              k1 = (2 * T.freeW) / (T.freeScale * T.freeScale + d * d);
-            }
-            const vmax = T.vMax * tr.dt + 0.3;
-            if (tr.type !== 'free' && d > vmax) {
-              // Ninguém anda tão rápido.
-              k1 = Math.max(k1, 4);
-              target = Math.max(target, vmax);
-            }
-            if (k1 > 0) {
-              if (target > 0 && d > 1e-6) {
-                const f = (k1 * (d - target)) / d;
-                gx += f * dx;
-                gy += f * dy;
-                const ux = dx / d;
-                const uy = dy / d;
-                hxx += k1 * (ux * ux + 0.1);
-                hxy += k1 * ux * uy;
-                hyy += k1 * (uy * uy + 0.1);
-              } else {
-                gx += k1 * dx;
-                gy += k1 * dy;
-                hxx += k1;
-                hyy += k1;
-              }
-            }
-          }
+          gx += gX[a];
+          gy += gY[a];
+          hxx += hXX[a];
+          hxy += hXY[a];
+          hyy += hYY[a];
         }
-        // Passo de Gauss-Newton amortecido e limitado.
-        const mu = T.damping + 0.05 * (hxx + hyy);
+        const mu = T.damping * members[p].length + 0.1 * (hxx + hyy);
         const a11 = hxx + mu;
         const a22 = hyy + mu;
         const det = a11 * a22 - hxy * hxy;
@@ -1359,25 +1513,42 @@ function refineContinuous(model, X0, T, opts) {
           sy *= T.maxStep / sn;
         }
         if (Number.isFinite(sx) && Number.isFinite(sy)) {
-          V[p][0] += sx;
-          V[p][1] += sy;
+          stepX[p] = sx;
+          stepY[p] = sy;
         }
       }
-      // Ruído de cada rádio: erro quadrático de previsão menos a incerteza do campo.
-      let sm = 0;
-      for (let q = 0; q < A; q++) {
-        const v = errN[q] > 3 ? errS[q] / errN[q] : T.sigmaNoise * T.sigmaNoise;
-        sig2[q] = Math.max(4, Math.min(81, v));
-        sm += Math.sqrt(sig2[q]);
+      let next = null;
+      for (let tries = 0; tries < 4; tries++) {
+        for (let a = 0; a < M; a++) X[a] = [prev[a][0] + alpha * stepX[varOf[a]], prev[a][1] + alpha * stepY[varOf[a]]];
+        next = evaluate(h, true);
+        if (next.cost <= cur.cost + 1e-9) break;
+        alpha *= 0.5;
+        next = null;
       }
-      sigmaMean = A ? sm / A : 0;
-      heldOut = llN ? llSum / llN : 0;
+      if (!next) {
+        X = prev;
+        cur = evaluate(h, true);
+        break;
+      }
+      cur = next;
+      alpha = Math.min(T.stepSize, alpha * 1.3);
     }
+    // Ruído de cada rádio: erro quadrático de previsão menos a incerteza do campo.
+    let sm = 0;
+    for (let q = 0; q < A; q++) {
+      const v = cur.stats.errN[q] > 3 ? cur.stats.errS[q] / cur.stats.errN[q] : T.sigmaNoise * T.sigmaNoise;
+      sig2[q] = Math.max(4, Math.min(81, v));
+      sm += Math.sqrt(sig2[q]);
+    }
+    sigmaMean = A ? sm / A : 0;
+    heldOut = cur.stats.ll;
+    trace.push(Number(heldOut.toFixed(3)));
     if (T.metric && opts.metric !== false) {
       X = metricCorrection(model, X, T, opts.info, `${opts.label}${round + 1}`);
       syncVars();
     }
     if (opts.onRound) opts.onRound(round, X);
   }
+  if (opts.info) opts.info[`ll${opts.label}`] = trace;
   return { X: X.map((p) => [p[0], p[1]]), params, heldOut, sigmaMean };
 }

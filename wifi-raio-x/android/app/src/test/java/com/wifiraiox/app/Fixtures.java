@@ -138,7 +138,11 @@ final class Fixtures {
     }
 
     static Bridge bridge(Activity activity, Page page, Pinger pinger, LanScanner lan) {
-        Bridge bridge = new Bridge(activity, page, Runnable::run, pinger, lan);
+        return bridge(activity, page, pinger, lan, null);
+    }
+
+    static Bridge bridge(Activity activity, Page page, Pinger pinger, LanScanner lan, SpeedTester speed) {
+        Bridge bridge = new Bridge(activity, page, Runnable::run, pinger, lan, speed);
         bridge.setPageUrl(WebClient.START_URL);
         return bridge;
     }

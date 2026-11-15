@@ -62,6 +62,7 @@ public final class Bridge implements Emitter {
     private final RttRanger rtt;
     private final Pinger pinger;
     private final LanScanner lan;
+    private final SpeedTester speed;
     private final Haptics haptics;
 
     /** ids de callAsync ainda sem resposta. Cada um é respondido exatamente uma vez. */
@@ -71,11 +72,12 @@ public final class Bridge implements Emitter {
     private String lastStatus;
 
     public Bridge(Activity activity, JsSink sink) {
-        this(activity, sink, null, null, null);
+        this(activity, sink, null, null, null, null);
     }
 
     /** Para os testes: permite trocar a thread da varredura e as partes que falam com a rede. */
-    Bridge(Activity activity, JsSink sink, Executor scanExecutor, Pinger customPinger, LanScanner customLan) {
+    Bridge(Activity activity, JsSink sink, Executor scanExecutor, Pinger customPinger, LanScanner customLan,
+           SpeedTester customSpeed) {
         this.activity = activity;
         this.sink = sink;
         if (scanExecutor == null) {
@@ -95,6 +97,7 @@ public final class Bridge implements Emitter {
         rtt = new RttRanger(activity, main, permissions);
         pinger = customPinger != null ? customPinger : new Pinger(timer);
         lan = customLan != null ? customLan : new LanScanner();
+        speed = customSpeed != null ? customSpeed : new SpeedTester();
         haptics = new Haptics(activity);
     }
 
@@ -153,7 +156,7 @@ public final class Bridge implements Emitter {
 
     private static boolean isAsyncMethod(String method) {
         return "requestPermission".equals(method) || "scan".equals(method) || "rtt".equals(method)
-                || "ping".equals(method) || "lanScan".equals(method);
+                || "ping".equals(method) || "lanScan".equals(method) || "speedTest".equals(method);
     }
 
     /** null = método desconhecido (ou só assíncrono). */
@@ -210,6 +213,9 @@ public final class Bridge implements Emitter {
                 return;
             case "lanScan":
                 startLanScan(id);
+                return;
+            case "speedTest":
+                startSpeedTest(id, args);
                 return;
             default:
                 // Método de resposta imediata chamado pelo caminho assíncrono: atende do mesmo jeito.
@@ -299,6 +305,7 @@ public final class Bridge implements Emitter {
         String op = Json.string(args, "op");
         if ("ping".equals(op)) pinger.cancel();
         else if ("lan".equals(op)) lan.cancel();
+        else if ("speed".equals(op)) speed.cancel();
         else return Json.error(ERR_ARGS + ": op");
         return Json.ok();
     }
@@ -357,6 +364,15 @@ public final class Bridge implements Emitter {
                 emit("lanProgress", o);
             }
         })));
+    }
+
+    private void startSpeedTest(final int id, JSONObject args) {
+        final String mode = args.has("mode") ? Json.string(args, "mode") : SpeedTester.MODE_FULL;
+        if (!SpeedTester.validMode(mode)) {
+            finish(id, Json.error(ERR_ARGS + ": mode"));
+            return;
+        }
+        background(id, () -> finish(id, speed.run(mode, connection.wifiNetwork(), progress -> emit("speed", progress))));
     }
 
     /** Roda na thread da interface; qualquer falha vira a resposta de erro da chamada. */
@@ -426,6 +442,7 @@ public final class Bridge implements Emitter {
         pending.clear();
         pinger.cancel();
         lan.cancel();
+        speed.cancel();
         rssi.unwatch();
         Sys.runOnMain(main, () -> {
             rtt.cancelAll();
@@ -471,6 +488,7 @@ public final class Bridge implements Emitter {
         if (destroyed) return;
         pinger.cancel();
         lan.cancel();
+        speed.cancel();
         permissions.flush();  // quem pediu permissão recebe o Status atual
         rtt.cancelAll();      // medições pendentes saem com ok:false
         for (Integer id : new ArrayList<>(pending)) finish(id, Json.error(ERR_CLOSED));
