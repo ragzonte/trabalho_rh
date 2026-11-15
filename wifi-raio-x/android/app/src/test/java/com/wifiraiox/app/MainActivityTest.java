@@ -374,6 +374,44 @@ public class MainActivityTest extends AllSdks {
     }
 
     @Test
+    public void backAnsweredAfterTheScreenWentToTheBackgroundDoesNotCrash() {
+        // No Android 7 o onBackPressed() do sistema lança IllegalStateException depois de o estado ser
+        // salvo; a resposta da página é assíncrona e pode chegar com o app já fora da tela.
+        MainActivity activity = launch();
+        activity.onBackPressed();
+        android.webkit.ValueCallback<String> answer = shadowOf(activity.webView()).getLastEvaluatedJavascriptCallback();
+        controller.pause().saveInstanceState(new android.os.Bundle()).stop();
+        answer.onReceiveValue("false");
+        assertTrue("sai do mesmo jeito, sem derrubar o app", activity.isFinishing());
+    }
+
+    @Test
+    public void backAnsweredAfterDestroyIsIgnored() {
+        MainActivity activity = launch();
+        activity.onBackPressed();
+        android.webkit.ValueCallback<String> answer = shadowOf(activity.webView()).getLastEvaluatedJavascriptCallback();
+        controller.pause().saveInstanceState(new android.os.Bundle()).stop().destroy();
+        answer.onReceiveValue("false"); // não lança
+        answer.onReceiveValue("true");
+    }
+
+    @Test
+    public void backAnswerFromAPageThatWasReplacedIsIgnored() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        MainActivity activity = launch();
+        activity.onBackPressed();
+        android.webkit.ValueCallback<String> stale = shadowOf(activity.webView()).getLastEvaluatedJavascriptCallback();
+        assertTrue(rendererGone(activity.webView()));
+        Fixtures.idle();
+        // a página nova recebe o próximo "voltar" como o primeiro, e a resposta velha não vale para ela
+        activity.onBackPressed();
+        stale.onReceiveValue("false");
+        assertFalse(activity.isFinishing());
+        shadowOf(activity.webView()).getLastEvaluatedJavascriptCallback().onReceiveValue("true");
+        assertFalse(activity.isFinishing());
+    }
+
+    @Test
     public void secondBackWhileThePageIsStuckLeavesAnyway() {
         MainActivity activity = launch();
         activity.onBackPressed();
@@ -385,27 +423,192 @@ public class MainActivityTest extends AllSdks {
         assertTrue(activity.isFinishing());
     }
 
+    // ------------------------------------------------------------ morte do renderizador (Android 8+)
+
+    private static boolean rendererGone(WebView web) {
+        return shadowOf(web).getWebViewClient().onRenderProcessGone(web, null);
+    }
+
     @Test
-    public void rendererDeathRecreatesInsteadOfCrashing() {
+    public void rendererDeathRebuildsThePageInsteadOfCrashing() {
         if (Build.VERSION.SDK_INT < 26) return;
-        MainActivity.lastRendererGoneAt = -1;
+        int receiversBefore = ourReceivers().size();
+        int callbacksBefore = Fixtures.shadowConnectivity().getNetworkCallbacks().size();
         MainActivity activity = launch();
-        WebViewClient client = shadowOf(activity.webView()).getWebViewClient();
-        assertTrue("true = tratado; false derrubaria o app", client.onRenderProcessGone(activity.webView(), null));
-        assertFalse("a primeira vez recria a tela", activity.isFinishing());
+        WebView first = activity.webView();
+        Bridge old = activity.bridge();
+        old.callAsync(7, "requestPermission", "{}");
+        Fixtures.idle();
+        assertEquals(1, old.pendingCalls());
 
-        // morreu de novo logo depois: recriar entraria em laço, então fecha
-        assertTrue(client.onRenderProcessGone(activity.webView(), null));
+        assertTrue("true = tratado; false derrubaria o app", rendererGone(first));
+        // o WebView morto é destruído na hora, com a ponte dele...
+        assertTrue(shadowOf(first).wasDestroyCalled());
+        assertNull(first.getParent());
+        assertTrue(old.isDestroyed());
+        assertEquals(0, old.pendingCalls());
+        assertNull(activity.webView());
+        assertNull(activity.bridge());
+        assertTrue(activity.pageLost());
+        assertFalse(activity.isFinishing());
+        assertEquals("nada fica registrado enquanto não há página", receiversBefore, ourReceivers().size());
+
+        // ...e a página é refeita logo em seguida, fora do callback, na mesma tela
+        Fixtures.idle();
+        WebView second = activity.webView();
+        assertNotNull(second);
+        assertTrue(second != first);
+        assertFalse(activity.pageLost());
+        assertSame(activity, controller.get());
+        assertFalse(activity.isFinishing());
+        assertEquals(WebClient.START_URL, shadowOf(second).getLastLoadedUrl());
+        assertSame(activity.bridge(), shadowOf(second).getJavascriptInterface("WrxNative"));
+        assertFalse(activity.bridge().isDestroyed());
+        assertNotNull(second.getParent());
+        assertFalse(activity.bridge().call("info", "{}").contains("error"));
+        // a tela está visível e em primeiro plano: a ponte nova já ouve o sistema e avisou o estado
+        assertEquals(receiversBefore + 2, ourReceivers().size());
+        assertEquals(callbacksBefore + 1, Fixtures.shadowConnectivity().getNetworkCallbacks().size());
+        assertTrue(shadowOf(second).wasOnResumeCalled());
+        assertTrue(String.valueOf(shadowOf(second).getLastEvaluatedJavascript()),
+                shadowOf(second).getLastEvaluatedJavascript().contains("\"status\""));
+
+        // um aviso repetido sobre o WebView que já foi descartado não muda nada
+        assertTrue(shadowOf(first).getWebViewClient().onRenderProcessGone(first, null));
+        Fixtures.idle();
+        assertSame(second, activity.webView());
+        assertFalse(activity.isFinishing());
+
+        controller.pause().stop().destroy();
+        assertEquals(receiversBefore, ourReceivers().size());
+        assertEquals(callbacksBefore, Fixtures.shadowConnectivity().getNetworkCallbacks().size());
+    }
+
+    @Test
+    public void aRebuiltPageThatDiesRightAwayClosesTheAppInsteadOfLooping() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        MainActivity activity = launch();
+        assertTrue(rendererGone(activity.webView()));
+        Fixtures.idle();
+        WebView second = activity.webView();
+        assertNotNull(second);
+
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(2, java.util.concurrent.TimeUnit.SECONDS);
+        assertTrue(rendererGone(second));
+        assertTrue("morreu de novo logo depois de refeita: fecha", activity.isFinishing());
+        assertTrue(shadowOf(second).wasDestroyCalled());
+        assertTrue(String.valueOf(org.robolectric.shadows.ShadowToast.getTextOfLatestToast()),
+                org.robolectric.shadows.ShadowToast.getTextOfLatestToast().contains("parou de funcionar"));
+        Fixtures.idle();
+        assertNull("e não tenta refazer", activity.webView());
+        controller.pause().stop().destroy(); // encerrar sem página não lança
+    }
+
+    @Test
+    public void aLaterRendererDeathIsAnotherEpisode() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        MainActivity activity = launch();
+        for (int i = 0; i < 3; i++) {
+            assertTrue(rendererGone(activity.webView()));
+            Fixtures.idle();
+            assertNotNull("refeita na vez " + i, activity.webView());
+            assertFalse(activity.isFinishing());
+            org.robolectric.shadows.ShadowSystemClock.advanceBy(60, java.util.concurrent.TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    public void rendererKilledInBackgroundIsRebuiltOnlyWhenTheUserComesBack() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        int receiversBefore = ourReceivers().size();
+        int callbacksBefore = Fixtures.shadowConnectivity().getNetworkCallbacks().size();
+        MainActivity activity = launch();
+        WebView first = activity.webView();
+        controller.pause().stop(); // o usuário foi para outro app; o Android recupera memória
+
+        assertTrue(rendererGone(first));
+        Fixtures.idle();
+        assertTrue(shadowOf(first).wasDestroyCalled());
+        assertNull("em segundo plano não se cria outro WebView: o sistema o mataria de novo", activity.webView());
+        assertTrue(activity.pageLost());
+        assertFalse(activity.isFinishing());
+        assertEquals(receiversBefore, ourReceivers().size());
+        assertEquals(callbacksBefore, Fixtures.shadowConnectivity().getNetworkCallbacks().size());
+        // enquanto isso, nada do que chega encontra a página: tudo é descartado sem lançar
+        activity.eval("1+1");
+        activity.onAppPageRequested();
+        activity.onPageUrl(WebClient.START_URL);
+        activity.onRequestPermissionsResult(Permissions.REQUEST_LOCATION, new String[0], new int[0]);
+        Fixtures.idle();
+
+        controller.restart().start().resume();
+        WebView second = activity.webView();
+        assertNotNull("ao voltar, a página é refeita", second);
+        assertFalse(activity.pageLost());
+        assertEquals(WebClient.START_URL, shadowOf(second).getLastLoadedUrl());
+        assertEquals(receiversBefore + 2, ourReceivers().size());
+        assertEquals(callbacksBefore + 1, Fixtures.shadowConnectivity().getNetworkCallbacks().size());
+
+        // sair de novo e morrer de novo em poucos segundos não é "laço": ninguém a refez em segundo plano
+        controller.pause().stop();
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(2, java.util.concurrent.TimeUnit.SECONDS);
+        assertTrue(rendererGone(second));
+        assertFalse(activity.isFinishing());
+        controller.restart().start().resume();
+        assertNotNull(activity.webView());
+    }
+
+    @Test
+    public void screenWithoutAPageStillHandlesBackAndDestroy() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        MainActivity activity = launch();
+        controller.pause().stop();
+        assertTrue(rendererGone(activity.webView()));
+        controller.restart().start();
+        // refeita no onStart; mata de novo antes do resume para ficar sem página em primeiro plano
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(60, java.util.concurrent.TimeUnit.SECONDS);
+        WebView rebuilt = activity.webView();
+        controller.resume();
+        assertTrue(rendererGone(rebuilt));
+        assertNull(activity.webView());
+        activity.onBackPressed(); // sem página para perguntar: sai
         assertTrue(activity.isFinishing());
+        controller.pause().stop().destroy();
+    }
 
-        // muito tempo depois é outro episódio: recria de novo
-        MainActivity.lastRendererGoneAt = -1;
-        MainActivity later = launch();
-        org.robolectric.shadows.ShadowSystemClock.advanceBy(60, java.util.concurrent.TimeUnit.SECONDS);
-        assertTrue(shadowOf(later.webView()).getWebViewClient().onRenderProcessGone(later.webView(), null));
-        org.robolectric.shadows.ShadowSystemClock.advanceBy(60, java.util.concurrent.TimeUnit.SECONDS);
-        assertTrue(shadowOf(later.webView()).getWebViewClient().onRenderProcessGone(later.webView(), null));
-        assertFalse(later.isFinishing());
+    @Test
+    public void aFailureWhileHandlingRendererDeathStillCountsAsHandled() {
+        if (Build.VERSION.SDK_INT < 26) return;
+        MainActivity activity = launch();
+        WebClient.Host broken = new WebClient.Host() {
+            @Override
+            public void onPageUrl(String url) {
+            }
+
+            @Override
+            public void onAppPageRequested() {
+                throw new IllegalStateException("falha de propósito");
+            }
+
+            @Override
+            public void openExternal(Uri uri) {
+            }
+
+            @Override
+            public void onForeignMainFrame(Uri uri) {
+            }
+
+            @Override
+            public void onRendererGone(WebView view) {
+                throw new IllegalStateException("falha de propósito");
+            }
+        };
+        WebClientApi26 client = new WebClientApi26(
+                new androidx.webkit.WebViewAssetLoader.Builder().addPathHandler(WebAssets.URL_PATH, new WebAssets(activity)).build(), broken);
+        assertTrue("devolver false (ou lançar) faria o Android encerrar o app", client.onRenderProcessGone(activity.webView(), null));
+        // e uma exceção ao servir um arquivo vira resposta de erro, não queda (roda numa thread do WebView)
+        WebResourceResponse r = client.shouldInterceptRequest(activity.webView(), request(WebClient.START_URL, true));
+        assertEquals(500, r.getStatusCode());
     }
 
     @Test
@@ -537,7 +740,10 @@ public class MainActivityTest extends AllSdks {
         ActivityInfo info = pm.getActivityInfo(new ComponentName(Fixtures.app(), MainActivity.class), 0);
         int needed = ActivityInfo.CONFIG_ORIENTATION | ActivityInfo.CONFIG_SCREEN_SIZE | ActivityInfo.CONFIG_UI_MODE
                 | ActivityInfo.CONFIG_SCREEN_LAYOUT | ActivityInfo.CONFIG_SMALLEST_SCREEN_SIZE | ActivityInfo.CONFIG_KEYBOARD_HIDDEN
-                | ActivityInfo.CONFIG_DENSITY | ActivityInfo.CONFIG_FONT_SCALE | ActivityInfo.CONFIG_LOCALE;
+                | ActivityInfo.CONFIG_DENSITY | ActivityInfo.CONFIG_FONT_SCALE | ActivityInfo.CONFIG_LOCALE
+                | ActivityInfo.CONFIG_MCC | ActivityInfo.CONFIG_MNC // troca de chip / modo avião
+                | ActivityInfo.CONFIG_KEYBOARD | ActivityInfo.CONFIG_NAVIGATION | ActivityInfo.CONFIG_TOUCHSCREEN
+                | ActivityInfo.CONFIG_LAYOUT_DIRECTION;
         assertEquals("girar a tela ou trocar o tema não pode recarregar a página", needed, info.configChanges & needed);
         assertEquals("orientação livre: o mapa 3D ganha com a tela deitada",
                 ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, info.screenOrientation);

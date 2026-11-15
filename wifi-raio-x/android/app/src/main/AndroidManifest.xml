@@ -34,10 +34,12 @@
         android:usesCleartextTraffic="false">
 
         <!-- configChanges: girar a tela, trocar o tema ou o tamanho da fonte não pode recarregar a página
-             (um mapeamento em andamento seria perdido). Sem screenOrientation: o mapa 3D ganha com a tela deitada. -->
+             (um mapeamento em andamento seria perdido). mcc/mnc: trocar de chip ou entrar e sair do modo
+             avião também conta como mudança de configuração em vários aparelhos.
+             Sem screenOrientation: o mapa 3D ganha com a tela deitada. -->
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|touchscreen|uiMode|density|fontScale|locale|layoutDirection"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|touchscreen|uiMode|density|fontScale|fontWeightAdjustment|colorMode|locale|layoutDirection|mcc|mnc"
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize">

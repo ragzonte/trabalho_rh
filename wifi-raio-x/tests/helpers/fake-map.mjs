@@ -205,7 +205,7 @@ export function fakeMap(worldOrId, options = {}) {
     inside = keepLargest(inside, nx, ny);
 
     const conf = new Float32Array(n);
-    const sigma = reachM * 0.8;
+    const sigma = reachM * 0.95;
     for (let c = 0; c < n; c++) {
       if (!inside[c]) continue;
       const d = Number.isFinite(dist[c]) ? dist[c] : reachM * 1.5;

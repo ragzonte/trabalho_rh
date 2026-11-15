@@ -32,13 +32,20 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     private static final long RESTORE_WINDOW_MS = 10_000;
     private static final int MAX_RESTORES = 3;
     private static final long RESTORE_CHECK_MS = 400;
-    private static final long RENDERER_LOOP_MS = 10_000;
-    /** Estático: precisa sobreviver à recriação da tela. */
-    static long lastRendererGoneAt = -1;
+    /** Uma página refeita que morre de novo antes disto está em laço: melhor fechar do que insistir. */
+    static final long RENDERER_LOOP_MS = 10_000;
 
     private final Handler main = new Handler(Looper.getMainLooper());
+    /** Só na thread da interface. null = sem página (WebView ausente, tela encerrada ou renderizador morto). */
     private WebView web;
-    private Bridge bridge;
+    /** volatile: as threads do WebView também leem (pedido da página principal). */
+    private volatile Bridge bridge;
+    private boolean started;
+    private boolean resumed;
+    /** O processo de renderização morreu e a página ainda não foi refeita. */
+    private boolean pageLost;
+    /** elapsedRealtime da última vez em que a página foi refeita; -1 = ainda é a primeira. */
+    private long pageRebuiltAt = -1;
     private boolean backPending;
     private long restoreWindowStart = -RESTORE_WINDOW_MS;
     private int restores;
@@ -46,25 +53,64 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (!buildPage()) closeWithoutWebView();
+    }
+
+    /**
+     * Cria o WebView e a ponte e manda carregar a interface. false = o WebView do sistema não pôde
+     * ser criado (ausente, desativado ou no meio de uma atualização).
+     */
+    private boolean buildPage() {
         boolean debuggable = (getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        final WebView view;
         try {
             // Inspeção remota (chrome://inspect) só em versão de desenvolvimento.
             WebView.setWebContentsDebuggingEnabled(debuggable);
-            web = new WebView(this);
-        } catch (RuntimeException e) {
-            // O WebView do sistema pode estar ausente ou no meio de uma atualização.
+            view = new WebView(this);
+        } catch (RuntimeException | LinkageError e) {
+            // LinkageError: a biblioteca nativa do WebView some por instantes enquanto a loja o atualiza.
             Log.e(TAG, "WebView indisponível", e);
-            Toast.makeText(this, R.string.webview_missing, Toast.LENGTH_LONG).show();
-            finish();
-            return;
+            return false;
         }
-        configure(web, debuggable);
-        bridge = new Bridge(this, this);
-        web.addJavascriptInterface(bridge, Bridge.JS_NAME);
-        setContentView(web, new ViewGroup.LayoutParams(
+        configure(view, debuggable);
+        // A ponte fala só com o WebView em que nasceu: nada dela chega a uma página refeita depois.
+        Bridge created = new Bridge(this, script -> evalOn(view, script));
+        view.addJavascriptInterface(created, Bridge.JS_NAME);
+        web = view;
+        bridge = created;
+        setContentView(view, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        bridge.setPageUrl(WebClient.START_URL);
-        web.loadUrl(WebClient.START_URL);
+        created.setPageUrl(WebClient.START_URL);
+        view.loadUrl(WebClient.START_URL);
+        return true;
+    }
+
+    private void closeWithoutWebView() {
+        Toast.makeText(this, R.string.webview_missing, Toast.LENGTH_LONG).show();
+        finish();
+    }
+
+    /**
+     * Encerra a ponte e o WebView atuais (tela fechando ou renderizador morto). A ponte vai
+     * primeiro: quem esperava resposta ainda a recebe pela página que está de saída.
+     */
+    private void dropPage() {
+        Bridge old = bridge;
+        if (old != null) old.onDestroy();
+        bridge = null;
+        WebView view = web;
+        web = null;
+        backPending = false;
+        main.removeCallbacksAndMessages(null);
+        if (view == null) return;
+        try {
+            if (view.getParent() instanceof ViewGroup) ((ViewGroup) view.getParent()).removeView(view);
+            view.removeJavascriptInterface(Bridge.JS_NAME);
+            view.stopLoading();
+            view.destroy();
+        } catch (RuntimeException e) {
+            Log.w(TAG, "falha ao encerrar o WebView", e);
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled") // a página é a interface do próprio app, servida de dentro do APK
@@ -108,27 +154,39 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     @Override
     protected void onStart() {
         super.onStart();
-        if (web == null) return;
+        started = true;
+        if (pageLost) restorePage(); // o renderizador morreu enquanto o app estava fora da tela
+        else startPage();
+    }
+
+    /** WebView e ponte passam a acompanhar a tela visível. */
+    private void startPage() {
+        Bridge current = bridge;
+        if (web == null || current == null) return;
         web.onResume();
-        bridge.onStart();
+        current.onStart();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (bridge != null) bridge.onResume();
+        resumed = true;
+        Bridge current = bridge;
+        if (current != null) current.onResume();
     }
 
     @Override
     protected void onPause() {
-        if (bridge != null) bridge.onPause();
+        resumed = false; // a ponte não se importa: pausado ainda é visível (tela dividida, diálogo por cima)
         super.onPause();
     }
 
     @Override
     protected void onStop() {
-        if (web != null) {
-            bridge.onStop();
+        started = false;
+        Bridge current = bridge;
+        if (web != null && current != null) {
+            current.onStop();
             web.onPause(); // só aqui: em tela dividida o app pausado continua visível e animando
         }
         super.onStop();
@@ -136,23 +194,16 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
 
     @Override
     protected void onDestroy() {
-        if (bridge != null) bridge.onDestroy();
-        WebView view = web;
-        web = null;
-        main.removeCallbacksAndMessages(null);
-        if (view != null) {
-            if (view.getParent() instanceof ViewGroup) ((ViewGroup) view.getParent()).removeView(view);
-            view.removeJavascriptInterface(Bridge.JS_NAME);
-            view.stopLoading();
-            view.destroy();
-        }
+        pageLost = false;
+        dropPage();
         super.onDestroy();
     }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (bridge != null) bridge.onPermissionsResult(requestCode, permissions, grantResults);
+        Bridge current = bridge;
+        if (current != null) current.onPermissionsResult(requestCode, permissions, grantResults);
     }
 
     /**
@@ -162,14 +213,15 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     @Override
     @SuppressWarnings("deprecation") // mirando o Android 14, onBackPressed continua sendo chamado
     public void onBackPressed() {
-        if (web == null || backPending) {
+        final WebView asked = web;
+        if (asked == null || backPending) {
             leave();
             return;
         }
         backPending = true;
         try {
-            web.evaluateJavascript(Js.BACK_SCRIPT, value -> {
-                if (!backPending) return;
+            asked.evaluateJavascript(Js.BACK_SCRIPT, value -> {
+                if (!backPending || asked != web) return; // resposta atrasada de uma página que já se foi
                 backPending = false;
                 if (!"true".equals(value)) leave();
             });
@@ -178,23 +230,38 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
         }
     }
 
+    /**
+     * Sai do app. Pode rodar bem depois do toque (a resposta da página é assíncrona), quando a tela
+     * já foi para o segundo plano: no Android 7 o onBackPressed() do sistema lança
+     * IllegalStateException se o estado da tela já foi salvo, então nesse caso fecha direto.
+     */
     @SuppressWarnings("deprecation")
     private void leave() {
         backPending = false;
-        super.onBackPressed();
+        if (isFinishing() || isDestroyed()) return;
+        try {
+            super.onBackPressed();
+        } catch (IllegalStateException e) {
+            finish();
+        }
     }
 
     // ------------------------------------------------------------------ JsSink
 
+    /** Executa na página atual, seja ela qual for (a ponte usa evalOn, presa ao próprio WebView). */
     @Override
     public void eval(final String script) {
-        if (Looper.myLooper() == Looper.getMainLooper()) evalNow(script);
-        else main.post(() -> evalNow(script));
+        if (Looper.myLooper() == Looper.getMainLooper()) evalNow(web, script);
+        else main.post(() -> evalNow(web, script));
     }
 
-    private void evalNow(String script) {
-        WebView view = web;
-        if (view == null) return; // página já destruída: descarta
+    private void evalOn(final WebView view, final String script) {
+        if (Looper.myLooper() == Looper.getMainLooper()) evalNow(view, script);
+        else main.post(() -> evalNow(view, script));
+    }
+
+    private void evalNow(WebView view, String script) {
+        if (view == null || view != web) return; // página já destruída ou trocada: descarta
         try {
             view.evaluateJavascript(script, null);
         } catch (RuntimeException ignored) {
@@ -206,13 +273,14 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
 
     @Override
     public void onPageUrl(String url) {
-        if (bridge != null) bridge.setPageUrl(url);
+        Bridge current = bridge;
+        if (current != null) current.setPageUrl(url);
         // Um site externo ocupou a página principal (o conteúdo dele foi barrado, sobrou uma página vazia): volta para o app.
-        if (url != null && (url.startsWith("http:") || url.startsWith("https:")) && !WebClient.isAppUrl(url)) restoreAppPage();
+        if (url != null && (url.startsWith("http:") || url.startsWith("https:")) && !WebClient.isAppUrl(url)) reloadAppPage();
     }
 
     /** Recarrega a interface do app, a menos que isso já tenha acontecido várias vezes em poucos segundos. */
-    private void restoreAppPage() {
+    private void reloadAppPage() {
         if (web == null) return;
         long now = SystemClock.elapsedRealtime();
         if (now - restoreWindowStart > RESTORE_WINDOW_MS) {
@@ -226,7 +294,8 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
 
     @Override
     public void onAppPageRequested() {
-        if (bridge != null) bridge.onNewPage();
+        Bridge current = bridge;
+        if (current != null) current.onNewPage();
     }
 
     @Override
@@ -237,7 +306,7 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
             web.stopLoading(); // se ainda der tempo, a página do app nem chega a sair
             // Se não deu, o WebView ficou numa página de erro com o endereço de fora: confere e recarrega.
             main.postDelayed(() -> {
-                if (web != null && !WebClient.isAppUrl(web.getUrl())) restoreAppPage();
+                if (web != null && !WebClient.isAppUrl(web.getUrl())) reloadAppPage();
             }, RESTORE_CHECK_MS);
         });
     }
@@ -257,20 +326,42 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
         }
     }
 
+    /**
+     * O Android matou (ou o próprio WebView derrubou) o processo que desenha a página. O WebView
+     * fica inutilizável e tem de ser destruído; a página é refeita aqui mesmo, sem recriar a tela,
+     * e só quando o app está visível: refazê-la em segundo plano gastaria a memória que o sistema
+     * acabou de recuperar e ele a mataria de novo.
+     */
     @Override
-    public void onRendererGone() {
+    public void onRendererGone(WebView view) {
+        if (view == null || view != web) return; // WebView que já foi descartado
         long now = SystemClock.elapsedRealtime();
-        boolean again = lastRendererGoneAt >= 0 && now - lastRendererGoneAt < RENDERER_LOOP_MS;
-        lastRendererGoneAt = now;
-        if (again) {
-            // Morreu de novo logo em seguida: recriar entraria em laço. Melhor fechar.
-            Log.e(TAG, "processo do WebView encerrado duas vezes seguidas; fechando");
+        boolean loop = started && pageRebuiltAt >= 0 && now - pageRebuiltAt < RENDERER_LOOP_MS;
+        dropPage();
+        if (isFinishing() || isDestroyed()) return;
+        if (loop) {
+            Log.e(TAG, "a página refeita morreu de novo em seguida; fechando");
+            Toast.makeText(this, R.string.page_crashed, Toast.LENGTH_LONG).show();
             finish();
             return;
         }
-        // O WebView ficou inutilizável; recriar a tela devolve o app funcionando em vez de derrubá-lo.
-        Log.w(TAG, "processo do WebView encerrado pelo sistema; recriando a tela");
-        recreate();
+        Log.w(TAG, "processo do WebView encerrado; a página será refeita");
+        pageLost = true;
+        main.post(this::restorePage); // fora do callback do WebView
+    }
+
+    /** Refaz a página perdida, se a tela estiver visível; senão fica para o próximo onStart. */
+    private void restorePage() {
+        if (!pageLost || !started || isFinishing() || isDestroyed()) return;
+        pageLost = false;
+        if (!buildPage()) {
+            closeWithoutWebView();
+            return;
+        }
+        pageRebuiltAt = SystemClock.elapsedRealtime();
+        startPage();
+        Bridge current = bridge;
+        if (resumed && current != null) current.onResume();
     }
 
     Bridge bridge() {
@@ -279,5 +370,9 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
 
     WebView webView() {
         return web;
+    }
+
+    boolean pageLost() {
+        return pageLost;
     }
 }

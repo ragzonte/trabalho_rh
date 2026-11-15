@@ -8,7 +8,7 @@
 //   signalHeight01(dbm)                   dBm -> 0..1: altura do "relevo de sinal"
 //   roomPalette(tema) / roomRgb(i, tema)  tons suaves para os ambientes
 //   assignRoomColors(...)                 escolhe o tom de cada ambiente sem repetir entre vizinhos
-//   confWeight(conf) / fadeRgb(...)       quanto da cor sobrevive onde o mapa é um palpite
+//   confWeight(conf) / fadeRgb(...)       quanto da cor sobrevive onde o mapa é um palpite (smoothInside alisa a confiança)
 //   timeRgb(t, tema)                      cor do caminho, do começo ao fim
 //   paintFloorCells(...)                  RGBA por célula de um andar (o que vira textura ou imagem)
 //   hexToRgb · rgbToHex · mixRgb · relLuminance · contrastRatio
@@ -83,8 +83,8 @@ const THEMES = {
     accentInk: '#04202e',
     grid: '#93a0b8',
     gridAlpha: 0.11,
-    neutral: '#1b2437', // piso onde não se sabe (pouca confiança)
-    hatch: '#2e3b55',
+    neutral: '#1e283d', // piso onde não se sabe (pouca confiança)
+    hatch: '#4d5e80',
     slab: '#0c1322', // lateral e fundo da laje
     glass: '#a9c1e6',
     edge: '#dbe7fb', // aresta de cima do contorno
@@ -102,7 +102,7 @@ const THEMES = {
     path: ['#7dd3fc', '#a78bfa', '#f472b6'],
     pathCasing: '#070b15',
     signal: ['#34d399', '#a3e635', '#fbbf24', '#fb923c', '#f87171'],
-    rooms: ['#3f72b0', '#2e8c80', '#7767c2', '#a9588c', '#b08a4a', '#3d93b5', '#8a5fae', '#b46a58', '#5f7fa6', '#4f9a6e'],
+    rooms: ['#345d91', '#28706e', '#5e559f', '#834977', '#886e46', '#337595', '#6c4f90', '#8b5750', '#4c668a', '#407a60'],
   },
   light: {
     name: 'light',
@@ -118,8 +118,8 @@ const THEMES = {
     accentInk: '#ffffff',
     grid: '#5b6779',
     gridAlpha: 0.13,
-    neutral: '#e3e8ef',
-    hatch: '#c3ccd9',
+    neutral: '#e4e9f0',
+    hatch: '#a7b3c6',
     slab: '#b9c4d3',
     glass: '#64748b',
     edge: '#334155',
@@ -316,8 +316,8 @@ function link(adj, a, b, count) {
 // ---------------------------------------------------------------------------
 
 /** Abaixo disto a célula é só o tom neutro; acima de CONF_FULL a cor aparece inteira. */
-export const CONF_NONE = 0.08;
-export const CONF_FULL = 0.6;
+export const CONF_NONE = 0.15;
+export const CONF_FULL = 0.75;
 
 /** Quanto da cor aparece (0..1) para uma confiança 0..1. A mesma curva está no shader do piso. */
 export function confWeight(conf) {
@@ -326,9 +326,48 @@ export function confWeight(conf) {
   return v * v * (3 - 2 * v);
 }
 
-/** Cor esmaecida para o neutro conforme a confiança. */
+/** Quanto da cor ainda sobra no tom "sem confiança": o lugar fica lavado, mas não perde a pista da cor. */
+export const CONF_TINT = 0.25;
+
+/** Cor esmaecida conforme a confiança: de um tom lavado (quase neutro) até a cor cheia. */
 export function fadeRgb(rgb, conf, theme, out = [0, 0, 0]) {
-  return mixRgb(themeRgb(theme).neutral, rgb, confWeight(conf), out);
+  const neutral = themeRgb(theme).neutral;
+  const k = CONF_TINT + (1 - CONF_TINT) * confWeight(conf);
+  return mixRgb(neutral, rgb, k, out);
+}
+
+/**
+ * Suaviza um campo por célula dentro da área (média 3 x 3, `passes` vezes).
+ * A confiança muda devagar no espaço: sem isto a borda do "não sei" sairia em degraus de célula.
+ */
+export function smoothInside(values, inside, nx, ny, passes = 2) {
+  let cur = Float32Array.from(values);
+  for (let pass = 0; pass < passes; pass++) {
+    const next = new Float32Array(cur.length);
+    for (let iy = 0; iy < ny; iy++) {
+      for (let ix = 0; ix < nx; ix++) {
+        const c = iy * nx + ix;
+        if (!inside[c]) continue;
+        let sum = 0;
+        let count = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const jy = iy + dy;
+          if (jy < 0 || jy >= ny) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const jx = ix + dx;
+            if (jx < 0 || jx >= nx) continue;
+            const j = jy * nx + jx;
+            if (!inside[j]) continue;
+            sum += cur[j];
+            count++;
+          }
+        }
+        next[c] = sum / count;
+      }
+    }
+    cur = next;
+  }
+  return cur;
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +419,19 @@ export function paintFloorCells(model, floorIndex, options = {}) {
   const tmp = [0, 0, 0];
   const filled = new Uint8Array(n);
 
+  // confiança de cada célula: a do mapa e, com mapa de calor, também a do campo de sinal
+  const confRaw = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    if (!floor.inside[i]) continue;
+    let conf = floor.conf ? floor.conf[i] : 1;
+    if (heat) {
+      if (Number.isNaN(heat.dbm[i])) conf = 0;
+      else if (heat.conf && heat.conf[i] < conf) conf = heat.conf[i];
+    }
+    confRaw[i] = conf >= 0 ? Math.min(1, conf) : 0;
+  }
+  const confSmooth = smoothInside(confRaw, floor.inside, nx, ny, 2);
+
   for (let i = 0; i < n; i++) {
     const o = i * 4;
     if (!floor.inside[i]) {
@@ -389,28 +441,20 @@ export function paintFloorCells(model, floorIndex, options = {}) {
       out[o + 3] = 0;
       continue;
     }
-    let conf = floor.conf[i];
+    const conf = confSmooth[i];
     if (heat) {
-      const dbm = heat.dbm[i];
-      if (Number.isNaN(dbm)) {
-        copy(c.neutral, tmp);
-        conf = 0;
-      } else {
-        signalRgb(dbm, theme, tmp);
-        const hc = heat.conf ? heat.conf[i] : 1;
-        if (hc < conf) conf = hc;
-      }
+      if (Number.isNaN(heat.dbm[i])) copy(c.neutral, tmp);
+      else signalRgb(heat.dbm[i], theme, tmp);
     } else if (rooms && floor.room[i] >= 0) {
       copy(palette[slots[floor.room[i]] % palette.length], tmp);
     } else {
       copy(c.neutral, tmp);
     }
-    if (!(conf >= 0)) conf = 0;
     if (bake) {
-      mixRgb(c.neutral, tmp, confWeight(conf), tmp);
+      fadeRgb(tmp, conf, theme, tmp);
       out[o + 3] = 255;
     } else {
-      out[o + 3] = Math.round(clamp01(conf) * 255);
+      out[o + 3] = Math.round(conf * 255);
     }
     out[o] = tmp[0];
     out[o + 1] = tmp[1];

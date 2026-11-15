@@ -22,7 +22,7 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-/** watchRssi: amostras periódicas só com a tela em primeiro plano. */
+/** watchRssi: amostras periódicas só com a tela visível (entre onStart e onStop). */
 public class RssiWatcherTest extends AllSdks {
 
     private Fixtures.Page page;
@@ -48,7 +48,7 @@ public class RssiWatcherTest extends AllSdks {
 
     @Test
     public void sampleShapeMatchesTheContract() throws Exception {
-        bridge.onResume();
+        bridge.onStart();
         assertEquals("{\"ok\":true}", bridge.call("watchRssi", "{\"intervalMs\":1000}"));
         advance(0);
         JSONObject s = page.lastEvent("rssi");
@@ -67,19 +67,19 @@ public class RssiWatcherTest extends AllSdks {
     }
 
     @Test
-    public void emitsAtTheRequestedIntervalWhileResumed() throws Exception {
-        bridge.onResume();
+    public void emitsAtTheRequestedIntervalWhileVisible() throws Exception {
+        bridge.onStart();
         bridge.call("watchRssi", "{\"intervalMs\":500}");
         advance(0);
         assertEquals("a primeira amostra sai logo", 1, page.events("rssi").size());
         advance(1600);
         assertEquals(4, page.events("rssi").size());
 
-        bridge.onPause();
+        bridge.onStop();
         advance(3000);
-        assertEquals("pausado: nada", 4, page.events("rssi").size());
+        assertEquals("fora da tela: nada", 4, page.events("rssi").size());
 
-        bridge.onResume();
+        bridge.onStart();
         advance(0);
         assertEquals("voltou: retoma", 5, page.events("rssi").size());
 
@@ -89,15 +89,31 @@ public class RssiWatcherTest extends AllSdks {
     }
 
     @Test
-    public void watchWhilePausedStartsOnResume() throws Exception {
+    public void watchWhileHiddenStartsWhenVisible() throws Exception {
         bridge.call("watchRssi", "{}");
         advance(5000);
         assertTrue(page.events("rssi").isEmpty());
-        bridge.onResume();
+        bridge.onStart();
         advance(0);
         assertEquals(1, page.events("rssi").size());
         advance(1000); // intervalo padrão: 1 s
         assertEquals(2, page.events("rssi").size());
+    }
+
+    @Test
+    public void pausedButStillVisibleKeepsSampling() throws Exception {
+        // Tela dividida (Android 7 a 9) ou diálogo de permissão por cima: pausado, mas à vista.
+        bridge.onStart();
+        bridge.onResume();
+        bridge.call("watchRssi", "{\"intervalMs\":500}");
+        advance(0);
+        assertEquals(1, page.events("rssi").size());
+        // onPause não chega à ponte: só o onStop para o relógio
+        advance(1000);
+        assertEquals("o gráfico de sinal não congela", 3, page.events("rssi").size());
+        bridge.onStop();
+        advance(3000);
+        assertEquals(3, page.events("rssi").size());
     }
 
     @Test
@@ -108,7 +124,7 @@ public class RssiWatcherTest extends AllSdks {
         assertEquals(1000, RssiWatcher.clampInterval(Double.NaN));
         assertEquals(750, RssiWatcher.clampInterval(750.2));
 
-        bridge.onResume();
+        bridge.onStart();
         bridge.call("watchRssi", "{\"intervalMs\":1}");
         advance(0);
         advance(1000);
@@ -118,7 +134,7 @@ public class RssiWatcherTest extends AllSdks {
     @Test
     public void noSignalNoSample() throws Exception {
         Fixtures.wifi().setConnectionInfo(org.robolectric.shadows.ShadowWifiInfo.newInstance());
-        bridge.onResume();
+        bridge.onStart();
         bridge.call("watchRssi", "{\"intervalMs\":250}");
         advance(2000);
         assertTrue(page.events("rssi").isEmpty());
@@ -127,7 +143,7 @@ public class RssiWatcherTest extends AllSdks {
     @Test
     public void redactedBssidBecomesEmptyString() throws Exception {
         Fixtures.wifi().setConnectionInfo(Fixtures.wifiInfo(null, "02:00:00:00:00:00", -60, 100, 2412));
-        bridge.onResume();
+        bridge.onStart();
         bridge.call("watchRssi", "{}");
         advance(0);
         JSONObject s = page.lastEvent("rssi");
@@ -137,7 +153,7 @@ public class RssiWatcherTest extends AllSdks {
 
     @Test
     public void destroyStopsTheTimer() throws Exception {
-        bridge.onResume();
+        bridge.onStart();
         bridge.call("watchRssi", "{\"intervalMs\":250}");
         advance(0);
         bridge.onDestroy();
@@ -154,19 +170,19 @@ public class RssiWatcherTest extends AllSdks {
     }
 
     @Test
-    public void watcherAloneFollowsWatchAndResumeFlags() {
+    public void watcherAloneFollowsWatchAndVisibleFlags() {
         final int[] count = {0};
         RssiWatcher w = new RssiWatcher(new Handler(Looper.getMainLooper()), JSONObject::new, s -> count[0]++);
         w.watch(300);
-        w.setResumed(true);
+        w.setVisible(true);
         advance(650);
         assertEquals(3, count[0]);
         assertTrue(w.ticking());
-        w.setResumed(false);
+        w.setVisible(false);
         assertFalse(w.ticking());
         advance(2000);
         assertEquals(3, count[0]);
-        w.setResumed(true);
+        w.setVisible(true);
         w.unwatch();
         assertFalse(w.ticking());
     }

@@ -17,7 +17,7 @@
 // O modo e a ordem escolhidos ficam guardados (prefs 'redes'); filtros e busca valem até fechar o app.
 // A lógica de filtrar, ordenar e agrupar está em ui/networks-logic.js (pura, com testes).
 
-import { h, mount as render, patch, patchList, toast, fmtDbm, fmtAgo, fmtMbps, fmtMeters, fmtBand, fmtWidth, plural } from '../dom.js';
+import { h, mount as render, patch, patchList, toast, fmtNum, fmtDbm, fmtAgo, fmtMbps, fmtMeters, fmtBand, fmtWidth, plural, THIN } from '../dom.js';
 import { icon } from '../icons.js';
 import { signalBars, badge, bandBadge, securityBadge, standardBadge, chip, segmented, button, iconButton, emptyState, skeletonList, sectionHeader, throttleTip } from '../components.js';
 import { signalLevel } from '../../core/signal.js';
@@ -136,9 +136,20 @@ function pickInsight(list) {
   return list.find((i) => i.severity === 'critical' || i.severity === 'warning') || list.find((i) => i.severity === 'good') || list[0];
 }
 
+/**
+ * Velocidade do link, recebendo e enviando, com a unidade escrita uma vez só ("↓ 287 ↑ 258 Mb/s",
+ * "↓ 1,1 ↑ 0,96 Gb/s"): cabe numa linha mesmo em 360 px.
+ */
 function speedText(view) {
   if (isNum(view.downMbps) && isNum(view.upMbps)) {
-    return [h('span.net-conn__arrow', { 'aria-label': 'recebendo' }, '↓'), `${fmtMbps(view.downMbps).replace(/\s?Mb\/s$/, '')}`, h('span.net-conn__arrow', { 'aria-label': 'enviando' }, '↑'), fmtMbps(view.upMbps)];
+    const giga = Math.max(view.downMbps, view.upMbps) >= 995;
+    const num = (mbps) => (giga ? fmtNum(mbps / 1000, mbps < 995 ? 2 : 1) : fmtNum(mbps, mbps < 9.95 ? 1 : 0));
+    return [
+      h('span.net-conn__arrow', { role: 'img', 'aria-label': 'recebendo' }, '↓'),
+      num(view.downMbps),
+      h('span.net-conn__arrow', { role: 'img', 'aria-label': 'enviando' }, '↑'),
+      `${num(view.upMbps)}${THIN}${giga ? 'Gb/s' : 'Mb/s'}`,
+    ];
   }
   if (isNum(view.linkMbps)) return fmtMbps(view.linkMbps);
   return null;
@@ -176,7 +187,7 @@ function connectionCard(view, { insight, extraInsights, history, now, onOpen, on
     { key: 'conn-on' },
     h(
       'button.net-conn__main',
-      { type: 'button', 'aria-label': `Detalhes da rede conectada`, disabled: !view.ap, onClick: onOpen },
+      { type: 'button', disabled: !view.ap, onClick: onOpen },
       h(
         'span.net-conn__head',
         null,
@@ -506,6 +517,13 @@ export async function mount(root, ctx) {
     el.summary.hidden = loading || nothing;
     el.controls.hidden = loading || nothing;
     el.caption.hidden = loading || nothing;
+    if (loading || nothing) {
+      // nada para listar: a lista some de verdade (não fica uma lista velha escondida)
+      lastRows = { rows: [], total: 0, filtered: false };
+      patchList(el.list, [], { key: (row) => row.key, create: () => null });
+      patch(el.summary);
+      patch(el.caption);
+    }
     if (loading) {
       if (!el.loading.firstChild) render(el.loading, sectionHeader('Procurando redes por perto…'), skeletonList(6));
       el.list.hidden = true;

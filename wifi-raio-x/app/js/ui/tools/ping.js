@@ -304,9 +304,10 @@ function createPingChart(host, onSelect) {
 
   const offs = [
     listen(canvas, 'pointerdown', (ev) => pick(seqAt(ev.clientX))),
-    listen(canvas, 'pointermove', (ev) => {
-      if (ev.pointerType === 'mouse' && ev.buttons === 0) return;
-      pick(seqAt(ev.clientX));
+    // dedo arrastando ou mouse passando por cima: a medida debaixo do ponteiro é a escolhida
+    listen(canvas, 'pointermove', (ev) => pick(seqAt(ev.clientX))),
+    listen(canvas, 'pointerleave', (ev) => {
+      if (ev.pointerType === 'mouse') pick(null);
     }),
     listen(canvas, 'keydown', (ev) => {
       if (!model) return;
@@ -669,7 +670,12 @@ export async function mount(root, ctx) {
   }
 
   function readout(run) {
-    if (selectedSeq === null) return h('span.muted', null, run.replies.size ? 'Toque no gráfico para ver cada medida.' : 'Cada barra é uma resposta: quanto mais baixa, mais rápida.');
+    if (selectedSeq === null) {
+      if (run.replies.size) return h('span.muted', null, 'Toque no gráfico para ver cada medida.');
+      // vários pacotes já saíram e nada voltou: melhor dizer do que deixar o gráfico vazio sem explicação
+      if (run.state === 'running' && progressOf(run) >= 5) return h('span.muted', null, 'Nenhuma resposta até agora. O destino pode estar demorando ou não responder a este teste.');
+      return h('span.muted', null, 'Cada barra é uma resposta: quanto mais baixa, mais rápida.');
+    }
     const r = run.replies.get(selectedSeq);
     const head = `Medida ${selectedSeq} de ${run.count}: `;
     if (r && r.ok) return h('span', null, head, h('strong.num', null, fmtMs(r.ms)));

@@ -357,7 +357,7 @@ export async function mount(root, ctx) {
               h(
                 'figcaption.exp-preview__head',
                 null,
-                h('span.exp-preview__name', null, wrap ? 'Prévia do relatório' : file.name),
+                h('span', { class: ['exp-preview__name', !wrap && 'mono'] }, wrap ? 'Prévia do relatório' : file.name),
                 h('span.exp-preview__size', null, formatBytes(size)),
                 iconButton('maximize', 'Ver a prévia inteira', openFull, { class: 'icon-btn icon-btn--muted exp-preview__open' }),
               ),

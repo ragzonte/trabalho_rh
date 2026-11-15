@@ -285,8 +285,8 @@ const bandText = (band) => (isText(band) ? `${String(band).replace('.', ',')} GH
 
 function mbpsText(mbps) {
   if (!isNum(mbps) || mbps < 0) return '?';
-  if (mbps >= 995) return `${numText(mbps / 1000, 1)} Gb/s`;
-  return `${numText(mbps, mbps < 9.95 ? 1 : 0)} Mb/s`;
+  if (mbps >= 995) return `${numText(mbps / 1000, 1).replace(/,0$/, '')} Gb/s`;
+  return `${numText(mbps, mbps < 9.95 ? 1 : 0).replace(/,0$/, '')} Mb/s`;
 }
 
 function agoText(ms) {
@@ -363,8 +363,8 @@ export function buildReport(data) {
     if (isNum(c.rssi)) out.push(`Sinal: ${dbmText(c.rssi)} (${levelWord(c.rssi)})`);
     if (isNum(c.linkSpeed) && c.linkSpeed > 0) out.push(`Velocidade entre o celular e o roteador: ${mbpsText(c.linkSpeed)}`);
     if (isNum(c.distanceM)) out.push(`Distância do roteador: cerca de ${metersText(c.distanceM)} (estimativa pelo sinal)`);
-    const tech = [isText(c.standard) ? para(c.standard) : '', isText(c.security) ? `segurança ${para(c.security)}` : ''].filter(Boolean).join(' · ');
-    if (tech) out.push(`Padrão: ${tech}`);
+    if (isText(c.standard)) out.push(`Padrão: ${para(c.standard)}`);
+    if (isText(c.security)) out.push(`Segurança: ${para(c.security)}`);
   }
 
   // --- melhor rede

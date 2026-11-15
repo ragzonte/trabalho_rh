@@ -38,6 +38,7 @@ const CONTROL_CHARS = new RegExp(`[\\u0000-\\u001f\\u007f-\\u009f${String.fromCh
 
 /** Limites das faixas de qualidade (os mesmos de core/signal.js signalLevel), do melhor para o pior. */
 export const QUALITY_ZONES = Object.freeze([
+  Object.freeze({ min: -50, token: '--sig-1', word: 'excelente' }),
   Object.freeze({ min: -60, token: '--sig-1', word: 'ótimo' }),
   Object.freeze({ min: -67, token: '--sig-2', word: 'bom' }),
   Object.freeze({ min: -75, token: '--sig-3', word: 'regular' }),
@@ -210,6 +211,24 @@ export function ellipsize(text, maxWidth, measure) {
     else hi = mid - 1;
   }
   return lo > 0 ? `${chars.slice(0, lo).join('').trimEnd()}…` : '…';
+}
+
+/**
+ * Como ellipsize(), mas para rótulos "nome · detalhe" (ex.: "Casa · 5 GHz"): quem encolhe é o
+ * nome; o detalhe depois do primeiro " · " fica inteiro, porque é ele que distingue duas linhas
+ * com o mesmo nome. Se nem assim couber, corta o texto todo.
+ */
+export function ellipsizeLabel(text, maxWidth, measure) {
+  const clean = String(text ?? '').replace(CONTROL_CHARS, '·');
+  if (measure(clean) <= maxWidth) return clean;
+  const cut = clean.indexOf(' · ');
+  if (cut > 0) {
+    const tail = clean.slice(cut);
+    const room = maxWidth - measure(tail);
+    // sobra lugar para pelo menos uns 3 caracteres do nome mais as reticências
+    if (room >= measure('MMM…')) return `${ellipsize(clean.slice(0, cut), room, measure)}${tail}`;
+  }
+  return ellipsize(clean, maxWidth, measure);
 }
 
 // ---------------------------------------------------------------------------
@@ -531,7 +550,7 @@ export function createTimeChart(container, options = {}) {
         ctx.globalAlpha = end.s.muted ? 0.85 : 1;
         ctx.font = font(12, end.s.emphasis ? 700 : 500);
         ctx.fillStyle = end.s.muted ? colors.label : end.color;
-        ctx.fillText(ellipsize(end.s.label, labelWidth, (t) => ctx.measureText(t).width), x, y + 0.5);
+        ctx.fillText(ellipsizeLabel(end.s.label, labelWidth, (t) => ctx.measureText(t).width), x, y + 0.5);
       });
       ctx.globalAlpha = 1;
     }
@@ -588,7 +607,7 @@ export function createTimeChart(container, options = {}) {
     const nameMax = Math.min(120, plot.w * 0.42);
     const lines = shown.map((row) => ({
       row,
-      name: multi && row.s.label ? ellipsize(row.s.label, nameMax, (text) => ctx.measureText(text).width) : '',
+      name: multi && row.s.label ? ellipsizeLabel(row.s.label, nameMax, (text) => ctx.measureText(text).width) : '',
       value: `${MINUS}${Math.abs(Math.round(row.v))}${THIN}dBm`,
     }));
     let boxW = ctx.measureText(title).width;

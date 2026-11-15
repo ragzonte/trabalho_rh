@@ -135,8 +135,8 @@ final class LanScanner {
                 pool.execute(() -> {
                     try {
                         probe(job, target, host, gatewayKnown);
-                    } catch (Exception ignored) {
-                        // um endereço problemático não interrompe os outros
+                    } catch (Throwable ignored) {
+                        // um endereço problemático não interrompe os outros (nem derruba o app)
                     } finally {
                         job.step();
                     }

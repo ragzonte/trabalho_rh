@@ -41,11 +41,14 @@ const DEFAULTS = {
   isoK: 5, // vizinhos por impressão digital no grafo
   isoExclude: 3, // não liga por impressão digital quem está a até 3 varreduras no tempo (já há a barra)
   isoKappa: 1.4, // a ordem por impressão digital é ruidosa: o "mais parecido" raramente é o mais próximo
+  rankCap: 1.5, // teto de distância pela ordem das impressões digitais (em espaçamentos por raiz do posto)
+  capLaw: 0,
+  capOnly: 0,
   isoLen0: 0.8, // sem calibração possível (modo de 30 s): comprimento por posto, em unidades do grafo
   isoLenStep: 0.3,
   isoFree: 2.5, // ponte entre pontos marcados seguidos quando o tempo não informa nada
   // --- escala sem tempo útil (modo de 30 s) ---
-  freeScale0: 1.3, // fator a priori entre a unidade do grafo e metros
+  freeScale0: 1.25, // fator a priori entre a unidade do grafo e metros
   physP0: -40, // sinal a 1 m de um roteador doméstico em 2,4 GHz (dBm), a priori largo
   physBandDrop: 6, // 5 GHz chega ~6 dB mais fraco (perda de espaço livre)
   physN: 2.2, // expoente quase de espaço livre de quem está no mesmo cômodo do roteador
@@ -483,7 +486,28 @@ function coarseEmbedding(model, T, info) {
   if (info) info.unit = Number.isNaN(unit) ? null : Number(unit.toFixed(2));
   const lenOf = new Float64Array(kMax);
   for (let r = 0; r < kMax; r++) lenOf[r] = Number.isNaN(unit) ? T.isoLen0 + T.isoLenStep * r : T.isoKappa * unit * Math.sqrt(r + 1);
-  return isomapEmbed(model, neigh, kMax, lenOf, T);
+  // Teto pela ordem das impressões digitais: quem aparece cedo na lista de parecidos de um nó não pode
+  // estar longe dele, por mais comprido que seja o caminho pelo grafo (que só passa por onde se anda:
+  // numa casa de cômodos em fila o caminho dá a volta pelas portas e o mapa sairia desenrolado).
+  let cap = null;
+  if (T.rankCap > 0 && !Number.isNaN(unit)) {
+    const rank = new Float64Array(M * M);
+    const order = [];
+    for (let a = 0; a < M; a++) {
+      order.length = 0;
+      for (let b = 0; b < M; b++) if (b !== a) order.push(b);
+      order.sort((p, q) => D2[a * M + p] - D2[a * M + q] || p - q);
+      for (let r = 0; r < order.length; r++) rank[a * M + order[r]] = r;
+    }
+    cap = new Float64Array(M * M);
+    for (let a = 0; a < M; a++) {
+      for (let b = a + 1; b < M; b++) {
+        const r = 0.5 * (rank[a * M + b] + rank[b * M + a]);
+        cap[a * M + b] = cap[b * M + a] = T.rankCap * unit * Math.sqrt(r + 1);
+      }
+    }
+  }
+  return isomapEmbed(model, neigh, kMax, lenOf, T, cap);
 }
 
 // Pares de nós com distância esperada conhecida pelo tempo: um passo de quem anda e pulos entre
@@ -508,7 +532,7 @@ function calibrationPairs(model, T) {
   return pairs;
 }
 
-function isomapEmbed(model, neigh, kMax, lenOf, T) {
+function isomapEmbed(model, neigh, kMax, lenOf, T, cap) {
   const { M, nodes, trans } = model;
   const G = new Float64Array(M * M).fill(Infinity);
   const link = (a, b, len) => {
@@ -555,7 +579,8 @@ function isomapEmbed(model, neigh, kMax, lenOf, T) {
   for (let i = 0; i < M * M; i++) if (G[i] !== Infinity && G[i] > far) far = G[i];
   const E2 = new Float64Array(M * M);
   for (let i = 0; i < M * M; i++) {
-    const g = G[i] === Infinity ? far : G[i];
+    let g = G[i] === Infinity ? far : G[i];
+    if (cap && cap[i] > 0 && cap[i] < g) g = cap[i];
     E2[i] = g * g;
   }
   const { vectors, values } = topEigen(doubleCentre(E2, M), M, 2);

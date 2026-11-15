@@ -135,7 +135,7 @@ test('abre em 2,4 GHz: três faixas, gráfico desenhado, recomendação e rankin
     for (const r of rows) {
       assert.ok(r.score >= 0 && r.score <= 100, `nota do canal ${r.channel}: ${r.score}`);
       assert.equal(r.bar, r.score);
-      assert.match(r.facts, /^(Livre|Tranquilo|Disputado|Cheio|Congestionado) · /);
+      assert.match(r.facts, /^(Livre|Tranquilo|Disputado|Cheio|Congestionado)\s· \S/);
     }
     assert.deepEqual(rows.filter((r) => r.tags.includes('Seu canal')).map((r) => r.channel), [6]);
     assert.equal(rows.filter((r) => r.tags.includes('Melhor') || r.tags.includes('Recomendado')).length, 1);

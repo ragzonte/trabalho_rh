@@ -444,12 +444,20 @@ export async function mount(root, ctx) {
       summaryCard(devices),
       session.state === 'error' ? banner({ key: 'err', tone: 'critical', title: 'A última busca falhou', text: 'A lista abaixo é da busca anterior.', actions: [{ label: 'Tentar de novo', onClick: scan }] }) : null,
       devices.length
-        ? h('div.card.card--flush.list', { key: 'list', role: 'list', 'aria-label': 'Aparelhos encontrados' }, devices.map(deviceRow))
+        ? h('div.card.card--flush.list', { key: 'list', role: 'group', 'aria-label': 'Aparelhos encontrados' }, devices.map(deviceRow))
         : scanning
           ? h('div', { key: 'skeleton' }, skeletonList(4))
           : session.state === 'idle'
             ? h('div', { key: 'skeleton' }, skeletonList(4))
-            : banner({ key: 'none', tone: 'neutral', icon: 'devices', title: 'Nenhum aparelho respondeu', text: 'A busca foi interrompida antes de alguém responder. Toque em “Procurar de novo”.' }),
+            : session.state === 'cancelled'
+              ? banner({ key: 'none', tone: 'neutral', icon: 'devices', title: 'Nenhum aparelho respondeu ainda', text: 'A busca foi interrompida antes de alguém responder. Toque em “Procurar de novo”.' })
+              : banner({
+                  key: 'none',
+                  tone: 'neutral',
+                  icon: 'devices',
+                  title: 'Nenhum aparelho encontrado',
+                  text: 'A busca não achou ninguém nesta rede. Acontece em redes que não são de casa (com endereços públicos) ou que isolam os aparelhos uns dos outros.',
+                }),
       onlyUs
         ? banner({
             key: 'isolated',

@@ -48,8 +48,6 @@ const TUNING = {
   maxNodes: 300, // acima disto as varreduras são raleadas (o custo cresce com o quadrado)
   // --- movimento ---
   walkSpeed: 0.45, // m/s: corda média entre varreduras de quem anda devagar olhando o celular (com quinas e paradas)
-  sizeGamma: 0, // expoente: velocidade de corda ~ (raio do mapa / sizeRef)^gamma
-  sizeRef: 2.8, // m
   vmax: 0.9, // m/s: quase ninguém anda mais que isto fazendo o levantamento dentro de casa
   motionW: 4, // peso da barreira de velocidade máxima
   motionSlack: 0.5, // m: folga da barreira
@@ -73,7 +71,7 @@ const TUNING = {
   sigma: 4, // dB: desvio de uma leitura em torno do campo (ruído + desvanecimento + corpo)
   missW: 0.5, // peso de um "não ouvido" como observação
   outer: 4, // rodadas (modelo físico -> posições -> escala)
-  inner: 40, // iterações de L-BFGS por rodada
+  inner: 30, // iterações de L-BFGS por rodada
   registerRounds: 2, // rodadas em que os andares são reencaixados como corpos rígidos
   // --- modelo físico dos roteadores ---
   fitMissW: 0.3,
@@ -84,12 +82,14 @@ const TUNING = {
   farPenalty: 0.02,
   // --- escala pela física ---
   physW: 0.15, // peso (em log) da física quando há passo cronometrado
+  physWMulti: 0.5, // idem, com três ou mais roteadores fortes (escritório, casa com malha)
   physN: 2.2, // expoente em visada quase direta
   physQ: 0.85, // quantil: as leituras mais fortes para a distância são as com menos parede
   physP0: -43, // dBm a 1 m em 2,4 GHz: ~20 dBm de EIRP, 40 dB de espaço livre, ~18 dB do celular, alguma obstrução
   physMinPeak: -52, // só rádios que chegam fortes (roteador dentro da área levantada)
   physDamp: 0.7,
   sparsePhysW: 0.65, // sem relógio: peso (em log) da física contra o raio típico de uma casa
+  sparsePhysWMulti: 0.65, // idem, com três ou mais roteadores fortes
   // --- saída ---
   shiftGain: 0.5, // fração do atraso das leituras compensada ao longo do caminho
   probeStep: 0.5, // m: passo da sonda de curvatura (incerteza de cada ponto)
@@ -167,10 +167,6 @@ function solveInner(survey, options) {
   progress(0.95, 'finalizando');
   const out = finish(survey, scans, kept, data, X, solved, P);
   out.debug = dbg;
-  if (P.keepData) {
-    dbg.data = data;
-    dbg.X = X;
-  }
   progress(1, 'pronto');
   return out;
 }
@@ -207,7 +203,6 @@ function cleanScans(survey) {
       floor: floorOf(s),
       still: !!s.still,
       spot: s.spot == null ? null : s.spot,
-      label: typeof s.label === 'string' && s.label.trim() ? s.label.trim() : null,
       readings,
       meanAge: ageN ? ageSum / ageN : SWEEP_MID_S,
     });
@@ -255,7 +250,7 @@ function prepare(scans, apMeta) {
   const idRadio = new Map();
   for (const s of scans) {
     for (const r of s.readings) {
-      if (idRadio.has(r.id)) continue;
+      if (!r.fresh || idRadio.has(r.id)) continue; // um BSSID que só aparece repetido não entra
       const meta = apMeta[r.id] || {};
       const freq = Number(meta.freq) || r.freq || 2437;
       const band = freq < 3000 ? 0 : freq < 5925 ? 1 : 2;
@@ -390,13 +385,7 @@ function stepScale(data, X, P) {
     st += e.texp;
   }
   if (st < 40 || !(sd > 0)) return null; // menos de ~40 s cronometrados: sem régua
-  const k = (P.walkSpeed * st) / sd;
-  if (!(P.sizeGamma > 0)) return k;
-  // Em casa pequena o caminho tem mais quinas e paradas por metro (corda mais curta); em área grande
-  // anda-se mais reto. A velocidade de corda esperada cresce devagar com o raio do mapa (ponto fixo fechado).
-  const r0 = radiusOf(X);
-  if (!(r0 > 0)) return k;
-  return Math.pow(k * Math.pow(r0 / P.sizeRef, P.sizeGamma), 1 / (1 - P.sizeGamma));
+  return (P.walkSpeed * st) / sd;
 }
 
 // Raio quadrático médio dos nós em torno do centro.
@@ -793,7 +782,7 @@ function registerFloors(data, X) {
 
 // Com as posições atuais dos nós, ajusta a posição (busca em grade + refino) e a curva de cada
 // aparelho. É a "média" dos campos: dá a forma global (as paredes e a sombra ficam para o resíduo).
-function fitApModels(data, X, P, prev) {
+function fitApModels(data, X, P, prev, searchGrid = true) {
   const { M, R, F, cnt, NF, radios, floorLevel, floorList } = data;
   const fi = data.floorIdx;
   let cx = 0;
@@ -921,9 +910,10 @@ function fitApModels(data, X, P, prev) {
     };
     // Num prédio o vizinho pode estar um andar acima ou abaixo: testa também essa altura.
     const dzs = NF > 1 ? [P.apDz] : [P.apDz, FLOOR_HEIGHT];
-    for (const dz of dzs) for (const c of cand) tryAt(c[0], c[1], dz);
     const before = prev && prev.devs.find((d) => d.device === dev);
     if (before) tryAt(before.ax, before.ay, before.dz);
+    // A grade inteira só nas primeiras rodadas; depois basta refinar a partir da posição anterior.
+    if (searchGrid || !before) for (const dz of dzs) for (const c of cand) tryAt(c[0], c[1], dz);
     // Refino local (busca em padrão, com teto de passos).
     let step = 0.1 * rad;
     for (let moves = 0; moves < 30 && step > 0.08; moves++) {
@@ -975,6 +965,7 @@ function physScale(data, X, model, P) {
   const n = P.physN;
   const ks = [];
   const vals = [];
+  const strong = new Set(); // aparelhos fortes: cada um é uma régua independente
   for (let k = 0; k < R; k++) {
     vals.length = 0;
     let peak = -Infinity;
@@ -991,10 +982,11 @@ function physScale(data, X, model, P) {
     // Em 5 GHz a perda no espaço livre a 1 m é ~6,5 dB maior que em 2,4 GHz.
     const nominal = P.physP0 - (data.radios[k].band === 0 ? 0 : 6.5);
     ks.push(Math.pow(10, (nominal - p0) / (10 * n)));
+    strong.add(data.radios[k].device);
   }
   if (!ks.length) return null;
   ks.sort((p, q) => p - q);
-  return ks[ks.length >> 1];
+  return { k: ks[ks.length >> 1], devices: strong.size };
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,7 +1196,7 @@ function refineFields(data, X0, P, dbg, progress) {
     const spacing = rms * Math.sqrt((2 * Math.PI * NF) / M);
     const h = Math.max(walking ? P.hMinWalking : P.hMin, Math.min(P.hMax, P.hRel * spacing));
     hopScale = Math.max(0.3, P.orderHop * rms * Math.SQRT2 * Math.sqrt(Math.PI / M));
-    model = fitApModels(data, X, P, model);
+    model = fitApModels(data, X, P, model, o < 2);
     inv2h2 = 1 / (2 * h * h);
     (dbg.h ||= []).push(h);
     const r = lbfgs(cost, X, P.inner, P.deadline);
@@ -1212,28 +1204,31 @@ function refineFields(data, X0, P, dbg, progress) {
     hist.push(r.f);
     // Escala: passo de quem anda (quando há) combinado com a física; sem nenhum dos dois, mantém o tamanho.
     const kStep = stepScale(data, X, P);
-    let kPhys = P.physW > 0 ? physScale(data, X, model, P) : null;
-    if (kPhys != null) kPhys = Math.max(0.4, Math.min(2.5, kPhys));
+    const phys = P.physW > 0 ? physScale(data, X, model, P) : null;
+    const kPhys = phys ? Math.max(0.4, Math.min(2.5, phys.k)) : null;
+    // Com vários roteadores dentro da área a física é bem mais confiável (várias réguas independentes).
+    const wPhys = phys && phys.devices >= 3 ? P.physWMulti : P.physW;
     let kk;
-    if (kStep != null && kPhys != null) kk = Math.pow(kStep, 1 - P.physW) * Math.pow(kPhys, P.physW);
+    if (kStep != null && kPhys != null) kk = Math.pow(kStep, 1 - wPhys) * Math.pow(kPhys, wPhys);
     else if (kStep != null) kk = kStep;
     else if (kPhys != null) kk = Math.pow(kPhys, P.physDamp); // amortecido: a posição do roteador ainda está mudando
     else kk = radius0 / Math.max(1e-9, radiusOf(X));
-    if (Number.isFinite(kk) && kk > 0) for (let q = 0; q < X.length; q++) X[q] *= kk;
+    if (Number.isFinite(kk) && kk > 0) rescale(X, model, kk);
     dbg.scale = { kStep, kPhys, kk };
     progress(0.25 + (0.65 * (o + 1)) / P.outer, 'ajustando os campos de sinal');
   }
-  model = fitApModels(data, X, P, model);
+  model = fitApModels(data, X, P, model, false);
   let physOnly = false;
   if (sparse && P.physW > 0) {
     // Sem relógio, a física é a única régua: aplica o que faltou do último ajuste (os passos acima são amortecidos).
-    const kPhys = physScale(data, X, model, P);
-    if (kPhys != null) {
+    const phys = physScale(data, X, model, P);
+    if (phys) {
       // A física erra por dezenas de por cento; o tamanho típico de uma casa (prior largo) segura os exageros.
       const kPrior = P.defaultRadius / Math.max(1e-9, radiusOf(X));
-      const kk = Math.pow(Math.max(0.5, Math.min(2, kPhys)), P.sparsePhysW) * Math.pow(kPrior, 1 - P.sparsePhysW);
-      for (let q = 0; q < X.length; q++) X[q] *= kk;
-      model = fitApModels(data, X, P, model);
+      const w = phys.devices >= 3 ? Math.max(P.sparsePhysW, P.sparsePhysWMulti) : P.sparsePhysW;
+      const kk = Math.pow(Math.max(0.5, Math.min(2, phys.k)), w) * Math.pow(kPrior, 1 - w);
+      rescale(X, model, kk);
+      model = fitApModels(data, X, P, model, false);
       physOnly = true;
     }
   }
@@ -1293,6 +1288,20 @@ function refineFields(data, X0, P, dbg, progress) {
   data.scaleSource = sparse ? (physOnly ? 'fisica' : 'nenhuma') : 'passo';
   dbg.costHist = hist;
   return X;
+}
+
+// Muda a escala do mapa inteiro (em torno da origem): nós e roteadores juntos.
+function rescale(X, model, k) {
+  for (let q = 0; q < X.length; q++) X[q] *= k;
+  if (!model) return;
+  for (let q = 0; q < model.ax.length; q++) {
+    model.ax[q] *= k;
+    model.ay[q] *= k;
+  }
+  for (const d of model.devs) {
+    d.ax *= k;
+    d.ay *= k;
+  }
 }
 
 // L-BFGS compacto com busca linear por recuo (Armijo). `fn(x, g)` devolve o custo e preenche o gradiente.
@@ -1588,6 +1597,3 @@ function finish(survey, scans, kept, data, X, solved, P) {
   else if (solved) scaleConf = data.scaleSource === 'passo' ? 0.5 : data.scaleSource === 'fisica' ? 0.25 : 0.05;
   return { points, aps, scaleConf };
 }
-
-// (desenvolvimento) acesso às etapas internas para os diagnósticos; sai na versão final.
-export const _dev = { TUNING, cleanScans, chooseScans, prepare, motionEdges, embedUnfolded, stepScale, fitApModels, refineFields, finish, lbfgs };

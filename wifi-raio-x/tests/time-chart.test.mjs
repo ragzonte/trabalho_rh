@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MINUS, THIN } from '../app/js/ui/dom.js';
-import { QUALITY_ZONES, yRange, ageLabel, timeTicks, splitSegments, valueAt, spreadLabels, ellipsize } from '../app/js/ui/charts/time-chart.js';
+import { QUALITY_ZONES, yRange, ageLabel, timeTicks, splitSegments, valueAt, spreadLabels, ellipsize, ellipsizeLabel } from '../app/js/ui/charts/time-chart.js';
 import { sparklineGeometry, SPARK_DEFAULTS } from '../app/js/ui/charts/sparkline.js';
 import { signalLevel } from '../app/js/core/signal.js';
 
@@ -43,15 +43,14 @@ test('yRange: cobre os valores com folga, em dezenas, com pelo menos 30 dB de al
 });
 
 test('as faixas de qualidade do gráfico são as mesmas de signalLevel()', () => {
-  assert.equal(QUALITY_ZONES.length, 5);
+  assert.equal(QUALITY_ZONES.length, 6);
   assert.equal(QUALITY_ZONES[QUALITY_ZONES.length - 1].min, -Infinity);
   // logo acima e logo abaixo de cada limite a palavra muda como no resto do app
   const wordAt = (rssi) => QUALITY_ZONES.find((z) => rssi >= z.min).word;
-  for (const rssi of [-55, -60, -61, -67, -68, -75, -76, -82, -83, -95]) {
-    const expected = signalLevel(rssi).label.toLowerCase().replace('excelente', 'ótimo');
-    assert.equal(wordAt(rssi), expected, `${rssi} dBm`);
+  for (const rssi of [-30, -50, -51, -55, -60, -61, -67, -68, -75, -76, -82, -83, -95]) {
+    assert.equal(wordAt(rssi), signalLevel(rssi).label.toLowerCase(), `${rssi} dBm`);
   }
-  assert.deepEqual(QUALITY_ZONES.map((z) => z.token), ['--sig-1', '--sig-2', '--sig-3', '--sig-4', '--sig-5']);
+  assert.deepEqual(QUALITY_ZONES.map((z) => z.token), ['--sig-1', '--sig-1', '--sig-2', '--sig-3', '--sig-4', '--sig-5']);
 });
 
 // ---------------------------------------------------------------------------
@@ -68,7 +67,7 @@ test('ageLabel: agora, segundos e minutos inteiros, com o sinal de menos tipogr�
 });
 
 test('timeTicks: da direita para a esquerda, no maior detalhe que cabe', () => {
-  const two = timeTicks(120_000, 250);
+  const two = timeTicks(120_000, 220);
   assert.deepEqual(two.map((t) => t.ageMs), [0, 60_000, 120_000]);
   assert.deepEqual(two.map((t) => t.label), ['agora', `${MINUS}1${THIN}min`, `${MINUS}2${THIN}min`]);
   // mais largura, mais marcas
@@ -200,6 +199,23 @@ test('ellipsize: corta com reticências sem partir emoji e limpa caracteres de c
   assert.equal(ellipsize('<img src=x onerror=alert(1)>', 1000, measure), '<img src=x onerror=alert(1)>');
 });
 
+test('ellipsizeLabel: em "nome · detalhe" quem encolhe é o nome; o detalhe que desempata fica inteiro', () => {
+  const measure = (text) => Array.from(text).length * 10;
+  assert.equal(ellipsizeLabel('Casa · 5 GHz', 200, measure), 'Casa · 5 GHz');
+  assert.equal(ellipsizeLabel('WIFI_DA_FAMILIA_ALBUQUERQUE · 5 GHz', 200, measure), 'WIFI_DA_FAM… · 5 GHz');
+  assert.equal(ellipsizeLabel('WIFI_DA_FAMILIA_ALBUQUERQUE · 2,4 GHz', 200, measure), 'WIFI_DA_F… · 2,4 GHz');
+  // dois rótulos que só diferem no fim continuam diferentes depois do corte
+  const a = ellipsizeLabel('🚀 WIFI_DA_FAMILIA_ALBUQUERQUE · 2,4 GHz', 180, measure);
+  const b = ellipsizeLabel('🚀 WIFI_DA_FAMILIA_ALBUQUERQUE · 5 GHz', 180, measure);
+  assert.notEqual(a, b);
+  assert.ok(measure(a) <= 180 && measure(b) <= 180);
+  // sem lugar para o nome: corta o texto todo, como ellipsize
+  assert.equal(ellipsizeLabel('Casa · 2,4 GHz · canal 11 · aa:bb', 120, measure), ellipsize('Casa · 2,4 GHz · canal 11 · aa:bb', 120, measure));
+  // sem detalhe: igual a ellipsize
+  assert.equal(ellipsizeLabel('VIVOFIBRA-8F3C-5G', 100, measure), 'VIVOFIBRA…');
+  assert.equal(ellipsizeLabel(null, 100, measure), '');
+});
+
 // ---------------------------------------------------------------------------
 // Minigráfico
 // ---------------------------------------------------------------------------
@@ -241,7 +257,7 @@ test('sparklineGeometry: escala de sensibilidade fixa (o chuvisco de uma rede pa
   // 2 dB numa escala de 24 dB ocupam 1/12 da altura útil
   assert.ok(swing > 0.5 && swing < 2, `variação de ${swing}px`);
   // uma queda de 30 dB usa a altura toda
-  const drop = sparklineGeometry(pts([-100, -50], [-50, -65], [0, -80]), { now: T0, width: 64, height: 18 });
+  const drop = sparklineGeometry(pts([-100, -50], [-50, -65], [0, -80]), { now: T0, width: 64, height: 18, gapMs: 60_000 });
   const dys = numbers(drop.d).filter((_, i) => i % 2 === 1);
   assert.equal(Math.min(...dys), SPARK_DEFAULTS.pad);
   assert.equal(Math.max(...dys), 18 - SPARK_DEFAULTS.pad);

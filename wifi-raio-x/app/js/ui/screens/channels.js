@@ -27,6 +27,8 @@ import { blocksOf, interferenceFactor, overlapMHz } from '../../core/channels.js
 import { createChannelGraph } from '../charts/channel-graph.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
+/** Separador de fatos numa linha: espaço que não quebra + ponto + espaço comum. */
+const DOT = '\u00a0· ';
 
 // ---------------------------------------------------------------------------
 // Lógica pura
@@ -277,15 +279,20 @@ export function interferers(aps, rating, exclude) {
   return out.sort((a, b) => b.inBlockDbm - a.inBlockDbm || (a.ap.bssid < b.ap.bssid ? -1 : 1));
 }
 
-/** "2 redes no canal · 5 ao lado" (ou "nenhuma rede por perto"). */
-export function crowdText(rating) {
+/** Quem está num canal, em pedaços curtos: ["2 redes no canal", "5 ao lado"] (ou ["nenhuma rede por perto"]). */
+export function crowdParts(rating) {
   const co = rating.coChannel || 0;
   const ov = rating.overlapping || 0;
-  if (!co && !ov) return rating.interferenceDbm === null ? 'nenhuma rede por perto' : 'só sobras de canais distantes';
+  if (!co && !ov) return [rating.interferenceDbm === null ? 'nenhuma rede por perto' : 'só sobras de canais distantes'];
   const parts = [];
   if (co) parts.push(`${plural(co, 'rede', 'redes')} no canal`);
   if (ov) parts.push(co ? `${fmtNum(ov)} ao lado` : `${plural(ov, 'rede', 'redes')} ao lado`);
-  return parts.join(' · ');
+  return parts;
+}
+
+/** "2 redes no canal · 5 ao lado" (ou "nenhuma rede por perto"). */
+export function crowdText(rating) {
+  return crowdParts(rating).join(' · ');
 }
 
 /** A nota de um canal em frases simples (uma por motivo). */
@@ -681,6 +688,7 @@ export async function mount(root, ctx) {
           { key: 'legend' },
           h('span.ch-legend__item', null, h('i.ch-swatch.ch-swatch--own'), 'Sua rede'),
           h('span.ch-legend__item', null, h('i.ch-swatch'), 'Vizinhos'),
+          last.bandAps.some((item) => item.stale) ? h('span.ch-legend__item', null, h('i.ch-swatch.ch-swatch--stale'), 'Não ouvida na última busca') : null,
           h('span.ch-legend__hint', null, 'Toque numa rede do gráfico para ver quem é.'),
         ),
       );
@@ -753,7 +761,7 @@ export async function mount(root, ctx) {
         h('span.ch-own__label', null, `${several ? 'Roteador analisado' : 'Seu roteador'} · canal ${own.channel} · ${fmtWidth(own.widthMHz)}`),
         h('span.ch-own__name', null, ssidLabel(own.ssid)),
       ),
-      button(several ? 'Trocar' : 'Não é esta?', { variant: 'quiet', small: true, onClick: () => openPicker() }),
+      button('Trocar', { variant: 'quiet', small: true, 'aria-label': several ? 'Trocar o roteador analisado' : 'Trocar a rede marcada como sua', onClick: () => openPicker() }),
     );
   }
 
@@ -934,7 +942,7 @@ export async function mount(root, ctx) {
     if (row.isBest) tags.push(badge(row.isCurrent ? 'Melhor' : 'Recomendado', { tone: 'good', icon: 'check' }));
     if (r.dfs) tags.push(badge('DFS', { tone: 'warning' }));
     if (r.psc) tags.push(badge('PSC', { outline: true }));
-    const facts = [crowdText(r)];
+    const facts = crowdParts(r);
     if (r.busiest) facts.push(`mais forte ${fmtDbm(r.busiest.rssi)}`);
     if (isNum(r.utilization)) facts.push(`ocupação ${fmtPct(r.utilization * 100)}`);
     return h(
@@ -952,7 +960,8 @@ export async function mount(root, ctx) {
         null,
         tags.length ? h('span.ch-rank__tags', null, tags) : null,
         h('span.ch-rank__top', null, scoreBar(r.score), h('span.ch-rank__score', null, fmtNum(Math.round(r.score)))),
-        h('span.ch-rank__facts', null, h('strong', null, level.label), ` · ${facts.join(' · ')}`),
+        // o separador vai colado (espaço que não quebra) no fato anterior: uma linha nunca começa com "·"
+        h('span.ch-rank__facts', null, h('strong', null, level.label), `${DOT}${facts.join(DOT)}`),
       ),
       h('span.ch-rank__chev', null, icon('chevron-right', { size: 20 })),
     );

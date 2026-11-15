@@ -17,12 +17,29 @@ final class ScanMapper {
 
     /** Teto defensivo: uma lista maior que isto só pode ser erro do aparelho e travaria a página. */
     static final int MAX_APS = 400;
+    /** Folga para um carimbo "no futuro" (o relógio é o mesmo; só entra o tempo de leitura). */
+    static final long FUTURE_SLACK_MS = 5_000;
+    /** Uma varredura completa leva poucos segundos: o resultado mais novo de uma lista nova não passa disto. */
+    static final long FRESH_NEWEST_MAX_MS = 60_000;
 
     private ScanMapper() {}
 
+    /** Lista lida do cache, sem saber quando foi a última varredura nova. */
     static JSONArray list(List<ScanResult> results, long nowElapsedMs) {
+        return list(results, nowElapsedMs, false, Math.max(0, nowElapsedMs));
+    }
+
+    /**
+     * @param fresh          a lista é de uma varredura que acabou de terminar
+     * @param sinceFreshMs   há quanto tempo chegou a última lista nova (usado só quando os carimbos
+     *                       de tempo do aparelho não merecem confiança, ver stampsLookRight)
+     */
+    static JSONArray list(List<ScanResult> results, long nowElapsedMs, boolean fresh, long sinceFreshMs) {
         JSONArray out = new JSONArray();
         if (results == null) return out;
+        // Sem carimbos confiáveis a idade é a da lista: zero se acabou de ser varrida, senão a da última nova.
+        boolean stamped = stampsLookRight(results, nowElapsedMs, fresh);
+        long listAge = fresh ? 0 : Math.max(0, sinceFreshMs);
         List<ScanResult> src = results;
         if (src.size() > MAX_APS) {
             // ficam as mais fortes
@@ -33,7 +50,8 @@ final class ScanMapper {
         }
         for (ScanResult r : src) {
             try {
-                JSONObject ap = one(r, nowElapsedMs);
+                if (r == null) continue;
+                JSONObject ap = build(r, stamped ? ageMs(r.timestamp, nowElapsedMs) : listAge);
                 if (ap != null) out.put(ap);
             } catch (RuntimeException | JSONException e) {
                 // um resultado estragado não pode derrubar a lista inteira
@@ -43,7 +61,11 @@ final class ScanMapper {
     }
 
     static JSONObject one(ScanResult r, long nowElapsedMs) throws JSONException {
-        if (r == null || r.BSSID == null || r.BSSID.isEmpty()) return null;
+        return r == null ? null : build(r, ageMs(r.timestamp, nowElapsedMs));
+    }
+
+    private static JSONObject build(ScanResult r, long ageMs) throws JSONException {
+        if (r.BSSID == null || r.BSSID.isEmpty()) return null;
         JSONObject o = new JSONObject();
         o.put("bssid", r.BSSID.toLowerCase(Locale.ROOT));
         o.put("ssid", ssid(r));
@@ -53,7 +75,7 @@ final class ScanMapper {
         o.put("centerFreq0", r.centerFreq0);
         o.put("centerFreq1", r.centerFreq1);
         o.put("capabilities", r.capabilities == null ? "" : r.capabilities);
-        o.put("ageMs", ageMs(r.timestamp, nowElapsedMs));
+        o.put("ageMs", ageMs);
         o.put("rttResponder", r.is80211mcResponder());
         o.put("passpoint", r.isPasspointNetwork());
         text(o, "venueName", r.venueName);
@@ -61,6 +83,32 @@ final class ScanMapper {
         if (Build.VERSION.SDK_INT >= 30) Api30.scanExtras(r, o);
         if (Build.VERSION.SDK_INT >= 33) Api33.scanExtras(r, o);
         return o;
+    }
+
+    /**
+     * ScanResult.timestamp deveria ser "microssegundos desde o boot do celular", mas há aparelhos
+     * (kernel antigo, driver sem o ajuste do Android) em que ele é o relógio interno de cada
+     * roteador, e outros que o deixam zerado. As idades sairiam aleatórias: redes ouvidas agora
+     * pareceriam ter horas e sumiriam do mapeamento. Dá para perceber sem adivinhar:
+     *   - um carimbo adiantado em relação ao relógio do celular não pode ser tempo desde o boot;
+     *   - nenhum resultado carimbado;
+     *   - numa varredura nova, o resultado mais recente tem de ter sido ouvido agora há pouco.
+     */
+    static boolean stampsLookRight(List<ScanResult> results, long nowElapsedMs, boolean fresh) {
+        long now = Math.max(0, nowElapsedMs);
+        long newest = -1;
+        boolean any = false;
+        for (ScanResult r : results) {
+            if (r == null) continue;
+            any = true;
+            if (r.timestamp <= 0) continue;
+            long heardAt = r.timestamp / 1000;
+            if (heardAt > now + FUTURE_SLACK_MS) return false;
+            newest = Math.max(newest, heardAt);
+        }
+        if (!any) return true; // lista vazia: nada a decidir
+        if (newest < 0) return false;
+        return !(fresh && now - newest > FRESH_NEWEST_MAX_MS);
     }
 
     /** Nome da rede: "" quando oculta. */

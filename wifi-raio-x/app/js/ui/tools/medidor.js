@@ -509,6 +509,7 @@ const SCAN_WINDOW_MS = 120_000;
 const LIVE_TAU_MS = 1200; // suavização para a tendência e os avisos
 const LIVE_STALE_MS = 4000; // sem leitura ao vivo por este tempo: o valor na tela é velho
 const RENDER_MIN_MS = 160;
+const RTT_TIMEOUT_MS = 12_000;
 const MAX_SAMPLES = 4000;
 const PREFS_KEY = 'meter';
 
@@ -754,6 +755,8 @@ export async function mount(root, ctx) {
       sound = false;
       beeper.suspend();
     }
+    // caçando, a pessoa anda olhando a tela sem tocar nela: o celular não pode apagar
+    bridge.keepAwake(hunt).catch(() => {});
     scheduleTick();
     renderNow();
   }
@@ -793,6 +796,13 @@ export async function mount(root, ctx) {
     const previous = rtt.status === 'done' ? rtt : null;
     rtt = { status: 'running', previous };
     renderNow();
+    // a medição leva 1 a 2 s; se o celular nunca responder, a tela não fica presa em "medindo"
+    setTimeout(() => {
+      if (!alive || token !== rttToken || rtt.status !== 'running') return;
+      rttToken += 1;
+      rtt = { status: 'error', previous };
+      renderNow();
+    }, RTT_TIMEOUT_MS);
     try {
       const res = await bridge.rtt([t.bssid]);
       if (!alive || token !== rttToken) return;
@@ -870,12 +880,18 @@ export async function mount(root, ctx) {
       { key: 'target' },
       h(
         'button.row.row--tappable.mtr-target__row',
-        { type: 'button', 'aria-label': `Medindo ${t.ssid || 'rede oculta'}. Trocar de rede`, onClick: openPicker },
+        { type: 'button', 'aria-label': `Medindo ${t.ssid || (t.ap || t.live ? 'rede oculta' : 'uma rede fora de alcance')}. Trocar de rede`, onClick: openPicker },
         h('span.row__lead', null, signalBars(current ? current.rssi : null)),
         h(
           'span.row__body',
           null,
-          h('span.row__title', null, ssidLabel(t.ssid), t.ap && t.ap.favorite ? icon('star-filled', { size: 16, label: 'Minha rede', class: 'accent' }) : null),
+          h(
+            'span.row__title',
+            null,
+            // um BSSID que o app nunca ouviu não tem nome para mostrar (e não é "rede oculta")
+            t.ap || t.live ? ssidLabel(t.ssid) : h('span.ssid.ssid--hidden', null, 'Rede fora de alcance'),
+            t.ap && t.ap.favorite ? icon('star-filled', { size: 16, label: 'Minha rede', class: 'accent' }) : null,
+          ),
           h('span.row__sub.row__sub--clip', null, sub),
         ),
         h('span.row__trail', null, h('span.accent.strong', null, 'Trocar'), icon('chevron-right', { size: 20 })),
@@ -908,7 +924,7 @@ export async function mount(root, ctx) {
       'div.mtr-stat',
       { key: label },
       h('span.mtr-stat__label', null, mark ? h('i.mtr-peakmark', { 'aria-hidden': 'true' }) : null, label),
-      h('span.mtr-stat__value', null, isNum(value) ? fmtDbm(value, { unit: false }) : '—', isNum(value) ? h('span.mtr-stat__unit', null, 'dBm') : null),
+      h('span', { class: ['mtr-stat__value', !isNum(value) && 'mtr-stat__value--empty'] }, isNum(value) ? fmtDbm(value, { unit: false }) : '—', isNum(value) ? h('span.mtr-stat__unit', null, 'dBm') : null),
       h('span.mtr-stat__extra', null, extra || '\u00a0'),
     );
   }
@@ -940,7 +956,8 @@ export async function mount(root, ctx) {
   }
 
   function trendNow(t, now) {
-    if (t.live) return trendOf(samples, { now, windowMs: 5000, minDeltaDb: 2, minPoints: 4 });
+    // 2,5 dB em 5 s: abaixo disso é o vaivém normal do sinal com o celular parado
+    if (t.live) return trendOf(samples, { now, windowMs: 5000, minDeltaDb: 2.5, minPoints: 4 });
     const windowMs = Math.max(20_000, scanIntervalMs() * 3.5);
     return trendOf(samples, { now, windowMs, minDeltaDb: 3, minPoints: 2, minSpanMs: 1000 });
   }
@@ -970,9 +987,11 @@ export async function mount(root, ctx) {
             : !fresh
               ? banner({ key: 'b', tone: 'warning', text: t.live ? 'Sem leituras novas do sinal. Confira se o Wi-Fi continua conectado.' : 'Esta rede não foi ouvida nas últimas buscas. Chegue mais perto ou escolha outra.' })
               : null,
+          // para leitores de tela só a mudança de direção é anunciada (os números mudam o tempo todo)
+          h('span.sr-only', { key: 'say', role: 'status', 'aria-live': 'polite' }, trend.state === 'unknown' ? '' : look.title),
           h(
             'div.mtr-trend',
-            { key: 'trend', dataset: { trend: trend.state }, role: 'status', 'aria-live': 'polite' },
+            { key: 'trend', dataset: { trend: trend.state } },
             h('span.mtr-trend__icon', null, icon(look.icon, { size: 28 })),
             h('div.mtr-trend__body', null, h('strong.mtr-trend__title', null, look.title), h('span.mtr-trend__text', null, fresh || !t.has ? trendText(trend, t) : 'Aguardando o sinal voltar.')),
           ),
@@ -1176,7 +1195,15 @@ export async function mount(root, ctx) {
     store.subscribe((s) => s.loop.intervalMs, requestRender),
     store.subscribe((s) => s.loop.throttled, requestRender),
     store.subscribe((s) => s.info, requestRender),
-    store.subscribe((s) => s.backend, refresh),
+    store.subscribe(
+      (s) => s.backend,
+      () => {
+        refresh();
+        // quem passou a responder (celular ou demonstração) começa em 1 leitura por segundo:
+        // pede de novo o ritmo rápido, depois de o app terminar a troca
+        setTimeout(() => alive && bridge.watchRssi(250).catch(() => {}), 400);
+      },
+    ),
   ];
 
   // idade das leituras, "há X s" e a tendência andam mesmo sem leitura nova
@@ -1190,10 +1217,21 @@ export async function mount(root, ctx) {
     if (document.hidden) {
       clearTimeout(tickTimer);
       tickTimer = null;
-    } else {
-      scheduleTick();
-      requestRender();
+      beeper.suspend();
+      return;
     }
+    requestRender();
+    if (!sound) {
+      scheduleTick();
+      return;
+    }
+    // de volta ao app: o áudio precisa ser religado (alguns aparelhos pedem outro toque)
+    beeper.enable().then((ok) => {
+      if (!alive) return;
+      if (!ok) sound = false;
+      scheduleTick();
+      renderNow();
+    });
   };
   document.addEventListener('visibilitychange', onVisible);
 
@@ -1215,6 +1253,7 @@ export async function mount(root, ctx) {
       document.removeEventListener('visibilitychange', onVisible);
       rttToken += 1;
       if (picker) picker.close();
+      if (hunt) bridge.keepAwake(false).catch(() => {});
       beeper.close();
       gauge.destroy();
       chart.destroy();

@@ -245,6 +245,50 @@ test('latência: sem Wi-Fi conectado o roteador fica indisponível e a escolha p
   });
 });
 
+test('latência: respostas atrasadas, repetidas e de outro destino (como o celular de verdade manda)', T, async () => {
+  await withApp(env, { params: SLOW, route: '/ferramentas/ping' }, async ({ page }) => {
+    await page.waitForSelector('.tb-setup');
+    const base = await page.evaluate(() => window.__wrx.app.store.get().connection.gateway.replace(/\.\d+$/, ''));
+    const host = `${base}.254`; // ninguém neste endereço: o simulador fica em silêncio até o fim
+    await page.click('.tb-setup .chip:has-text("Outro")');
+    await page.fill('.tb-host input', host);
+    await page.click('.seg__opt:has-text("Longo")');
+    // dois toques seguidos contam como um só
+    await page.evaluate(() => {
+      const go = document.querySelector('.tb-setup .btn--primary');
+      go.click();
+      go.click();
+    });
+    await pingState(page, /\d+ de 50/);
+    assert.equal(await opsPending(page), 1, 'uma medição só');
+    const label = () => page.getAttribute('.tb-chart__canvas', 'aria-label');
+    const emit = (events) => page.evaluate((list) => list.forEach((ev) => window.__wrx.app.bridge._emit('ping', ev)), events);
+
+    // o celular repete a série por TCP quando o ping comum fica mudo: as respostas chegam com os
+    // mesmos números de sequência, e uma resposta atrasada vale mais que a "perda" já avisada
+    await emit([
+      { host, seq: 2, ok: false },
+      { host, seq: 1, ok: true, ms: 12 },
+      { host, seq: 3, ok: true, ms: 15 },
+    ]);
+    await page.waitForFunction(() => /2 de 50 recebidas/.test(document.querySelector('.tb-chart__canvas').getAttribute('aria-label')));
+    assert.match(await label(), /média de 14\sms, 1 sem resposta/);
+    assert.equal(await stat(page, 'Perda'), '33%');
+    await emit([{ host, seq: 2, ok: true, ms: 13 }]);
+    await page.waitForFunction(() => /3 de 50 recebidas/.test(document.querySelector('.tb-chart__canvas').getAttribute('aria-label')));
+    assert.equal(await stat(page, 'Perda'), '0%');
+    // uma "perda" atrasada não apaga a resposta; lixo e respostas de outro destino são ignorados
+    await emit([{ host, seq: 2, ok: false }, { host: '9.9.9.9', seq: 4, ok: true, ms: 1 }, { host, seq: 0, ok: true, ms: 1 }, { host, seq: 99, ok: true, ms: 1 }, { host, seq: 5, ok: true }, null, { host }]);
+    await settle(page);
+    assert.match(await label(), /3 de 50 recebidas/);
+    assert.equal(await stat(page, 'Mínimo'), '12ms');
+    assert.equal(await stat(page, 'Máximo'), '15ms');
+    await page.click('.tb-setup .btn:has-text("Parar")');
+    await pingState(page, /Interrompido/);
+    assert.equal(await opsPending(page), 0);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Dispositivos
 // ---------------------------------------------------------------------------
@@ -462,6 +506,17 @@ test('velocidade: antes do primeiro teste a tela diz com quem fala e quanto gast
     assert.equal(await page.getAttribute('.gauge', 'role'), 'meter');
     await speedPhase(page, 'upload');
     assert.match(await tile(page, 'download'), /^\d+(,\d)?\s?[MG]b\/s$/, 'o download já tem número enquanto o upload roda');
+    // um aviso atrasado da fase anterior (ou sem pé nem cabeça) não bagunça a tela
+    const downloadSoFar = await tile(page, 'download');
+    await page.evaluate(() => {
+      const { bridge } = window.__wrx.app;
+      bridge._emit('speed', { phase: 'download', progress: 0.5, mbps: 9999, bytes: 1 });
+      bridge._emit('speed', { phase: 'voo', progress: 2, mbps: -5 });
+      bridge._emit('speed', null);
+    });
+    await settle(page);
+    assert.equal(await tile(page, 'download'), downloadSoFar);
+    assert.match(await text(page, '.tb-hero .tb-caption'), /3 de 3 · Medindo o upload/);
     await speedDone(page);
     assert.equal(await opsPending(page), 0);
 

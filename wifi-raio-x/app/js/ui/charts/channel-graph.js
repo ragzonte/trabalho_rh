@@ -299,7 +299,7 @@ export function createChannelGraph(container, options = {}) {
         const strength = clamp((shape.rssi + 95) / 50, 0, 1);
         const dim = highlight && !isHl ? 0.7 : 1;
         let stroke = colors.muted;
-        let strokeAlpha = (0.42 + 0.4 * strength) * dim;
+        let strokeAlpha = (0.5 + 0.35 * strength) * dim;
         let fillAlpha = (0.05 + 0.08 * strength) * dim * density;
         let width = 1.25;
         if (isOwn) {
@@ -394,10 +394,8 @@ export function createChannelGraph(container, options = {}) {
       const strong = !!u && (u.own || u.highlight);
       ctx.font = font(strong ? 600 : 400);
       ctx.fillStyle = strong ? colors.text : u ? colors.muted : colors.label;
-      ctx.globalAlpha = u ? 1 : 0.8;
       ctx.fillText(item.text, item.x, plot.bottom + 14);
     }
-    ctx.globalAlpha = 1;
     ctx.font = font(400);
     ctx.textAlign = 'right';
     ctx.fillStyle = colors.label;

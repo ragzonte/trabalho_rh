@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.location.LocationManager;
 import android.net.wifi.WifiManager;
+import android.util.Log;
 
 import androidx.core.content.ContextCompat;
 
@@ -27,7 +28,11 @@ final class StatusWatcher {
         receiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context c, Intent intent) {
-                onChange.run();
+                try {
+                    onChange.run();
+                } catch (RuntimeException e) {
+                    Log.w("WifiRaioX", "falha ao reler o estado", e); // exceção num receiver derruba o app
+                }
             }
         };
         IntentFilter filter = new IntentFilter();

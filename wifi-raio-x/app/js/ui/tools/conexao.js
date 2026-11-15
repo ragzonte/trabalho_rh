@@ -263,13 +263,14 @@ export function connectionText(data) {
 // Tela
 // ---------------------------------------------------------------------------
 
-function kvRow(row) {
+/** @param {DetailRow} row  @param {boolean} gutter  o grupo tem linhas copiáveis: todas guardam a coluna do ícone */
+function kvRow(row, gutter) {
   const main = h(
     'span.cnx-kv__main',
     null,
     h('span.cnx-kv__label', null, row.label),
     h('span', { class: ['cnx-kv__value', row.mono && 'mono', row.muted && 'muted', row.tone, row.ssid && 'cnx-kv__value--ssid'], dir: row.ssid ? 'auto' : undefined }, row.text),
-    row.copyable ? h('span.cnx-kv__copy', null, icon('copy', { size: 18 })) : null,
+    row.copyable ? h('span.cnx-kv__copy', null, icon('copy', { size: 18 })) : gutter ? h('span.cnx-kv__copy', { 'aria-hidden': 'true' }) : null,
   );
   const body = [main, row.hint ? h('span.cnx-kv__hint', null, row.hint) : null];
   const key = `kv-${row.label}`;
@@ -429,7 +430,10 @@ export async function mount(root, ctx) {
     const out = [hero(data)];
     for (const group of data.groups) {
       out.push(h('div', { key: `h-${group.id}` }, sectionHeader(group.title)));
-      if (group.rows.length) out.push(h('section.card.card--flush.cnx-kv', { key: `g-${group.id}`, dataset: { group: group.id } }, group.rows.map(kvRow)));
+      if (group.rows.length) {
+        const gutter = group.rows.some((r) => r.copyable);
+        out.push(h('section.card.card--flush.cnx-kv', { key: `g-${group.id}`, dataset: { group: group.id } }, group.rows.map((row) => kvRow(row, gutter))));
+      }
       if (group.id === 'sinal') out.push(speedCard(data));
     }
     out.push(

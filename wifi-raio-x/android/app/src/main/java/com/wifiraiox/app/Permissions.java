@@ -19,7 +19,8 @@ import java.util.List;
  * primeiro pedido e quando o diálogo é fechado sem escolha (Android 11+). Por isso guardamos o que
  * aconteceu nos pedidos anteriores.
  *
- * Todos os métodos rodam na thread da interface, exceto locationState(), que só lê.
+ * Todos os métodos rodam na thread da interface, exceto locationState(), que pode vir de qualquer
+ * thread: só lê (e, no máximo, apaga nas preferências um bloqueio que deixou de valer).
  */
 final class Permissions {
 
@@ -37,6 +38,8 @@ final class Permissions {
 
     /** Uma negativa mais rápida que isto não passou por um diálogo: foi o próprio Android recusando. */
     static final long INSTANT_DENIAL_MS = 700;
+    /** Tempo de sobra para o diálogo do Android tomar o foco da nossa janela. */
+    static final long LOST_REQUEST_MS = 3000;
 
     private static final String PREFS = "wrx_permissions";
     private static final String KEY_ASKED = "location_asked";
@@ -64,7 +67,12 @@ final class Permissions {
 
     /** 'granted' | 'denied' | 'blocked'. Só a localização precisa conta: a aproximada não libera a varredura. */
     String locationState() {
-        if (hasFineLocation()) return GRANTED;
+        if (hasFineLocation()) {
+            // Liberada (talvez pelas configurações): um bloqueio anotado antes já não vale. Se ficasse,
+            // uma revogação futura apareceria como "bloqueada" mesmo com o Android disposto a perguntar.
+            if (prefs.getBoolean(KEY_BLOCKED, false)) setBlocked(false);
+            return GRANTED;
+        }
         if (prefs.getBoolean(KEY_BLOCKED, false) && !showRationale()) return BLOCKED;
         return DENIED;
     }
@@ -82,7 +90,12 @@ final class Permissions {
             return;
         }
         if (done != null) locationWaiters.add(done);
-        if (locationInFlight) return; // o Android só mostra um pedido por vez: pega carona no que está aberto
+        if (locationInFlight) {
+            // O Android só mostra um pedido por vez: pega carona no que está aberto...
+            if (!requestLooksLost()) return;
+            // ...a menos que o diálogo tenha sumido sem resposta; aí pede de novo em vez de esperar para sempre.
+            locationInFlight = false;
+        }
         if (nearbyInFlight) {
             drainLocation();
             return;
@@ -163,6 +176,19 @@ final class Permissions {
         locationInFlight = false;
         drainLocation();
         finishNearby();
+    }
+
+    /**
+     * Um pedido em aberto há algum tempo com a nossa janela em foco: não há diálogo por cima, então
+     * a resposta dele se perdeu. (Se o palpite estiver errado o Android apenas recusa o pedido
+     * repetido na hora, e a resposta do diálogo de verdade ainda chega depois.)
+     */
+    private boolean requestLooksLost() {
+        try {
+            return activity.hasWindowFocus() && SystemClock.elapsedRealtime() - requestedAt > LOST_REQUEST_MS;
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private boolean showRationale() {

@@ -470,20 +470,21 @@ public final class Bridge implements Emitter {
         scanner.start();
         statusWatcher.start();
         connection.start();
+        rssi.setVisible(true);
     }
 
     void onResume() {
         if (destroyed) return;
-        rssi.setResumed(true);
         emitStatus(true); // o usuário pode ter voltado das configurações com algo diferente
         connection.refresh(); // ex.: Localização religada -> o nome da rede volta a aparecer
     }
 
-    void onPause() {
-        rssi.setResumed(false);
-    }
-
+    /**
+     * Tudo o que ouve o sistema para aqui, e não no onPause: em tela dividida (e com o diálogo de
+     * permissão por cima) o app pausado continua visível e o gráfico de sinal não pode congelar.
+     */
     void onStop() {
+        rssi.setVisible(false);
         scanner.stop();
         statusWatcher.stop();
         connection.stop();
@@ -502,8 +503,8 @@ public final class Bridge implements Emitter {
         pinger.cancel();
         lan.cancel();
         speed.cancel();
+        rtt.cancelAll();      // medições pendentes saem com ok:false (antes do flush: nenhuma começa agora)
         permissions.flush();  // quem pediu permissão recebe o Status atual
-        rtt.cancelAll();      // medições pendentes saem com ok:false
         for (Reply reply : new ArrayList<>(pending.values())) reply.send(Json.error(ERR_CLOSED));
         destroyed = true;
         rssi.unwatch();

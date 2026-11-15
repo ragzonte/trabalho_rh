@@ -13,7 +13,7 @@
 // Todo texto que vem de fora (nome de ambiente, de rede, de ponto) é desenhado com
 // fillText: nunca vira HTML.
 
-import { mapTheme, paintFloorCells, timeRgb, confWeight, hexToRgb } from './map-colors.js';
+import { mapTheme, paintFloorCells, timeRgb, confWeight, hexToRgb, smoothInside } from './map-colors.js';
 
 export const DEFAULT_LAYERS = Object.freeze({
   rooms: true,
@@ -27,7 +27,7 @@ export const DEFAULT_LAYERS = Object.freeze({
   grid: true,
 });
 
-const NBSP_THIN = ' ';
+const NBSP_THIN = '\u202f';
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
 // ---------------------------------------------------------------------------
@@ -366,7 +366,7 @@ export function approxMeters(m) {
  *            angle:number, distanceM:number, storey:number}[]}}  storey: +1/-1 = fica em outro andar (acima/abaixo), 0 = neste
  */
 export function placeAps(model, extent = modelExtent(model), maxNeighbours = 24) {
-  const ring = extent.radius + Math.max(1.4, extent.radius * 0.22);
+  const ring = extent.radius + Math.max(1, extent.radius * 0.14);
   const items = [];
   let neighbours = 0;
   const lowest = model.floors.length ? model.floors[0].floor : 0;
@@ -434,8 +434,12 @@ export function pathRuns(model, subdivisions = 5) {
   });
   const out = [];
   for (const run of runs) {
-    const n = run.nodes;
-    if (n.length < 2) continue;
+    if (run.nodes.length < 2) continue;
+    // tira o tremor de ponto a ponto (cada posição tem 1 a 2 m de erro); as pontas ficam onde estão
+    const n = run.nodes.map((p, i, all) => {
+      if (i === 0 || i === all.length - 1) return p;
+      return { ...p, x: (all[i - 1].x + 2 * p.x + all[i + 1].x) / 4, y: (all[i - 1].y + 2 * p.y + all[i + 1].y) / 4 };
+    });
     const points = [];
     let d = 0;
     const push = (x, y, t, conf) => {
@@ -532,7 +536,7 @@ const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Ar
 /** Texto de fora, pronto para desenhar: sem caracteres de controle, espaços em excesso nem tamanho absurdo. */
 export function cleanText(text, fallback = '') {
   const s = String(text ?? '')
-    .replace(/[\u0000-\u001f\u007f-\u009f  ‪-‮⁦-⁩]+/g, ' ')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (!s) return fallback;
@@ -609,15 +613,15 @@ export function layoutLabel(ctx, spec, themeName) {
   }
   const detailFont = `500 12px ${FONT}`;
   ctx.font = font;
-  const text = fitText(ctx, raw, maxWidth);
+  const text = spec.iconOnly ? '' : fitText(ctx, raw, maxWidth);
   const textW = Math.ceil(ctx.measureText(text).width);
   let detailW = 0;
   if (detail) {
     ctx.font = detailFont;
     detailW = Math.ceil(ctx.measureText(detail).width);
   }
-  const padX = pill ? 9 : 5;
-  const iconW = icon ? 18 : 0;
+  const padX = pill ? (spec.iconOnly ? 6 : 9) : 5;
+  const iconW = icon ? (spec.iconOnly ? 14 : 18) : 0;
   const gap = detail && text ? 6 : 0;
   const w = padX * 2 + iconW + textW + gap + detailW;
   return {
@@ -684,7 +688,7 @@ export function paintLabel(ctx, layout, x, y, alpha = 1) {
     ctx.lineWidth = own ? 1.25 : 1;
     ctx.strokeStyle = own ? t.router : t.pillLine;
     ctx.stroke();
-    if (layout.icon) wifiGlyph(ctx, x + 9 + 7, y + h / 2, 14, t.router);
+    if (layout.icon) wifiGlyph(ctx, x + (spec.iconOnly ? 6 : 9) + 7, y + h / 2, 14, t.router);
     ctx.font = layout.font;
     ctx.fillStyle = own ? t.labelText : t.labelMuted;
     ctx.fillText(layout.text, x + layout.textX, midY);
@@ -766,6 +770,25 @@ export function paintScaleBar(ctx, scale, themeName, x, y) {
   ctx.restore();
 }
 
+/**
+ * Rótulo de um roteador da casa. Quando vários aparelhos têm o mesmo nome (rede mesh,
+ * pontos de acesso de escritório), só o primeiro mostra o nome; os outros, só o ícone.
+ * `seen` é um Set com os nomes já usados neste desenho.
+ */
+export function routerLabel(item, seen) {
+  const name = cleanText(item.ap.ssid).toLowerCase();
+  item.repeat = !!name && seen.has(name);
+  seen.add(name);
+  return { kind: 'router', text: item.ap.ssid, detail: item.clamped ? approxMeters(item.distanceM) : '', iconOnly: item.repeat && !item.clamped };
+}
+
+/** Há um ambiente neste andar com este mesmo nome? (o rótulo do ponto marcado seria repetido) */
+export function namesRoom(floor, label) {
+  const name = cleanText(label).toLowerCase();
+  if (!name) return false;
+  return (floor.rooms || []).some((r) => cleanText(r.label).toLowerCase() === name);
+}
+
 /** Dados do toque que os dois visualizadores entregam em onPick para uma célula do piso. */
 export function floorPick(model, heat, floorIndex, x, y) {
   const c = cellAt(model, x, y);
@@ -843,6 +866,7 @@ export function createViewer2d(container, options = {}) {
   let lastScale = null;
   let labelBoxes = [];
   let markers = [];
+  let seenNames = new Set();
   let raf = 0;
 
   function invalidate() {
@@ -907,11 +931,17 @@ export function createViewer2d(container, options = {}) {
     const field = heat ? heat[i] : null;
     const alpha = new Uint8ClampedArray(nx * ny * 4);
     const [hr, hg, hb] = hexToRgb(theme.hatch);
+    const raw = new Float32Array(nx * ny);
+    for (let c = 0; c < nx * ny; c++) {
+      if (!floor.inside[c]) continue;
+      let conf = floor.conf ? floor.conf[c] : 1;
+      if (field && (Number.isNaN(field.dbm[c]) || (field.conf && field.conf[c] < conf))) conf = Number.isNaN(field.dbm[c]) ? 0 : field.conf[c];
+      raw[c] = conf;
+    }
+    const smooth = smoothInside(raw, floor.inside, nx, ny, 2);
     let any = false;
     for (let c = 0; c < nx * ny; c++) {
-      let conf = floor.inside[c] ? floor.conf[c] : 0;
-      if (field && field.conf && field.conf[c] < conf) conf = field.conf[c];
-      const a = (1 - confWeight(conf)) * 150;
+      const a = floor.inside[c] ? (1 - confWeight(smooth[c])) * 150 : 0;
       if (a > 4) any = true;
       alpha[c * 4] = hr;
       alpha[c * 4 + 1] = hg;
@@ -923,9 +953,9 @@ export function createViewer2d(container, options = {}) {
       hatch.width = tile.width;
       hatch.height = tile.height;
       const hgx = hatch.getContext('2d');
-      const period = (0.36 / cell) * k;
+      const period = ((0.42 * clamp(prep.extent.radius / 6, 0.8, 2.2)) / cell) * k;
       hgx.strokeStyle = theme.hatch;
-      hgx.lineWidth = Math.max(1, period * 0.3);
+      hgx.lineWidth = Math.max(1, period * 0.26);
       hgx.beginPath();
       for (let d = -tile.height; d < tile.width; d += period) {
         hgx.moveTo(d, 0);
@@ -1035,6 +1065,7 @@ export function createViewer2d(container, options = {}) {
     }
     const s = layout.s * view.zoom;
     const labels = [];
+    seenNames = new Set();
     for (const tile of layout.tiles) drawFloor(tile, s, labels);
     drawLabels(labels);
     lastScale = niceScale(s, Math.min(110, width * 0.3));
@@ -1058,30 +1089,27 @@ export function createViewer2d(container, options = {}) {
     const { bounds, cell } = model;
 
     if (layers.grid) {
-      const pad = Math.max(1, e.radius * 0.12);
+      // linhas de 1 m em volta do andar, até a borda da tela quando há um andar só
+      const single = layout.tiles.length === 1;
+      const pad = single ? Math.hypot(width, height) / s : Math.max(1, e.radius * 0.1);
       const x0 = Math.floor(e.minX - pad);
       const x1 = Math.ceil(e.maxX + pad);
       const y0 = Math.floor(e.minY - pad);
       const y1 = Math.ceil(e.maxY + pad);
       ctx.save();
       ctx.lineWidth = 1;
-      for (let gx = x0; gx <= x1; gx++) {
-        ctx.strokeStyle = rgba(theme.grid, theme.gridAlpha * (gx % 5 === 0 ? 1.7 : 1));
-        const a = toScreen(tile, gx, y0);
-        const b = toScreen(tile, gx, y1);
+      const line = (ax, ay, bx, by, major) => {
+        const a = toScreen(tile, ax, ay);
+        const b = toScreen(tile, bx, by);
+        ctx.strokeStyle = rgba(theme.grid, theme.gridAlpha * (major ? 1.7 : 1));
         ctx.beginPath();
         ctx.moveTo(Math.round(a[0]) + 0.5, Math.round(a[1]) + 0.5);
         ctx.lineTo(Math.round(b[0]) + 0.5, Math.round(b[1]) + 0.5);
         ctx.stroke();
-      }
-      for (let gy = y0; gy <= y1; gy++) {
-        ctx.strokeStyle = rgba(theme.grid, theme.gridAlpha * (gy % 5 === 0 ? 1.7 : 1));
-        const a = toScreen(tile, x0, gy);
-        const b = toScreen(tile, x1, gy);
-        ctx.beginPath();
-        ctx.moveTo(Math.round(a[0]) + 0.5, Math.round(a[1]) + 0.5);
-        ctx.lineTo(Math.round(b[0]) + 0.5, Math.round(b[1]) + 0.5);
-        ctx.stroke();
+      };
+      if (s >= 6) {
+        for (let gx = x0; gx <= x1; gx++) line(gx, y0, gx, y1, gx % 5 === 0);
+        for (let gy = y0; gy <= y1; gy++) line(x0, gy, x1, gy, gy % 5 === 0);
       }
       ctx.restore();
     }
@@ -1180,10 +1208,8 @@ export function createViewer2d(container, options = {}) {
         ctx.strokeStyle = theme.labelHalo;
         ctx.stroke();
         markers.push({ kind: 'spot', x, y, r: 18, data: sp, floorIndex: i });
-        const c = cellAt(model, sp.x, sp.y);
-        const room = c >= 0 && floor.room[c] >= 0 ? floor.rooms[floor.room[c]] : null;
-        // o ponto que deu nome ao ambiente não repete o nome
-        if (!room || cleanText(room.label).toLowerCase() !== cleanText(sp.label).toLowerCase()) {
+        // o ponto que deu nome a um ambiente não repete o nome
+        if (!namesRoom(floor, sp.label)) {
           labels.push({ spec: { kind: 'spot', text: sp.label }, x, y: y - 9, ax: 0.5, ay: 1, priority: 20, pick: { kind: 'spot', data: sp, floorIndex: i } });
         }
       }
@@ -1204,7 +1230,9 @@ export function createViewer2d(container, options = {}) {
         ctx.stroke();
         wifiGlyph(ctx, x, y - 1, 13, theme.accentInk);
         markers.push({ kind: 'router', x, y, r: 22, data: a.ap, floorIndex: i });
-        labels.push({ spec: { kind: 'router', text: a.ap.ssid, detail: a.clamped ? approxMeters(a.distanceM) : '' }, x, y: y - 15, ax: 0.5, ay: 1, priority: 90, pick: { kind: 'router', data: a.ap, floorIndex: i } });
+        const spec = routerLabel(a, seenNames);
+        // nome repetido: no 2D o próprio marcador já é o ícone
+        if (!spec.iconOnly) labels.push({ spec, x, y: y - 15, ax: 0.5, ay: 1, priority: 60, pick: { kind: 'router', data: a.ap, floorIndex: i } });
       } else {
         if (!layers.neighbours) continue;
         ctx.save();
@@ -1288,7 +1316,9 @@ export function createViewer2d(container, options = {}) {
         }
       }
       if (layout.tiles.length > 1) {
-        labels.push({ spec: { kind: 'floor', text: floorTag(floor.floor) }, x: tile.cx - tile.w / 2 + 4 + (width / 2 - tile.cx) * (1 - view.zoom) * 0, y: toScreen(tile, e.cx, layout.rot ? e.cy : e.maxY)[1] - tile.h * 0 - 6 - (layout.rot ? (e.w * s) / 2 : 0), ax: 0, ay: 1, priority: 95, fixed: true });
+        // etiqueta do andar no canto de cima à esquerda do seu quadro
+        const [mx, my] = toScreen(tile, e.cx, e.cy);
+        labels.push({ spec: { kind: 'floor', text: floorTag(floor.floor) }, x: mx - (tile.w / 2) * view.zoom, y: my - (tile.h / 2) * view.zoom - 4, ax: 0, ay: 1, priority: 95 });
       }
     }
   }

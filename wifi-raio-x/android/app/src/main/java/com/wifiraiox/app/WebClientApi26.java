@@ -1,5 +1,6 @@
 package com.wifiraiox.app;
 
+import android.util.Log;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebView;
 
@@ -20,7 +21,11 @@ final class WebClientApi26 extends WebClient {
 
     @Override
     public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-        host.onRendererGone();
-        return true;
+        try {
+            host.onRendererGone(view);
+        } catch (RuntimeException e) {
+            Log.e("WifiRaioX", "falha ao tratar a morte do renderizador", e);
+        }
+        return true; // false (ou uma exceção) faria o Android encerrar o app
     }
 }

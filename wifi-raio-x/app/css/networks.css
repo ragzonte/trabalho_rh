@@ -160,7 +160,6 @@
 .net-conn__stat-value {
   display: flex;
   align-items: baseline;
-  flex-wrap: wrap;
   gap: 0 5px;
   font-size: var(--fs-md);
   font-weight: 600;
@@ -369,6 +368,13 @@
 
 .net-controls[data-stuck] {
   box-shadow: 0 1px 0 var(--line);
+}
+
+/* celular deitado: a altura é pouca, então os controles rolam com a lista */
+@media (orientation: landscape) and (max-height: 520px) {
+  .net-controls {
+    position: static;
+  }
 }
 
 .net-filters {

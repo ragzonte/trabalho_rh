@@ -13,6 +13,7 @@ import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
 
@@ -344,13 +345,18 @@ final class ConnectionTracker {
         synchronized (lock) {
             if (callback == null) return; // parado
         }
-        JSONObject connection = read();
-        String signature = ConnectionMapper.signature(connection);
-        synchronized (lock) {
-            if (signature.equals(lastSignature)) return;
-            lastSignature = signature;
+        try {
+            JSONObject connection = read();
+            String signature = ConnectionMapper.signature(connection);
+            synchronized (lock) {
+                if (signature.equals(lastSignature)) return;
+                lastSignature = signature;
+            }
+            listener.onConnectionChanged(connection);
+        } catch (RuntimeException e) {
+            // Roda solto na thread da interface: uma leitura que falha perde um evento, não o app.
+            Log.w("WifiRaioX", "falha ao ler a conexão", e);
         }
-        listener.onConnectionChanged(connection);
     }
 
     /** Callback para Android até o 11, onde não existe a flag de localização. */

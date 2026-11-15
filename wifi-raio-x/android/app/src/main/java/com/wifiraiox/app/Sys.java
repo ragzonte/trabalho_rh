@@ -7,6 +7,7 @@ import android.net.ConnectivityManager;
 import android.net.wifi.WifiManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import androidx.core.location.LocationManagerCompat;
 
@@ -18,6 +19,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** Acesso aos serviços do sistema e utilidades de thread usadas por todo o lado nativo. */
 final class Sys {
+
+    private static final String TAG = "WifiRaioX";
 
     private Sys() {}
 
@@ -74,10 +77,17 @@ final class Sys {
     /** Threads de trabalho com nome (ajuda a ler um ANR/trace) que não seguram o processo aberto. */
     static ThreadFactory threads(final String name) {
         final AtomicInteger n = new AtomicInteger();
-        return r -> {
-            Thread t = new Thread(r, "wrx-" + name + "-" + n.incrementAndGet());
-            t.setDaemon(true);
-            return t;
-        };
+        return r -> thread(name + "-" + n.incrementAndGet(), r);
+    }
+
+    /**
+     * Uma thread de trabalho avulsa. Qualquer falha que escape dela fica só no registro: sem isto
+     * o Android derruba o app inteiro por causa de uma sonda de rede que deu errado.
+     */
+    static Thread thread(String name, Runnable task) {
+        Thread t = new Thread(task, "wrx-" + name);
+        t.setDaemon(true);
+        t.setUncaughtExceptionHandler((thread, error) -> Log.e(TAG, "falha na thread " + thread.getName(), error));
+        return t;
     }
 }

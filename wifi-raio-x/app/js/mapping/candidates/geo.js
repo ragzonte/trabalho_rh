@@ -38,7 +38,7 @@ const NEAR_M = 0.4;
 const P0_REF_24 = -39;
 /** Intervalo de referência entre varreduras (s) para as grandezas "por passo". */
 const STEP_S = 3.5;
-/** Acima deste tanto de nós o levantamento é "enorme": partida por amostragem e menos iterações. */
+/** Acima deste tanto de nós o levantamento é "enorme": partida por amostragem e grade mais grossa. */
 const MANY_NODES = 300;
 
 const LN10 = Math.LN10;
@@ -68,7 +68,7 @@ const CFG = {
   p0SigmaLo: 40, // dB: abaixo (parede externa, laje, vizinho fraco)
   zSigma: 1.0, // m em torno de "um pouco acima do celular"
   farSigma: 60, // m: só impede roteador de fugir para o infinito
-  maxIter: 300,
+  maxIter: 200,
   rounds: 3,
   // --- trajetória em grade ---
   emissionWeight: 0.5, // leituras de uma varredura não são independentes (mesmo corpo, mesmas paredes)
@@ -77,10 +77,10 @@ const CFG = {
   hmmCut: 2.2, // truncamento do núcleo, em desvios (teto de velocidade)
   hmmMaxDt: 7,
   spotHop: 2.0, // entre pontos marcados distantes no tempo: "alguns passos", em unidades de hmmQ
-  hmmMinCell: 0.4,
-  hmmMaxCells: 1200,
+  hmmMinCell: 0.45,
+  hmmMaxCells: 800,
   // --- campo residual ---
-  fieldRounds: 3,
+  fieldRounds: 2,
   fieldH: 1.1, // m: largura do núcleo (paredes e sombra mudam em ~1-2 m)
   fieldLambda: 0.7, // encolhimento para zero onde há poucos vizinhos
   fieldClip: 15, // dB: resíduo maior que isto é leitura estranha
@@ -102,6 +102,7 @@ const CFG = {
   evHopSd: 0.5,
   sizeWeight: 400,
   spreadShrink: 1.5, // quanto a incerteza das posições encolhe o mapa final (0 = nada)
+  shrinkFloor: 0,
   // --- tortuosidade ---
   turnKappa: 0.5,
   turnTop: 1.5,
@@ -409,19 +410,14 @@ function prepare(survey) {
   const edges = [];
   const visits = []; // {node}
   const links = []; // entre a visita v e a v+1: {dt, kind}
-  const visitOf = new Int32Array(N);
   for (let i = 0; i < N; i++) {
-    if (i > 0 && nodeOf[i] === nodeOf[i - 1]) {
-      visitOf[i] = visits.length - 1;
-      continue;
-    }
+    if (i > 0 && nodeOf[i] === nodeOf[i - 1]) continue;
     if (i > 0) {
       const dt = Math.max(0.5, time[i] - time[i - 1]);
       const kind = (scans[i].spot != null ? 1 : 0) + (scans[i - 1].spot != null ? 1 : 0);
       edges.push({ a: nodeOf[i - 1], b: nodeOf[i], dt, kind });
       links.push({ dt, kind });
     }
-    visitOf[i] = visits.length;
     visits.push({ node: nodeOf[i] });
   }
 
@@ -435,7 +431,7 @@ function prepare(survey) {
     }
   }
 
-  return { scans, time, N, P, NF, floorList, nodeOf, scanFloor, nodeFloor, radios, deviceCount, R, obs, radioCount, edges, visits, links, visitOf, known };
+  return { scans, time, N, P, NF, floorList, nodeOf, scanFloor, nodeFloor, radios, deviceCount, R, obs, radioCount, edges, visits, links, known };
 }
 
 // ---------------------------------------------------------------------------
@@ -1540,12 +1536,15 @@ function scaleEvidence(survey, prep, model, cfg, theta) {
     }
     if (ratios.length >= 3) add(median(ratios), cfg.evPhysicsSd);
   }
-  // (3) Espaçamento: quem marca pontos costuma andar alguns passos entre um e outro.
+  // (3) Espaçamento: quem marca pontos costuma andar alguns passos entre um e o seguinte
+  // (pontos consecutivos na ordem da visita, haja ou não varreduras andando no meio).
   {
     const hops = [];
-    for (let i = 1; i < N; i++) {
-      if (scans[i].spot == null || scans[i - 1].spot == null || nodeOf[i] === nodeOf[i - 1]) continue;
-      hops.push(hop(i));
+    let last = -1;
+    for (let i = 0; i < N; i++) {
+      if (scans[i].spot == null || nodeOf[i] === last) continue;
+      if (last >= 0) hops.push(Math.hypot(theta[2 * last] - theta[2 * nodeOf[i]], theta[2 * last + 1] - theta[2 * nodeOf[i] + 1]));
+      last = nodeOf[i];
     }
     if (hops.length >= 6) add(cfg.hopM / Math.max(1e-6, median(hops)), cfg.evHopSd);
   }
@@ -1650,8 +1649,9 @@ export function solve(survey, options) {
 function solveInner(survey, options) {
   const t0 = now();
   const budget = Number.isFinite(options.budgetMs) && options.budgetMs > 0 ? options.budgetMs : 4000;
-  // Planeja terminar bem antes do corte: as etapas longas conferem este prazo.
-  const deadline = t0 + Math.min(0.5 * budget, 2400);
+  // Planeja terminar bem antes do corte: as etapas longas conferem este prazo (num levantamento
+  // comum nem chegam perto dele; ele só morde em aparelho lento ou levantamento enorme).
+  const deadline = t0 + 0.5 * budget;
   const progress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
   const cfg = options.cfg ? { ...CFG, ...options.cfg } : CFG;
   if (!survey || !Array.isArray(survey.scans) || survey.scans.length === 0) return emptySolution(survey);
@@ -1715,24 +1715,30 @@ function solveInner(survey, options) {
     if (nodesFrozen) for (let i = 0; i < model.oA; i++) gu[i] = 0;
     return f;
   };
+  let stageDeadline = deadline;
   const optimise = (maxIter, freezeNodes) => {
     nodesFrozen = freezeNodes;
     for (let i = 0; i < model.size; i++) u[i] = theta[i] / scale[i];
-    lbfgs(fg, u, { maxIter, deadline, memory: 10 });
+    lbfgs(fg, u, { maxIter, deadline: stageDeadline, memory: 10 });
     for (let i = 0; i < model.size; i++) theta[i] = u[i] * scale[i];
     nodesFrozen = false;
   };
   const notes = [];
-  // Levantamento enorme: cada iteração custa mais, então são menos (o prazo corta o resto).
-  const maxIter = Math.round(clamp((cfg.maxIter * MANY_NODES) / P, 60, cfg.maxIter));
-  for (let round = 0; round < cfg.rounds && now() < deadline; round++) {
+  const maxIter = cfg.maxIter;
+  // A geometria fica com no máximo ~1/3 do tempo (só pesa em levantamento enorme): o resto é
+  // da trajetória.
+  stageDeadline = t0 + 0.3 * budget;
+  for (let round = 0; round < cfg.rounds && now() < stageDeadline; round++) {
     optimise(maxIter, false);
     progress(0.15 + (0.4 * (round + 1)) / cfg.rounds, 'geometria');
   }
+  stageDeadline = deadline;
 
   // --- escala ---
+  // Só passos inteiros (andando nas duas pontas) ancoram a escala: um par com ponta parada dá
+  // apenas um teto, e teto não impede o mapa de sair grande demais.
   let stepEdges = 0;
-  for (const e of prep.edges) if (e.kind <= 1 && e.dt < cfg.stepMaxDt) stepEdges++;
+  for (const e of prep.edges) if (e.kind === 0 && e.dt < cfg.stepMaxDt) stepEdges++;
   const hasKnown = model.known.length > 0;
   const walked = stepEdges >= cfg.minStepEdges;
   const trust = hasKnown ? knownTrust(model) : 0;
@@ -1808,7 +1814,7 @@ function solveInner(survey, options) {
         s2 += nodeSpread[i] * nodeSpread[i];
         c++;
       }
-      if (c > 0) targetSize /= Math.sqrt(1 + (cfg.spreadShrink * s2) / (c * size * size));
+      if (c > 0) targetSize *= Math.max(cfg.shrinkFloor, 1 / Math.sqrt(1 + (cfg.spreadShrink * s2) / (c * size * size)));
     }
     if (size > 1e-6 && targetSize > 1e-6) applyScale(model, theta, targetSize / size);
     if (hasKnown && applyKnownDistances(model, theta, trust)) scaleConf = Math.max(scaleConf, 0.95 * trust);
@@ -1818,12 +1824,7 @@ function solveInner(survey, options) {
   }
 
   const solution = finalize(survey, prep, model, theta, nodeSpread, scaleConf);
-  if (options.debug) {
-    let s2 = 0;
-    let c = 0;
-    for (let i = 0; i < P; i++) if (Number.isFinite(nodeSpread[i])) { s2 += nodeSpread[i] * nodeSpread[i]; c++; }
-    solution.debug = { ms: now() - t0, note: notes.join(' '), nodes: P, radios: model.RA, spread: Math.sqrt(s2 / Math.max(1, c)), radius: cloudRadius(theta, P).r };
-  }
+  if (options.debug) solution.debug = { ms: now() - t0, note: notes.join(' '), nodes: P, radios: model.RA };
   progress(1, 'pronto');
   return solution;
 }

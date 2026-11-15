@@ -31,8 +31,8 @@ class WebClient extends WebViewClient {
         /** Um endereço externo tentou ocupar a página principal por um caminho que não avisa antes (qualquer thread). */
         void onForeignMainFrame(Uri uri);
 
-        /** O processo de renderização morreu (thread da interface). */
-        void onRendererGone();
+        /** O processo de renderização desse WebView morreu (thread da interface). */
+        void onRendererGone(WebView view);
     }
 
     static final String HOST = WebViewAssetLoader.DEFAULT_DOMAIN; // appassets.androidplatform.net
@@ -62,18 +62,23 @@ class WebClient extends WebViewClient {
 
     @Override
     public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-        Uri uri = request.getUrl();
-        if (isAppUrl(uri)) {
-            if (request.isForMainFrame()) host.onAppPageRequested();
-            WebResourceResponse response = loader.shouldInterceptRequest(uri);
-            return response != null ? response : WebAssets.status(404, "Not Found");
+        try {
+            Uri uri = request.getUrl();
+            if (isAppUrl(uri)) {
+                if (request.isForMainFrame()) host.onAppPageRequested();
+                WebResourceResponse response = loader.shouldInterceptRequest(uri);
+                return response != null ? response : WebAssets.status(404, "Not Found");
+            }
+            if (request.isForMainFrame()) {
+                // shouldOverrideUrlLoading não é consultado em todos os casos (ex.: formulário POST): barra aqui.
+                host.onForeignMainFrame(uri);
+                return WebAssets.status(403, "Forbidden");
+            }
+            return null; // recursos de outros sites (imagem, fetch) seguem as regras normais da web
+        } catch (RuntimeException e) {
+            // Roda numa thread do WebView: uma exceção solta aqui derrubaria o app inteiro.
+            return WebAssets.status(500, "Internal Error");
         }
-        if (request.isForMainFrame()) {
-            // shouldOverrideUrlLoading não é consultado em todos os casos (ex.: formulário POST): barra aqui.
-            host.onForeignMainFrame(uri);
-            return WebAssets.status(403, "Forbidden");
-        }
-        return null; // recursos de outros sites (imagem, fetch) seguem as regras normais da web
     }
 
     @Override

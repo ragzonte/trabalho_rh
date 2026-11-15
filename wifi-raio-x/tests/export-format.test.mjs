@@ -377,7 +377,8 @@ describe('relatório em texto', () => {
     assert.ok(lines.includes('Sinal: -52 dBm (ótimo)'));
     assert.ok(lines.includes('Velocidade entre o celular e o roteador: 433 Mb/s'));
     assert.ok(lines.includes('Distância do roteador: cerca de 4 m (estimativa pelo sinal)'));
-    assert.ok(lines.includes('Padrão: Wi-Fi 5 (802.11ac) · segurança WPA2'));
+    assert.ok(lines.includes('Padrão: Wi-Fi 5 (802.11ac)'));
+    assert.ok(lines.includes('Segurança: WPA2'));
     assert.ok(lines.includes('Você já está na melhor opção'));
     assert.ok(lines.includes('1. "Casa_5G": nota 86 de 100, cerca de 182 Mb/s (conectada, minha)'));
     assert.ok(lines.includes('2. "Vizinho": nota 40 de 100, cerca de 7,5 Mb/s'));
@@ -390,6 +391,27 @@ describe('relatório em texto', () => {
     assert.ok(text.includes('estimativas'), 'as estimativas são chamadas de estimativas');
     assert.ok(text.endsWith('Gerado no celular pelo WiFi Raio-X 1.0.0. Nada foi enviado para a internet.\n'));
     assert.equal(text.includes('Atenção: a lista de redes é de'), false, 'dado recente não ganha aviso de idade');
+  });
+
+  test('números do relatório: sem ",0" sobrando, Gb/s acima de mil', () => {
+    const data = base();
+    data.connection.linkSpeed = 1201;
+    data.connection.distanceM = 1.04;
+    data.ranking = [
+      { name: 'A', hidden: false, score: 99.6, estMbps: 9.02, connected: false, mine: false },
+      { name: 'B', hidden: false, score: 12.2, estMbps: 0.44, connected: false, mine: false },
+      { name: 'C', hidden: false, score: 80, estMbps: 2000, connected: false, mine: false },
+      { name: 'D', hidden: true, score: null, estMbps: null, connected: false, mine: false },
+      { name: 'E', hidden: false, score: 5, estMbps: 0, connected: false, mine: false },
+    ];
+    const text = buildReport(data);
+    assert.ok(text.includes('Velocidade entre o celular e o roteador: 1,2 Gb/s'));
+    assert.ok(text.includes('Distância do roteador: cerca de 1 m (estimativa pelo sinal)'));
+    assert.ok(text.includes('1. "A": nota 100 de 100, cerca de 9 Mb/s'));
+    assert.ok(text.includes('2. "B": nota 12 de 100, cerca de 0,4 Mb/s'));
+    assert.ok(text.includes('3. "C": nota 80 de 100, cerca de 2 Gb/s'));
+    assert.ok(text.includes('4. (rede oculta): nota ? de 100'), 'rede oculta não mostra nome, e nota ausente vira "?"');
+    assert.ok(text.includes('5. "E": nota 5 de 100\n'), 'velocidade zero (faixa que o celular não usa) não é citada');
   });
 
   test('sem conexão, sem análises e sem redes ainda sai um relatório honesto', () => {

@@ -169,6 +169,11 @@ public class StatusTest extends AllSdks {
         // ...e some quando o usuário libera pelas configurações.
         Fixtures.grantLocation();
         assertEquals("granted", status().get("permission"));
+        // De vez: se a permissão for retirada mais tarde o Android volta a perguntar, então o
+        // estado é "negada" (com o botão de pedir), e não o "bloqueada" que ficou para trás.
+        Fixtures.denyLocation();
+        assertEquals("denied", status().get("permission"));
+        assertEquals("denied", new JSONObject(Fixtures.bridge(Fixtures.activity(), new Fixtures.Page()).call("status", "{}")).get("permission"));
     }
 
     @Test

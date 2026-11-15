@@ -296,23 +296,30 @@ function ownRow(ctx, { ssid, hidden }) {
   );
 }
 
-/** Cartão do gráfico: título à esquerda, de onde vêm os dados à direita, e o canvas (intocado pelo patch). */
-function chartCard(title, note, attach) {
+/**
+ * Cartão do gráfico: título à esquerda, de onde vêm os dados à direita, e o lugar do canvas.
+ * O lugar (`.ap-chart`) é `keep`: o patch nunca toca nele nem no canvas que mora lá dentro.
+ */
+function chartCard(title, note) {
   return h(
     'section.card.ap-chart-card',
     { key: 'chart' },
     h('div.ap-chart-card__head', null, h('h3.card__title', null, title), h('span.ap-chart-card__note', null, note)),
-    h('div.ap-chart', { key: 'chart-host', keep: true, ref: attach, 'data-nodrag': '' }),
+    h('div.ap-chart', { key: 'chart-host', keep: true, 'data-nodrag': '' }),
   );
 }
 
-/** Dono de um gráfico dentro de um painel: cria quando o contêiner aparece e destrói ao fechar. */
+/**
+ * Dono de um gráfico dentro de um painel. Depois de cada patch, attach() recebe o `.ap-chart`
+ * que está no documento: na primeira vez o gráfico é criado ali; nas seguintes é o mesmo nó e
+ * nada acontece (recriar o canvas a cada busca faria a rolagem do painel pular).
+ */
 function chartSlot(options) {
   let host = null;
   let chart = null;
   return {
     attach(el) {
-      if (el === host) return;
+      if (!el || el === host) return;
       if (chart) chart.destroy();
       host = el;
       chart = createTimeChart(el, options);
@@ -427,7 +434,7 @@ export function openApDetail(ctx, bssid) {
         ),
       ),
       gone ? banner({ key: 'gone', tone: 'warning', icon: 'clock', title: 'Esta rede saiu do alcance', text: 'Ela não aparece mais nas buscas. Os dados abaixo são os da última vez em que foi ouvida.' }) : null,
-      chartCard('Sinal nos últimos 2 minutos', sourceNote(state, ap.connected), slot.attach),
+      chartCard('Sinal nos últimos 2 minutos', sourceNote(state, ap.connected)),
       ownRow(ctx, ap),
       gone ? null : actionRows(ctx, ap),
       h('div.facts', { key: 'tiles' }, tiles),
@@ -514,6 +521,7 @@ export function openApDetail(ctx, bssid) {
     if (!panel.isOpen()) return;
     const state = ctx.store.get();
     patch(panel.body, view(state));
+    slot.attach(panel.body.querySelector('.ap-chart'));
     subtitle.textContent = subtitleOf(lastAp);
     feedChart(state);
   };
@@ -590,7 +598,7 @@ export function openNetworkDetail(ctx, networkKey) {
         ),
       ),
       gone ? banner({ key: 'gone', tone: 'warning', icon: 'clock', title: 'Esta rede saiu do alcance', text: 'Ela não aparece mais nas buscas. Os dados abaixo são os da última vez em que foi ouvida.' }) : null,
-      chartCard('Cada sinal desta rede', sourceNote(state, false), slot.attach),
+      chartCard('Cada sinal desta rede', sourceNote(state, false)),
       ownRow(ctx, net),
       h(
         'section',
@@ -644,6 +652,7 @@ export function openNetworkDetail(ctx, networkKey) {
     if (!panel.isOpen()) return;
     const state = ctx.store.get();
     patch(panel.body, view(state));
+    slot.attach(panel.body.querySelector('.ap-chart'));
     subtitle.textContent = countLine(last);
     feedChart(state);
   };

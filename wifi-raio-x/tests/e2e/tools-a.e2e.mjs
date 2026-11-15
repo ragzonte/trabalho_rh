@@ -384,13 +384,14 @@ test('medidor: abre na rede conectada, com leitura ao vivo, e devolve o ritmo no
 });
 
 test('medidor: ?bssid= abre noutra rede, avisa que ela só muda a cada busca e acelera as buscas', T, async () => {
-  await withApp(env, { params: FAST }, async ({ page }) => {
+  // pessoa parada: o celular não troca de ponto de acesso no meio do teste
+  await withApp(env, { params: { ...FAST, walk: 'still' } }, async ({ page }) => {
     await waitForScans(page, 2);
     const conn = await connectedBssid(page);
     const other = await appState(page, (s) => s.aps.find((ap) => !ap.connected && !ap.stale && ap.ssid && ap.rssi > -80 && !ap.own).bssid);
     await goto(page, `/ferramentas/medidor?bssid=${other}`);
+    await page.waitForFunction((id) => document.querySelector('.view > .screen').dataset.target === id, other);
     let d = await data(page);
-    assert.equal(d.target, other);
     assert.equal(d.live, '');
     assert.match(await page.textContent('.mtr-note'), /só é lida a cada busca \(≈\s\d+\ss/);
     assert.match(await page.textContent('.mtr-note'), /conecte o celular a ela/);
@@ -476,11 +477,13 @@ test('medidor: caça-roteador diz mais longe / estável / mais perto, vibra e n�
     assert.equal(await page.locator('.mtr-hunt-host .switch').count(), 3, 'aparecem as chaves de bipes e de vibração');
     assert.equal(await page.locator('.mtr-hunt-host .switch').nth(1).isChecked(), false, 'o som começa desligado');
     assert.equal(await page.locator('.mtr-hunt-host .switch').nth(2).isChecked(), true, 'a vibração começa ligada');
+    assert.equal(await simEval(page, (sim) => sim.device.keepAwake), true, 'caçando, a tela do celular fica ligada');
 
     // o sinal cai: mais longe
     await emitRssi(page, -50, -88, 30);
     await page.waitForFunction(() => document.querySelector('.view > .screen').dataset.trend === 'farther');
     assert.equal(await page.textContent('.mtr-trend__title'), 'Mais longe');
+    assert.equal(await page.textContent('.mtr-hunt [role="status"]'), 'Mais longe', 'o leitor de tela ouve só a mudança de direção');
     assert.match(await page.textContent('.mtr-trend__text'), /o sinal caiu \d+\sdB em \d+\ss/);
     assert.match(await page.textContent('.mtr-heat__text'), /^(Muito frio|Frio)/);
     await shot(page, 'tools-a-medidor-caca-longe');
@@ -496,7 +499,9 @@ test('medidor: caça-roteador diz mais longe / estável / mais perto, vibra e n�
     await page.waitForFunction(() => document.querySelector('.view > .screen').dataset.trend === 'closer');
     assert.equal(await page.textContent('.mtr-trend__title'), 'Mais perto');
     assert.match(await page.textContent('.mtr-trend__text'), /o sinal subiu \d+\sdB em \d+\ss/);
-    await page.waitForFunction(() => Number(document.querySelector('.mtr-heat').dataset.level) >= 4);
+    await emitRssi(page, -42, -42, 25); // a "temperatura" usa o sinal suavizado: leva um instante para chegar lá
+    assert.ok(Number(await page.getAttribute('.mtr-heat', 'data-level')) >= 4, 'perto do roteador a caça esquenta');
+    assert.match(await page.textContent('.mtr-heat__text'), /^(Muito quente|Quente)/);
     await shot(page, 'tools-a-medidor-caca-perto');
 
     // os toques de vibração saíram pela ponte, no ritmo do sinal
@@ -537,6 +542,7 @@ test('medidor: caça-roteador diz mais longe / estável / mais perto, vibra e n�
     const left = await simEval(page, (sim) => sim.device.vibrations);
     await page.waitForTimeout(1200);
     assert.equal(await simEval(page, (sim) => sim.device.vibrations), left, 'a caça não continua depois de sair da tela');
+    assert.equal(await simEval(page, (sim) => sim.device.keepAwake), false, 'e a tela do celular volta a poder apagar');
   });
 });
 
@@ -621,7 +627,8 @@ test('medidor: nome de rede hostil é só texto; rede que sumiu e celular descon
     // rota com lixo no lugar do BSSID: ignora e mede a conectada
     await goto(page, '/ferramentas');
     await goto(page, '/ferramentas/medidor?bssid=%3Cimg%3E');
-    assert.equal((await data(page)).target, await connectedBssid(page));
+    await page.waitForFunction(() => document.querySelector('.view > .screen').dataset.target === window.__wrx.app.store.get().connection.bssid);
+    assert.equal((await data(page)).live, '1');
 
     // celular fora do Wi-Fi e nenhuma rede escolhida: convite para escolher
     await page.evaluate(() => window.__wrx.app.store.setConnection({ connected: false }));
@@ -1014,7 +1021,7 @@ test('exportar: se as análises opcionais não carregam, o relatório sai sem el
 test('entrar e sair depressa das três ferramentas não deixa nada para trás', T, async () => {
   await withApp(env, { params: FAST }, async ({ page }) => {
     await waitForScans(page, 1);
-    const routes = ['/ferramentas/medidor', '/ferramentas/conexao', '/ferramentas/exportar', '/ferramentas/medidor', '/ferramentas', '/ferramentas/exportar', '/ferramentas/conexao', '/redes'];
+    const routes = ['/ferramentas/medidor', '/ferramentas/conexao', '/ferramentas/exportar', '/ferramentas/medidor', '/redes', '/ferramentas/exportar', '/ferramentas/conexao', '/ferramentas'];
     // sem esperar: a troca chega enquanto a tela anterior ainda está montando
     for (const route of routes) {
       await page.evaluate((r) => {
@@ -1022,7 +1029,7 @@ test('entrar e sair depressa das três ferramentas não deixa nada para trás', 
       }, route);
       await page.waitForTimeout(40);
     }
-    await page.waitForFunction(() => document.querySelector('.view > .screen')?.dataset.screen === 'redes');
+    await page.waitForFunction(() => document.querySelector('.view > .screen')?.dataset.screen === 'ferramentas');
     await page.waitForTimeout(500);
     const left = await page.evaluate(() => ({
       gauges: document.querySelectorAll('.gauge').length,

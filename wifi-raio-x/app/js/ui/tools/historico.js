@@ -185,7 +185,7 @@ export async function mount(root, ctx) {
         const ap = store.apById(bssid);
         const label = memo.names.get(bssid) || bssid;
         const level = ap ? signalLevel(ap.rssi) : null;
-        const where = ap ? [ap.band ? fmtBand(ap.band) : null, ap.channel != null ? `canal ${ap.channel}` : null].filter(Boolean).join(' · ') : 'saiu do alcance';
+        const where = ap ? [ap.band ? fmtBand(ap.band) : null, ap.channel != null ? `canal ${ap.channel}` : null].filter(Boolean) : ['saiu do alcance'];
         return h(
           'div',
           { class: ['row', 'hist-item', (!ap || ap.stale) && 'hist-item--gone'], key: bssid, dataset: { bssid } },
@@ -196,8 +196,8 @@ export async function mount(root, ctx) {
             h(
               'span.row__body',
               null,
-              h('span.row__title', null, h('span', { class: ['ssid', ap && ap.hidden && 'ssid--hidden'], dir: 'auto' }, ap ? nameOf(ap) : label), ap && ap.connected ? badge('Conectado', { tone: 'accent' }) : null),
-              h('span.row__sub', null, where),
+              h('span.row__title', null, h('span', { class: ['ssid', ap && ap.hidden && 'ssid--hidden'], dir: 'auto' }, ap ? nameOf(ap) : label)),
+              h('span.row__sub.row__sub--clip', null, ap && ap.connected ? h('span.accent.strong', null, 'Conectado') : null, where.map((text) => h('span', null, text))),
             ),
             ap
               ? h('span', { class: ['signal', 'signal--stack', `sig-${level.key}`] }, h('span.signal__dbm', null, fmtDbm(ap.rssi)), h('span.signal__word', null, level.label))

@@ -434,7 +434,7 @@ public class BridgeContractTest extends AllSdks {
         }, new Pinger.Prober[] {(a, t) -> 5.0}, watchdog);
         Fixtures.Page p = new Fixtures.Page();
         Bridge b = Fixtures.bridge(Fixtures.activity(), p, slow, null);
-        b.onResume();
+        b.onStart();
         b.call("watchRssi", "{}");
 
         b.callAsync(1, "ping", "{\"host\":\"antiga.exemplo\",\"count\":1}"); // página antiga, id 1

@@ -8,6 +8,7 @@ import android.net.wifi.ScanResult;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.SystemClock;
+import android.util.Log;
 
 import androidx.core.content.ContextCompat;
 
@@ -39,6 +40,7 @@ final class WifiScanner {
     private final Object lock = new Object();
     private BroadcastReceiver receiver;
     private long requestedAt = -1; // elapsedRealtime do último startScan() ainda sem aviso; -1 = nenhum
+    private long lastFreshAt = -1; // elapsedRealtime da última lista nova lida; -1 = nenhuma ainda
 
     WifiScanner(Context context, Permissions permissions, Executor worker, Listener listener) {
         this.context = context.getApplicationContext();
@@ -146,7 +148,13 @@ final class WifiScanner {
         }
         try {
             // Ler e converter centenas de redes fora da thread da interface.
-            worker.execute(() -> listener.onScan(event(fresh, source)));
+            worker.execute(() -> {
+                try {
+                    listener.onScan(event(fresh, source));
+                } catch (Throwable t) {
+                    Log.e("WifiRaioX", "falha ao ler a lista de redes", t); // perde-se uma lista, não o app
+                }
+            });
         } catch (RejectedExecutionException ignored) {
             // app encerrando
         }
@@ -165,11 +173,17 @@ final class WifiScanner {
         } catch (RuntimeException ignored) {
             // serviço de Wi-Fi indisponível
         }
+        long now = SystemClock.elapsedRealtime();
+        long sinceFresh;
+        synchronized (lock) {
+            if (fresh) lastFreshAt = now;
+            sinceFresh = lastFreshAt >= 0 ? now - lastFreshAt : now;
+        }
         JSONObject o = new JSONObject();
         Json.put(o, "ts", System.currentTimeMillis());
         Json.put(o, "fresh", fresh);
         Json.put(o, "source", source);
-        Json.put(o, "aps", ScanMapper.list(results, SystemClock.elapsedRealtime()));
+        Json.put(o, "aps", ScanMapper.list(results, now, fresh, sinceFresh));
         return o;
     }
 }

@@ -40,7 +40,8 @@ const TUNE = {
   roomFpDb: 4.0, // ...ou tantos dB (RMS entre rádios) de diferença na impressão digital
   roomPosCap: 9, // a posição para de pesar depois de 3 unidades: sala grande continua sala
   roomUnitM2: 14, // tamanho típico de um cômodo: dá a "massa" de cada varredura
-  roomMergeT: 1.0, // custo acima do qual dois grupos são ambientes diferentes
+  roomInitM2: 4, // 1ª etapa: pedaços deste tamanho
+  roomEdgeT: 1.5, // fronteira mais forte que isto (x a diferença de dentro) separa dois ambientes
   roomM2Lo: 8, // no máximo um ambiente a cada 8 m²...
   roomM2Hi: 24, // ...e no mínimo um a cada 24 m²
   roomKnn: 5,
@@ -51,6 +52,11 @@ const TUNE = {
   voteS: 0.9, // alcance do voto de cada varredura na divisão das células (m)
   maxRadios: 40,
   fpClipDb: 15,
+  fpSlope: 2.0,
+  fpNearM: 1.5,
+  fpSmoothIters: 3,
+  fpSmoothPosM: 1.2,
+  fpSmoothK: 0.5,
   // --- paredes ---
   simplifyM: 0.2,
   doorM: 0.9,
@@ -243,7 +249,7 @@ function prepare(survey, solution, opts, tune) {
 // piso de detecção). Sem tirar a queda com a distância: na bancada, descontar uma curva
 // ajustada apaga justamente o degrau que a parede deixa.
 function fingerprints(ctx) {
-  const { P, fresh, bssids, radios, missDbm, tune } = ctx;
+  const { path, P, fresh, bssids, radios, solAps, missDbm, tune } = ctx;
   const R0 = radios.length;
   const sum = new Float32Array(P * R0);
   const cnt = new Uint8Array(P * R0);
@@ -275,13 +281,27 @@ function fingerprints(ctx) {
     const r = use[q];
     radioW[q] = Math.min(1, radios[r].heard / (0.5 * P));
     wsum += radioW[q];
-    let mean = 0;
-    for (let k = 0; k < P; k++) mean += cnt[k * R0 + r] ? sum[k * R0 + r] / cnt[k * R0 + r] : missDbm;
-    mean /= P;
-    for (let k = 0; k < P; k++) {
-      const v = cnt[k * R0 + r] ? sum[k * R0 + r] / cnt[k * R0 + r] : missDbm;
-      feat[k * R + q] = clamp(v - mean, -tune.fpClipDb, tune.fpClipDb);
+    // Rádio com posição resolvida: tira a queda de espaço livre com a distância (inclinação
+    // FIXA, da física; ajustada aos dados ela engoliria o degrau das paredes). Sobra parede + sombra.
+    let ap = null;
+    if (tune.fpSlope > 0) {
+      for (const id of radios[r].bssids) {
+        const a = solAps[id];
+        if (a && isNum(a.x) && isNum(a.y) && (!ap || (isNum(a.conf) ? a.conf : 0) > (isNum(ap.conf) ? ap.conf : 0))) ap = a;
+      }
     }
+    const value = (k) => {
+      let v = cnt[k * R0 + r] ? sum[k * R0 + r] / cnt[k * R0 + r] : missDbm;
+      if (ap) {
+        const dz = isNum(ap.z) ? ap.z - (path[k].z + PHONE_HEIGHT) : 0;
+        v += 10 * tune.fpSlope * Math.log10(Math.max(tune.fpNearM, Math.hypot(ap.x - path[k].x, ap.y - path[k].y, dz)));
+      }
+      return v;
+    };
+    let mean = 0;
+    for (let k = 0; k < P; k++) mean += value(k);
+    mean /= P;
+    for (let k = 0; k < P; k++) feat[k * R + q] = clamp(value(k) - mean, -tune.fpClipDb, tune.fpClipDb);
   }
   ctx.feat = feat;
   ctx.R = R;
@@ -585,6 +605,65 @@ function clearBorder(mask, nx, ny) {
 
 const normLabel = (s) => (typeof s === 'string' ? s.trim().replace(/\s+/g, ' ') : '');
 
+// Suaviza a impressão digital de cada varredura com a das vizinhas PARECIDAS (filtro bilateral
+// no grafo das varreduras): dentro de um cômodo o ruído some; através de uma parede a vizinha
+// é diferente, pesa pouco, e o degrau fica. Devolve Float32Array(m * R).
+function smoothFingerprints(ctx, members) {
+  const { path, feat, R, radioW, radioWsum, tune } = ctx;
+  const m = members.length;
+  let cur = new Float32Array(m * R);
+  for (let a = 0; a < m; a++) for (let q = 0; q < R; q++) cur[a * R + q] = feat[members[a] * R + q];
+  if (!R || m < 4 || tune.fpSmoothIters <= 0) return cur;
+  // Vizinhas: as próximas no plano e as seguintes no tempo (estas estão perto de verdade,
+  // mesmo quando o solucionador errou a posição).
+  const nb = Array.from({ length: m }, () => []);
+  const p2 = 2 * tune.fpSmoothPosM * tune.fpSmoothPosM;
+  const reach2 = (2.5 * tune.fpSmoothPosM) ** 2;
+  for (let a = 0; a < m; a++) {
+    const pa = path[members[a]];
+    for (let b = a + 1; b < m; b++) {
+      const pb = path[members[b]];
+      let d2 = (pa.x - pb.x) ** 2 + (pa.y - pb.y) ** 2;
+      if (b === a + 1 && members[b] === members[a] + 1 && walked(ctx, members[a], members[b])) d2 = Math.min(d2, 1);
+      if (d2 > reach2) continue;
+      const w = Math.exp(-d2 / p2);
+      nb[a].push(b, w);
+      nb[b].push(a, w);
+    }
+  }
+  const dist2 = (buf, a, b) => {
+    let s = 0;
+    for (let q = 0; q < R; q++) {
+      const d = buf[a * R + q] - buf[b * R + q];
+      s += radioW[q] * d * d;
+    }
+    return s / radioWsum;
+  };
+  for (let it = 0; it < tune.fpSmoothIters; it++) {
+    // Escala do "parecido": a diferença típica entre vizinhas nesta rodada.
+    const all = [];
+    for (let a = 0; a < m; a++) for (let j = 0; j < nb[a].length; j += 2) if (nb[a][j] > a) all.push(dist2(cur, a, nb[a][j]));
+    if (!all.length) break;
+    all.sort((x, y) => x - y);
+    const s2 = 2 * Math.max(0.25, quantileSorted(all, 0.5) * tune.fpSmoothK * tune.fpSmoothK);
+    const next = new Float32Array(m * R);
+    for (let a = 0; a < m; a++) {
+      let wsum = 1;
+      for (let q = 0; q < R; q++) next[a * R + q] = cur[a * R + q];
+      for (let j = 0; j < nb[a].length; j += 2) {
+        const b = nb[a][j];
+        const w = nb[a][j + 1] * Math.exp(-dist2(cur, a, b) / s2);
+        if (w < 1e-4) continue;
+        wsum += w;
+        for (let q = 0; q < R; q++) next[a * R + q] += w * cur[b * R + q];
+      }
+      for (let q = 0; q < R; q++) next[a * R + q] /= wsum;
+    }
+    cur = next;
+  }
+  return cur;
+}
+
 /**
  * Agrupamento hierárquico (Ward) das varreduras de um andar, só entre grupos vizinhos no
  * espaço ou no tempo. Indícios: nome dado pelo usuário (mesmo nome = mesmo ambiente; nomes
@@ -592,9 +671,10 @@ const normLabel = (s) => (typeof s === 'string' ? s.trim().replace(/\s+/g, ' ') 
  * @returns {{assign: Int32Array, groups: {label: string, auto: boolean, first: number}[]}}
  */
 function clusterRooms(ctx, members, areaM2, useLabels) {
-  const { path, scans, feat, R, radioW, radioWsum, tune } = ctx;
+  const { path, scans, R, radioW, radioWsum, tune } = ctx;
   const m = members.length;
   if (!m) return { assign: new Int32Array(0), groups: [] };
+  const sm = smoothFingerprints(ctx, members);
 
   // Unidades indivisíveis: varreduras do mesmo ponto marcado e pontos com o mesmo nome.
   const parent = new Int32Array(m).map((_, i) => i);
@@ -650,7 +730,7 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
     cn[g]++;
     cs[g * dim] += path[k].x;
     cs[g * dim + 1] += path[k].y;
-    for (let q = 0; q < R; q++) cs[g * dim + 2 + q] += feat[k * R + q];
+    for (let q = 0; q < R; q++) cs[g * dim + 2 + q] += sm[a * R + q];
     if (scanLabel[a] >= 0) lab[g] = scanLabel[a];
   }
   // Massa de uma varredura em "cômodos típicos": o custo não depende de quantas varreduras
@@ -744,15 +824,32 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
     return ba < 0 || best === Infinity ? null : [ba, bb, best];
   };
 
+  // Arestas entre varreduras vizinhas, com a diferença de impressão digital (dB RMS) de cada uma.
+  const edgeSeen = new Set();
+  const edges = []; // [a, b, dB]
+  for (const [a, b] of scanEdges) {
+    const key = a < b ? a * m + b : b * m + a;
+    if (a === b || edgeSeen.has(key)) continue;
+    edgeSeen.add(key);
+    let d2 = 0;
+    for (let q = 0; q < R; q++) {
+      const d = sm[a * R + q] - sm[b * R + q];
+      d2 += radioW[q] * d * d;
+    }
+    edges.push([a, b, Math.sqrt(d2 / radioWsum)]);
+  }
+  const typical = edges.length ? Math.max(0.5, median(edges.map((e) => e[2]))) : 1;
+
+  // 1ª etapa (Ward): pedaços compactos, bem menores que um cômodo.
   const kMin = Math.max(1, labelNames.length, Math.round(areaM2 / tune.roomM2Hi));
   const kMax = Math.max(kMin, Math.round(areaM2 / tune.roomM2Lo));
-  while (count > kMin) {
+  const kInit = Math.max(kMax, Math.round(areaM2 / tune.roomInitM2));
+  while (count > kInit) {
     const pick = cheapest(null);
     if (!pick) break;
-    if (pick[2] > tune.roomMergeT && count <= kMax) break;
     merge(pick[0], pick[1]);
   }
-  // Grupo sem nome e pequeno demais para ser um ambiente: vai para o vizinho mais parecido.
+  // Pedaço sem nome e pequeno demais para ser um ambiente: vai para o vizinho mais parecido.
   const tiny = (a) => lab[a] < 0 && (cn[a] < tune.roomMinScans || cn[a] * mass * tune.roomUnitM2 < tune.roomMinM2);
   for (let guard = 0; guard < m; guard++) {
     const pick = cheapest(tiny);
@@ -760,58 +857,111 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
     merge(pick[0], pick[1]);
   }
 
+  // 2ª etapa: junta pedaços vizinhos pela fronteira mais fraca. Força da fronteira = diferença
+  // média de impressão digital nas arestas que a atravessam, relativa à diferença dentro dos
+  // dois pedaços. Parede = degrau na fronteira; sala grande = muda aos poucos e acaba junta.
+  const intSum = new Float64Array(m);
+  const intCnt = new Float64Array(m);
+  const cross = Array.from({ length: m }, () => new Map());
+  for (const [a, b, w] of edges) {
+    const ga = find(a);
+    const gb = find(b);
+    if (ga === gb) {
+      intSum[ga] += w;
+      intCnt[ga]++;
+      continue;
+    }
+    for (const [x, y] of [[ga, gb], [gb, ga]]) {
+      const e = cross[x].get(y);
+      if (e) {
+        e[0] += w;
+        e[1]++;
+      } else cross[x].set(y, [w, 1]);
+    }
+  }
+  const strength = (a, b, e) => {
+    if (lab[a] >= 0 && lab[b] >= 0 && lab[a] !== lab[b]) return Infinity;
+    // A referência "de dentro" puxa para o típico do andar quando os pedaços têm poucas arestas.
+    const inner = (intSum[a] + intSum[b] + 4 * typical) / (intCnt[a] + intCnt[b] + 4);
+    return e[0] / e[1] / inner;
+  };
+  while (count > kMin) {
+    let best = Infinity;
+    let ba = -1;
+    let bb = -1;
+    for (let a = 0; a < m; a++) {
+      if (!alive[a]) continue;
+      for (const [c, e] of cross[a]) {
+        if (c < a) continue;
+        const v = strength(a, c, e);
+        if (v < best || (v === best && (a < ba || (a === ba && c < bb)))) {
+          best = v;
+          ba = a;
+          bb = c;
+        }
+      }
+    }
+    if (ba < 0 || best === Infinity) break;
+    if (best > tune.roomEdgeT && count <= kMax) break;
+    intSum[ba] += intSum[bb] + cross[ba].get(bb)[0];
+    intCnt[ba] += intCnt[bb] + cross[ba].get(bb)[1];
+    cross[ba].delete(bb);
+    for (const [c, e] of cross[bb]) {
+      if (c === ba) continue;
+      cross[c].delete(bb);
+      const mine = cross[ba].get(c);
+      if (mine) {
+        mine[0] += e[0];
+        mine[1] += e[1];
+      } else {
+        const fresh = [e[0], e[1]];
+        cross[ba].set(c, fresh);
+        cross[c].set(ba, fresh);
+      }
+    }
+    cross[bb].clear();
+    merge(ba, bb);
+  }
+
   const assign = new Int32Array(m);
   for (let a = 0; a < m; a++) assign[a] = find(a);
 
-  // Acerto fino: cada unidade sem nome vai para o grupo vizinho cujo centro está mais perto
-  // (posição + impressão digital). Conserta o que a ordem das junções deixou torto.
+  // Acerto fino: cada varredura solta fica com o grupo da maioria das vizinhas PARECIDAS com
+  // ela (as do outro lado de um degrau pesam pouco). Conserta o que a ordem das junções entortou.
+  const nbrs = Array.from({ length: m }, () => []);
+  for (const [a, b, w] of edges) {
+    const pa = path[members[a]];
+    const pb = path[members[b]];
+    const d2 = (pa.x - pb.x) ** 2 + (pa.y - pb.y) ** 2;
+    const aff = Math.exp(-d2 / 4.5) * Math.exp(-(w * w) / (2 * typical * typical));
+    nbrs[a].push(b, aff);
+    nbrs[b].push(a, aff);
+  }
+  const votes = new Map();
   for (let round = 0; round < tune.roomRefine; round++) {
     let moved = 0;
-    const nbr = Array.from({ length: m }, () => new Set());
-    for (const [a, b] of scanEdges) {
-      nbr[a].add(assign[b]);
-      nbr[b].add(assign[a]);
-    }
     for (let a = 0; a < m; a++) {
       if (scanLabel[a] >= 0) continue;
       const s = scans[path[members[a]].i];
       if (s.spot !== null && s.spot !== undefined) continue; // o ponto marcado anda junto
       const cur = assign[a];
       if (cn[cur] <= tune.roomMinScans) continue;
-      const k = members[a];
-      const d2to = (g, self) => {
-        // Distância ao centro do grupo, tirando a própria varredura quando ela é de lá.
-        const n = cn[g] - (self ? 1 : 0);
-        const dx = (cs[g * dim] - (self ? path[k].x : 0)) / n - path[k].x;
-        const dy = (cs[g * dim + 1] - (self ? path[k].y : 0)) / n - path[k].y;
-        let df = 0;
-        for (let q = 0; q < R; q++) {
-          const d = (cs[g * dim + 2 + q] - (self ? feat[k * R + q] : 0)) / n - feat[k * R + q];
-          df += radioW[q] * d * d;
-        }
-        return (dx * dx + dy * dy) / sp2 + df / sf2;
-      };
+      votes.clear();
+      for (let j = 0; j < nbrs[a].length; j += 2) {
+        const g = assign[nbrs[a][j]];
+        votes.set(g, (votes.get(g) || 0) + nbrs[a][j + 1]);
+      }
       let best = cur;
-      let bestD = d2to(cur, true);
-      for (const g of nbr[a]) {
-        if (g === cur) continue;
-        const d = d2to(g, false);
-        if (d < bestD - 1e-9 || (d === bestD && g < best)) {
-          bestD = d;
+      let bestV = (votes.get(cur) || 0) * 1.15; // mudar de grupo exige alguma folga
+      for (const [g, v] of votes) {
+        if (v > bestV || (v === bestV && g < best && g !== cur)) {
+          bestV = v;
           best = g;
         }
       }
       if (best === cur) continue;
       cn[cur]--;
       cn[best]++;
-      cs[cur * dim] -= path[k].x;
-      cs[cur * dim + 1] -= path[k].y;
-      cs[best * dim] += path[k].x;
-      cs[best * dim + 1] += path[k].y;
-      for (let q = 0; q < R; q++) {
-        cs[cur * dim + 2 + q] -= feat[k * R + q];
-        cs[best * dim + 2 + q] += feat[k * R + q];
-      }
       assign[a] = best;
       moved++;
     }
@@ -2196,3 +2346,6 @@ export function describeMap(model) {
   for (const n of q.notes) out.push(n);
   return out;
 }
+
+/** Peças internas, só para os testes e a bancada. */
+export const _dev = { TUNE, prepare, fingerprints, smoothFingerprints, distanceTransform, traceRings, simplifyOpen, simplifyRing, cutPolyline };

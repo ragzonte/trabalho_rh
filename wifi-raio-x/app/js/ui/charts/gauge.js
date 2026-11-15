@@ -43,6 +43,8 @@ const STYLE = `
 .gauge__unit{font-size:16px;font-weight:500;letter-spacing:0;color:var(--muted)}
 .gauge__label{min-height:22px;margin-top:6px;font-size:16px;font-weight:600;line-height:22px;color:var(--gauge-color);white-space:nowrap}
 .gauge__label:empty{display:none}
+.gauge--empty .gauge__number{color:var(--muted);font-weight:300;opacity:.7}
+.gauge--empty .gauge__label{color:var(--muted)}
 `;
 
 function ensureStyle() {
@@ -354,6 +356,7 @@ export function createGauge(container, options = {}) {
     if (has) root.setAttribute('aria-valuenow', String(clamp(target, Math.min(min, max), Math.max(min, max))));
     else root.removeAttribute('aria-valuenow');
     root.setAttribute('aria-valuetext', has ? [`${text}${unit ? ` ${unit}` : ''}`, label].filter(Boolean).join(', ') : label || 'sem leitura');
+    root.classList.toggle('gauge--empty', !has);
     root.dataset.value = has ? String(target) : '';
     root.dataset.peak = isNum(peak) ? String(peak) : '';
     fitText();

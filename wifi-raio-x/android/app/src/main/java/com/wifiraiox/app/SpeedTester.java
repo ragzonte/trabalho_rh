@@ -276,15 +276,16 @@ final class SpeedTester {
         phase.alive.set(streams);
         Thread[] workers = new Thread[streams];
         for (int i = 0; i < streams; i++) {
-            workers[i] = new Thread(() -> {
+            workers[i] = Sys.thread("speed-" + (download ? "down-" : "up-") + i, () -> {
                 try {
                     if (download) downloadLoop(job, phase, opener, plan.downChunk);
                     else uploadLoop(job, phase, opener, plan.upChunk);
+                } catch (Throwable t) {
+                    phase.error = t; // nada do que acontece numa conexão de teste pode derrubar o app
                 } finally {
                     phase.alive.decrementAndGet();
                 }
-            }, "wrx-speed-" + (download ? "down-" : "up-") + i);
-            workers[i].setDaemon(true);
+            });
             workers[i].start();
         }
 

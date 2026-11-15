@@ -6,7 +6,7 @@ import org.json.JSONObject;
 
 /**
  * Emite o sinal da conexão atual em intervalos regulares (evento 'rssi'), só enquanto a tela está
- * em primeiro plano. Todo o estado vive na thread da interface.
+ * visível (entre onStart e onStop). Todo o estado vive na thread da interface.
  */
 final class RssiWatcher {
 
@@ -27,7 +27,7 @@ final class RssiWatcher {
     private final Source source;
     private final Listener listener;
     private boolean watching;
-    private boolean resumed;
+    private boolean visible;
     private boolean ticking;
     private int intervalMs = DEFAULT_INTERVAL_MS;
 
@@ -73,10 +73,10 @@ final class RssiWatcher {
         });
     }
 
-    /** onResume / onPause da Activity. */
-    void setResumed(final boolean value) {
+    /** onStart / onStop da Activity. */
+    void setVisible(final boolean value) {
         Sys.runOnMain(main, () -> {
-            resumed = value;
+            visible = value;
             restart();
         });
     }
@@ -87,7 +87,7 @@ final class RssiWatcher {
 
     private void restart() {
         main.removeCallbacks(tick);
-        ticking = watching && resumed;
+        ticking = watching && visible;
         if (ticking) main.post(tick); // a primeira amostra sai logo
     }
 }

@@ -288,9 +288,7 @@ final class Pinger {
     static InetAddress resolveBounded(final String host) throws Exception {
         if (PingHost.isIpv4(host) || PingHost.isIpv6(host)) return InetAddress.getByName(host); // literal: sem consulta
         FutureTask<InetAddress> task = new FutureTask<>(() -> InetAddress.getByName(host));
-        Thread thread = new Thread(task, "wrx-dns");
-        thread.setDaemon(true);
-        thread.start();
+        Sys.thread("dns", task).start();
         return task.get(DNS_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
 }
