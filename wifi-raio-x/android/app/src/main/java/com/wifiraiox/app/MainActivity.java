@@ -30,6 +30,9 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     private static final String TAG = "WifiRaioX";
     /** Evita um vaivém infinito caso a página inicial tente, ela mesma, navegar para fora. */
     private static final long RESTORE_GAP_MS = 3000;
+    private static final long RENDERER_LOOP_MS = 10_000;
+    /** Estático: precisa sobreviver à recriação da tela. */
+    static long lastRendererGoneAt = -1;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private WebView web;
@@ -62,6 +65,7 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     }
 
     @SuppressLint("SetJavaScriptEnabled") // a página é a interface do próprio app, servida de dentro do APK
+    @SuppressWarnings("deprecation") // os dois setAllow...FromFileURLs já nascem false; ficam explícitos por garantia
     private void configure(WebView view, final boolean debuggable) {
         WebSettings settings = view.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -69,6 +73,8 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
         // Nada de file:// nem content://: tudo chega pelo WebViewAssetLoader, em https.
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
+        settings.setAllowFileAccessFromFileURLs(false);
+        settings.setAllowUniversalAccessFromFileURLs(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setGeolocationEnabled(false);
         settings.setSupportMultipleWindows(false);
@@ -210,6 +216,11 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     }
 
     @Override
+    public void onAppPageRequested() {
+        if (bridge != null) bridge.onNewPage();
+    }
+
+    @Override
     public void onForeignMainFrame(final Uri uri) {
         main.post(() -> {
             if (web == null) return;
@@ -235,7 +246,16 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
 
     @Override
     public void onRendererGone() {
-        // O WebView ficou inutilizável; recriar a tela devolve o app funcionando em vez de fechá-lo.
+        long now = SystemClock.elapsedRealtime();
+        boolean again = lastRendererGoneAt >= 0 && now - lastRendererGoneAt < RENDERER_LOOP_MS;
+        lastRendererGoneAt = now;
+        if (again) {
+            // Morreu de novo logo em seguida: recriar entraria em laço. Melhor fechar.
+            Log.e(TAG, "processo do WebView encerrado duas vezes seguidas; fechando");
+            finish();
+            return;
+        }
+        // O WebView ficou inutilizável; recriar a tela devolve o app funcionando em vez de derrubá-lo.
         Log.w(TAG, "processo do WebView encerrado pelo sistema; recriando a tela");
         recreate();
     }

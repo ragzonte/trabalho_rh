@@ -13,6 +13,9 @@
 //   - o tempo padrão é 20 s por cenário NESTA máquina; um celular é de 3 a 5 vezes mais lento;
 //   - 'dev' é para desenvolver e ajustar; 'holdout' (outras sementes, casas sorteadas e
 //     propagação ±20%) é para julgar. Não ajuste nada olhando o holdout.
+//   - as sementes do holdout saem de um sal (WRX_HOLDOUT_SALT; há um padrão público, para os
+//     números de referência se repetirem). Quem julga pode usar um sal secreto: aí nem lendo
+//     este arquivo dá para refazer os mundos do holdout a partir do levantamento.
 //
 // A única exceção à regra da verdade é tests/mapping/baseline.mjs, cujos oráculos trapaceiam
 // de propósito para mostrar o teto possível em cada cenário.
@@ -23,7 +26,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 
-import { createRng } from '../../app/js/sim/prng.js';
+import { createRng, hashSeed } from '../../app/js/sim/prng.js';
 import { listPresets, presetSpec, randomSpec } from '../../app/js/sim/presets.js';
 import { planWalk, simulateSurvey } from '../../app/js/sim/walk.js';
 import { createWorld } from '../../app/js/sim/world.js';
@@ -33,6 +36,9 @@ import { aggregate, evaluate, failure, procrustes } from './metrics.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BASELINE = path.join(HERE, 'baseline.mjs');
 export const DEFAULT_BUDGET_MS = 20000;
+/** Sal público do holdout: é o que vale quando ninguém informa outro. */
+export const DEFAULT_HOLDOUT_SALT = 'wrx-holdout-publico-1';
+const SALT_ENV = 'WRX_HOLDOUT_SALT';
 
 // ---------------------------------------------------------------------------
 // Cenários
@@ -55,6 +61,8 @@ const EFFORT = {
   escritorio: { length: 340, spots: 34, spots30: 45 },
 };
 
+const HOLDOUT_HOUSES = 24;
+
 function effortForArea(area) {
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v)));
   return { length: clamp(40 + 2.6 * area, 150, 380), spots: clamp(area / 3.2, 14, 40), spots30: clamp(area / 2.5, 25, 45) };
@@ -68,8 +76,9 @@ function walkOptions(mode, effort, seed, extra = {}) {
 }
 
 // No holdout a física muda um pouco (±20%): quem decorou as constantes do dev não leva vantagem.
-function holdoutRf(name) {
-  const rng = createRng('holdout-rf', name);
+// Metade dos "celulares" do holdout filtra as leituras antigas, como o Android puro.
+function holdoutRf(salt, name) {
+  const rng = createRng('holdout-rf', salt, name);
   const vary = (v) => Math.round(v * rng.float(0.8, 1.2) * 1000) / 1000;
   return {
     n: Math.round(2.1 * rng.float(0.88, 1.2) * 1000) / 1000,
@@ -78,14 +87,20 @@ function holdoutRf(name) {
     fadeSigmaDb: vary(1.4),
     noiseSigmaDb: vary(1.4),
     bodyLossDb: [vary(5), vary(6), vary(6)],
+    staleCarry: rng.chance(0.5),
   };
 }
+
+// Semente de 32 bits tirada do sal e do nome do cenário: não é um número pequeno que dê para
+// adivinhar olhando os nomes das redes do levantamento.
+const holdoutSeed = (salt, name, what) => hashSeed('wrx-holdout', salt, name, what);
 
 /**
  * Lista (determinística) dos cenários de um conjunto.
  * @param {'dev'|'holdout'|'all'} set
+ * @param {{salt?: string}} [options]  sal do holdout (padrão: WRX_HOLDOUT_SALT ou o sal público)
  */
-export function listScenarios(set = 'dev') {
+export function listScenarios(set = 'dev', options = {}) {
   const out = [];
   const presets = listPresets().map((p) => p.id);
   if (set === 'dev' || set === 'all') {
@@ -107,41 +122,43 @@ export function listScenarios(set = 'dev') {
     }
   }
   if (set === 'holdout' || set === 'all') {
-    // Os mesmos mundos prontos, com outra vizinhança, outro canto do roteador e outra caminhada.
-    presets.forEach((id, p) => {
+    const salt = String(options.salt ?? process.env[SALT_ENV] ?? DEFAULT_HOLDOUT_SALT);
+    // Os mesmos mundos prontos, duas vezes cada modo, com outra vizinhança, outro canto do
+    // roteador, outro usuário e outra caminhada.
+    presets.forEach((id) => {
       MODES.forEach((mode, m) => {
-        const seed = 71 + 10 * p + m;
-        const name = `${id}-${mode.key}-h${seed}`;
-        // No sobrado, metade dos levantamentos começa pelo andar de cima.
-        const extra = id === 'sobrado' && m % 2 === 1 ? { floorOrder: [1, 0] } : {};
-        out.push({
-          name,
-          set: 'holdout',
-          group: id,
-          mode: mode.key,
-          world: { type: 'preset', id, seed },
-          rf: holdoutRf(name),
-          walk: walkOptions(mode, EFFORT[id], seed, extra),
-          survey: { scanIntervalS: mode.interval, stillScans: mode.stillScans, seed },
-        });
+        for (const rep of [1, 2]) {
+          const name = `${id}-${mode.key}-h${rep}`;
+          // No sobrado, metade dos levantamentos começa pelo andar de cima.
+          const extra = id === 'sobrado' && (m + rep) % 2 === 1 ? { floorOrder: [1, 0] } : {};
+          out.push({
+            name,
+            set: 'holdout',
+            group: id,
+            mode: mode.key,
+            world: { type: 'preset', id, seed: holdoutSeed(salt, name, 'world') },
+            rf: holdoutRf(salt, name),
+            walk: walkOptions(mode, EFFORT[id], holdoutSeed(salt, name, 'walk'), extra),
+            survey: { scanIntervalS: mode.interval, stillScans: mode.stillScans, seed: holdoutSeed(salt, name, 'survey') },
+          });
+        }
       });
     });
-    // Doze casas sorteadas: plantas que nenhum solucionador viu.
+    // Vinte e quatro casas sorteadas: plantas que nenhum solucionador viu (6 por modo, 8 por tamanho).
     const sizes = ['pequena', 'media', 'grande'];
-    for (let i = 0; i < 12; i++) {
-      const seed = 301 + i;
+    for (let i = 0; i < HOLDOUT_HOUSES; i++) {
       const mode = MODES[i % MODES.length];
       const size = sizes[Math.floor(i / MODES.length) % sizes.length];
-      const name = `casa${seed}-${size}-${mode.key}`;
+      const name = `casa${String(i + 1).padStart(2, '0')}-${size}-${mode.key}`;
       out.push({
         name,
         set: 'holdout',
         group: 'casa-sorteada',
         mode: mode.key,
-        world: { type: 'random', seed, size },
-        rf: holdoutRf(name),
-        walk: { kind: mode.kind, seed, auto: true },
-        survey: { scanIntervalS: mode.interval, stillScans: mode.stillScans, seed },
+        world: { type: 'random', seed: holdoutSeed(salt, name, 'world'), size },
+        rf: holdoutRf(salt, name),
+        walk: { kind: mode.kind, seed: holdoutSeed(salt, name, 'walk'), auto: true },
+        survey: { scanIntervalS: mode.interval, stillScans: mode.stillScans, seed: holdoutSeed(salt, name, 'survey') },
       });
     }
   }
@@ -170,6 +187,30 @@ export function buildScenario(desc) {
 // ---------------------------------------------------------------------------
 // Execução isolada do solucionador
 // ---------------------------------------------------------------------------
+
+/**
+ * Confere, pelo texto do módulo, as regras que a thread isolada não consegue impor: o solucionador
+ * vai rodar dentro do app, então só pode importar `types.js` e não pode usar nada do Node. Quem
+ * importa o simulador ou a bancada consegue refazer os cenários e "acertar" tudo.
+ * É uma conferência de texto (dá para burlar de propósito): serve de alerta para quem julga.
+ * @param {string} source
+ * @returns {string[]} avisos (vazio = nada suspeito)
+ */
+export function lintSolver(source) {
+  // Sem os comentários (bloco, linha inteira e fim de linha), que podem citar os nomes proibidos.
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1');
+  const found = new Set();
+  for (const m of code.matchAll(/\b(?:import|export)\s+(?:[\w*{}\s,$]+\s+from\s*)?['"]([^'"]+)['"]/g)) {
+    if (!/(^|\/)types\.js$/.test(m[1])) found.add(`importa "${m[1]}"`);
+  }
+  if (/\bimport\s*\(/.test(code)) found.add('usa import() dinâmico');
+  if (/\brequire\s*\(/.test(code)) found.add('usa require()');
+  if (/\bprocess\s*\.|\bworkerData\b|['"]node:/.test(code)) found.add('usa APIs do Node (process, node:..., workerData)');
+  if (/\bMath\.random\b|\bDate\.now\b/.test(code)) found.add('usa Math.random ou Date.now (resultado não se repete)');
+  // Os mundos prontos têm planta fixa e redes com nome típico: reconhecê-los pelo nome é decorar a prova.
+  if (/VIVOFIBRA|CLARO_|ANDRADE|-CORP|Visitantes|Familia Souza|Sobrado 27/i.test(code)) found.add('cita nomes de redes dos mundos de teste');
+  return [...found];
+}
 
 // Só os campos do contrato atravessam de volta (o `debug` pode ser enorme ou nem ser copiável).
 function plainSolution(solution) {
@@ -207,7 +248,10 @@ async function workerMain() {
 
 function solveInWorker(job, budgetMs, graceMs) {
   return new Promise((resolve) => {
-    const worker = new Worker(new URL(import.meta.url), { workerData: job });
+    // A thread não herda o sal do holdout (nem pela variável de ambiente).
+    const env = { ...process.env };
+    delete env[SALT_ENV];
+    const worker = new Worker(new URL(import.meta.url), { workerData: job, env });
     let done = false;
     const finish = (value) => {
       if (done) return;
@@ -291,8 +335,9 @@ export async function runScenario(desc, run) {
  * @returns {Promise<{results:Object[], aggregate:Object, groups:Object, modes:Object}>}
  */
 export async function runBench(run) {
-  let scenarios = listScenarios(run.set || 'dev');
+  let scenarios = listScenarios(run.set || 'dev', { salt: run.salt });
   if (run.only) scenarios = scenarios.filter((s) => s.name.includes(run.only));
+  if (!scenarios.length) throw new Error(`nenhum cenário do conjunto "${run.set || 'dev'}" tem "${run.only}" no nome`);
   const results = new Array(scenarios.length);
   const jobs = Math.max(1, Math.min(run.jobs ?? 3, scenarios.length || 1));
   let next = 0;
@@ -347,11 +392,12 @@ const br = (v, digits = 2) => (v == null || !Number.isFinite(v) ? '–' : v.toFi
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 /**
- * Planta real com paredes e cômodos, caminho real em cinza, caminho estimado (depois do
- * alinhamento rígido) colorido pelo erro, e roteadores da casa: real x estimado.
+ * Planta real com paredes e cômodos, o trajeto real em cinza (com o lugar de cada varredura),
+ * a posição estimada de cada varredura (depois do alinhamento rígido) colorida pelo erro,
+ * e os roteadores da casa: real x estimado.
  */
 export function renderSvg(scenario, solution, result) {
-  const { world, truth, survey } = scenario;
+  const { world, truth, survey, plan } = scenario;
   const b = world.bounds;
   const margin = 2.5; // metros de folga em volta da planta, para estimativas que caem fora
   const scale = Math.min(60, 620 / (b.width + 2 * margin));
@@ -359,7 +405,7 @@ export function renderSvg(scenario, solution, result) {
   const panelH = (b.height + 2 * margin) * scale;
   const top = 64;
   const legendH = 64;
-  const W = Math.max(panelW * world.floors + 24, 640);
+  const W = Math.max(panelW * world.floors + 24, 980); // largura mínima: cabe o resumo e a legenda
   const H = top + panelH + legendH;
   const X = (x, f) => 12 + f * panelW + (x - b.minX + margin) * scale;
   const Y = (y) => top + panelH - (y - b.minY + margin) * scale;
@@ -373,6 +419,23 @@ export function renderSvg(scenario, solution, result) {
     ? `nota ${br(result.score, 1)} · erro mediano ${br(result.medianRigid)} m · p90 ${br(result.p90Rigid)} m · só a forma ${br(result.medianSim)} m · escala ${br(result.scaleRatio)} · cômodo certo ${result.roomPurity == null ? '–' : Math.round(result.roomPurity * 100) + '%'} · ${result.scans} varreduras em ${br(result.durationMin, 1)} min`
     : `FALHOU: ${esc(String(result.error).split('\n')[0]).slice(0, 140)}`;
   out.push(`<text x="12" y="46" font-size="12" fill="${INK.text2}">${summary}</text>`);
+
+  // Trajeto real por andar: os trechos andados de fato (não as cordas entre varreduras, que
+  // cortariam as paredes no desenho).
+  const walked = Array.from({ length: world.floors }, () => []);
+  if (plan) {
+    let floor = plan.start.floor;
+    let line = [`${X(plan.start.x, floor).toFixed(1)},${Y(plan.start.y).toFixed(1)}`];
+    for (const step of plan.steps) {
+      if (step.type === 'stairs') {
+        walked[floor].push(line);
+        floor = step.floor;
+        line = [];
+      }
+      if (step.type !== 'spot') line.push(`${X(step.x, floor).toFixed(1)},${Y(step.y).toFixed(1)}`);
+    }
+    walked[floor].push(line);
+  }
 
   const valid = result.ok && solution;
   const fit = valid ? procrustes(solution.points, truth.points, { scale: false }) : null;
@@ -397,20 +460,28 @@ export function renderSvg(scenario, solution, result) {
         `<line x1="${X(w.x1, f).toFixed(1)}" y1="${Y(w.y1).toFixed(1)}" x2="${X(w.x2, f).toFixed(1)}" y2="${Y(w.y2).toFixed(1)}" ${WALL_STYLE[w.material]} stroke-linecap="round"/>`,
       );
     }
-    // Caminho real: trechos seguidos no mesmo andar.
-    let run = [];
-    const flush = () => {
-      if (run.length > 1)
+    // Escada: um losango em cada ponta (pé num andar, topo no outro).
+    for (const st of world.stairs) {
+      for (const [sf, sx, sy] of [
+        [st.fromFloor, st.x, st.y],
+        [st.toFloor, st.x2, st.y2],
+      ]) {
+        if (sf !== f) continue;
         out.push(
-          `<polyline points="${run.join(' ')}" fill="none" stroke="${INK.truth}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`,
+          `<rect x="${(X(sx, f) - 5).toFixed(1)}" y="${(Y(sy) - 5).toFixed(1)}" width="10" height="10" transform="rotate(45 ${X(sx, f).toFixed(1)} ${Y(sy).toFixed(1)})" fill="none" stroke="${INK.muted}" stroke-width="1.5"><title>escada</title></rect>`,
         );
-      run = [];
-    };
+      }
+    }
+    // Trajeto real e, por cima, o lugar real de cada varredura.
+    for (const line of walked[f]) {
+      if (line.length > 1)
+        out.push(
+          `<polyline points="${line.join(' ')}" fill="none" stroke="${INK.truth}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>`,
+        );
+    }
     truth.points.forEach((p, i) => {
-      if (truth.floors[i] === f) run.push(`${X(p.x, f).toFixed(1)},${Y(p.y).toFixed(1)}`);
-      else flush();
+      if (truth.floors[i] === f) out.push(`<circle cx="${X(p.x, f).toFixed(1)}" cy="${Y(p.y).toFixed(1)}" r="1.8" fill="${INK.muted}"/>`);
     });
-    flush();
     if (fit) {
       // Fio fino ligando cada estimativa ao lugar real, depois os pontos por cima.
       const dots = [];
@@ -459,7 +530,12 @@ export function renderSvg(scenario, solution, result) {
     out.push(mark(lx, ly), `<text x="${lx + 20}" y="${ly + 4}" font-size="11" fill="${INK.text2}">${label}</text>`);
     lx += width;
   };
-  item((x, y) => `<line x1="${x}" y1="${y}" x2="${x + 14}" y2="${y}" stroke="${INK.truth}" stroke-width="2"/>`, 'caminho real', 100);
+  item(
+    (x, y) =>
+      `<line x1="${x}" y1="${y}" x2="${x + 14}" y2="${y}" stroke="${INK.truth}" stroke-width="2"/><circle cx="${x + 7}" cy="${y}" r="1.8" fill="${INK.muted}"/>`,
+    'caminho real e varreduras',
+    170,
+  );
   for (const bin of ERROR_BINS) {
     item((x, y) => `<circle cx="${x + 7}" cy="${y}" r="4" fill="${bin.color}"/>`, bin.label, 88);
   }
@@ -468,7 +544,7 @@ export function renderSvg(scenario, solution, result) {
   out.push(
     `<rect x="${lx + 2}" y="${ly2 - 5}" width="10" height="10" rx="2" fill="${AP_COLOR}"/><text x="${lx + 20}" y="${ly2 + 4}" font-size="11" fill="${INK.text2}">roteador da casa (real)</text>`,
     `<circle cx="${lx + 177}" cy="${ly2}" r="5" fill="${INK.surface}" stroke="${AP_COLOR}" stroke-width="2"/><text x="${lx + 190}" y="${ly2 + 4}" font-size="11" fill="${INK.text2}">roteador estimado</text>`,
-    `<text x="${lx + 320}" y="${ly2 + 4}" font-size="11" fill="${INK.muted}">pontos = posição estimada de cada varredura (alinhamento rígido), cor = erro</text>`,
+    `<text x="${lx + 320}" y="${ly2 + 4}" font-size="11" fill="${INK.muted}">pontos azuis = posição estimada de cada varredura (alinhamento rígido), ligada ao lugar real; cor = erro</text>`,
   );
   out.push('</svg>');
   return out.join('\n');
@@ -535,9 +611,19 @@ const HELP = `Bancada do mapa 3D por Wi-Fi
   --jobs <n>           cenários em paralelo (padrão: 3; use 1 para medir tempo com calma)
   --inline             roda na thread principal, sem corte de tempo forçado (depuração)
   --list               só lista os cenários
+
+  WRX_HOLDOUT_SALT=<segredo>  (variável de ambiente) troca as sementes do holdout; sem ela vale o sal público
 `;
 
-const f = (v, width, digits = 2) => (v == null || !Number.isFinite(v) ? '–' : v.toFixed(digits)).padStart(width);
+// Número alinhado à direita em `width` colunas (uma delas é o espaço que separa da coluna anterior).
+// Valor grande demais perde casas decimais e, no limite, vira ">999": a tabela nunca desalinha.
+function f(v, width, digits = 2) {
+  if (v == null || !Number.isFinite(v)) return '–'.padStart(width);
+  let text = v.toFixed(digits);
+  for (let d = digits - 1; text.length > width - 1 && d >= 0; d--) text = v.toFixed(d);
+  if (text.length > width - 1 && width >= 5) text = v > 0 ? `>${'9'.repeat(width - 2)}` : `<-${'9'.repeat(width - 3)}`;
+  return text.padStart(width);
+}
 
 function tableHeader() {
   return (
@@ -634,6 +720,10 @@ async function main() {
   if (!fs.existsSync(path.resolve(args.solverPath))) throw new Error(`módulo não encontrado: ${args.solverPath}`);
   if (args.svgDir) assertOutsideRepo(args.svgDir);
 
+  // As referências (baseline.mjs) têm o canal dos oráculos; qualquer outro módulo passa pela conferência.
+  const warnings = path.resolve(args.solverPath) === BASELINE ? [] : lintSolver(fs.readFileSync(path.resolve(args.solverPath), 'utf8'));
+  for (const w of warnings) console.error(`aviso: o solucionador ${w}; isso é contra as regras da bancada`);
+
   const started = performance.now();
   if (!args.json) {
     console.log(`solucionador: ${args.solverPath}#${args.exportName} · conjunto: ${args.set} · tempo máximo: ${args.budgetMs} ms`);
@@ -646,7 +736,7 @@ async function main() {
   if (args.json) {
     console.log(
       JSON.stringify(
-        { solver: args.solverPath, export: args.exportName, set: args.set, budgetMs: args.budgetMs, wallMs: Math.round(wallMs), ...bench },
+        { solver: args.solverPath, export: args.exportName, set: args.set, budgetMs: args.budgetMs, wallMs: Math.round(wallMs), ...bench, warnings },
         (key, v) => (typeof v === 'number' && !Number.isFinite(v) ? null : v),
         2,
       ),
@@ -659,9 +749,12 @@ async function main() {
     for (const [name, a] of Object.entries(bench.modes)) console.log(summaryRow(name, a));
     console.log('');
     console.log(summaryRow('TOTAL', bench.aggregate));
+    const a = bench.aggregate;
+    const ms = (v) => (v == null ? '–' : String(Math.round(v)));
     console.log(
-      `\nNOTA FINAL: ${bench.aggregate.score.toFixed(1)}  (${bench.results.length} cenários, ${bench.aggregate.failures} falhas, ${(wallMs / 1000).toFixed(1)} s)`,
+      `\nNOTA FINAL: ${a.score.toFixed(1)} ± ${a.scoreSe == null ? '–' : a.scoreSe.toFixed(1)}  (${bench.results.length} cenários, ${a.failures} falhas, ${(wallMs / 1000).toFixed(1)} s; solve: média ${ms(a.mean.runtimeMs)} ms, máximo ${ms(a.max.runtimeMs)} ms)`,
     );
+    console.log('± = erro-padrão da média entre cenários; para comparar dois solucionadores, compare cenário a cenário (--json).');
     if (args.svgDir) console.log(`desenhos em ${path.resolve(args.svgDir)}`);
   }
 }

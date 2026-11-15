@@ -249,7 +249,7 @@ export function planRoute(world, from, to) {
  */
 export function createWalker(world, options = {}) {
   const seed = options.seed ?? 1;
-  const rng = createRng('walker', world.seed, seed);
+  const rng = createRng('walker', world.key ?? world.seed, seed);
   let mode = WALK_MODES.includes(options.mode) ? options.mode : 'auto';
   let lap = 0;
   // Cada pessoa tem o seu passo; ele ainda varia um pouco de trecho em trecho.

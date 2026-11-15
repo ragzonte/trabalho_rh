@@ -143,6 +143,17 @@ final class Fixtures {
         return bridge;
     }
 
+    /**
+     * O FileProvider guarda numa variável estática a pasta de cache do primeiro uso. Num processo de
+     * verdade ela nunca muda; aqui cada teste ganha uma pasta nova, então a memória precisa ser limpa.
+     */
+    static void forgetFileProviderPaths() {
+        java.util.Map<?, ?> cache = ReflectionHelpers.getStaticField(androidx.core.content.FileProvider.class, "sCache");
+        synchronized (cache) {
+            cache.clear();
+        }
+    }
+
     static void idle() {
         shadowOf(Looper.getMainLooper()).idle();
     }

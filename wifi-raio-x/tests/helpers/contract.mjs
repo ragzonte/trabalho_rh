@@ -27,12 +27,14 @@ export const CHANNEL_WIDTHS = Object.freeze([-1, 0, 1, 2, 3, 4, 5]);
 export const PERMISSIONS = Object.freeze(['granted', 'denied', 'blocked']);
 export const SCAN_SOURCES = Object.freeze(['request', 'system', 'cache']);
 export const SETTINGS_PANELS = Object.freeze(['wifi', 'location', 'app', 'developer', 'panel']);
-export const CANCEL_OPS = Object.freeze(['ping', 'lan']);
+export const CANCEL_OPS = Object.freeze(['ping', 'lan', 'speed']);
 /**
- * Motivos de recusa de scan(). O bridge.js só diz "reason?: string"; estes são os que o
- * simulador usa (SCAN_REFUSAL em app/js/sim/backend.js) e que a interface pode esperar.
+ * Motivos de recusa de scan(). O bridge.js só diz "reason?: string"; estes são os textos do
+ * Android (WifiScanner.java), repetidos pelo simulador (SCAN_REFUSAL em app/js/sim/backend.js).
  */
-export const SCAN_REASONS = Object.freeze(['permission', 'location', 'wifi', 'throttled']);
+export const SCAN_REASONS = Object.freeze(['no-permission', 'location-off', 'wifi-off', 'throttled', 'failed']);
+/** SpeedSummary.error quando ok = false. */
+export const SPEED_ERRORS = Object.freeze(['offline', 'cancelled', 'failed']);
 
 // Maior distância (MHz) entre o canal primário e centerFreq0, por CHANNEL_WIDTH_*.
 const MAX_CENTER_OFFSET = { '-1': 150, 0: 0, 1: 10, 2: 30, 3: 70, 4: 30, 5: 150 };
@@ -294,14 +296,15 @@ const RssiSample = shape(
   {
     ts: [REQ, timestamp],
     rssi: [REQ, integer(-127, 0)],
-    bssid: [REQ, bssid],
-    frequency: [REQ, integer(2400, 71000)],
+    // "" = o Android escondeu o BSSID (falta a permissão de localização)
+    bssid: [REQ, string({ test: (s) => s === '' || BSSID_RE.test(s), what: 'um MAC minúsculo ou ""' })],
+    frequency: [REQ, integer(0, 71000)],
     linkSpeed: [OPT, mbps],
     txSpeed: [OPT, mbps],
     rxSpeed: [OPT, mbps],
   },
   (s, path, out) => {
-    if (!isWifiFrequency(s.frequency)) out.push(`${path}.frequency: ${s.frequency} MHz não é uma frequência de Wi-Fi`);
+    if (s.frequency !== 0 && !isWifiFrequency(s.frequency)) out.push(`${path}.frequency: ${s.frequency} MHz não é 0 nem uma frequência de Wi-Fi`);
   },
 );
 
@@ -377,6 +380,39 @@ const LanProgress = shape(
   },
 );
 
+const SpeedProgress = shape(
+  {
+    phase: [REQ, oneOf('latency', 'download', 'upload')],
+    progress: [REQ, number(0, 1)],
+    mbps: [OPT, number(0, 100000)],
+    ms: [OPT, number(0, 600000)],
+    bytes: [REQ, integer(0, Number.MAX_SAFE_INTEGER)],
+  },
+  (p, path, out) => {
+    if (p.phase === 'latency' && p.mbps !== undefined) out.push(`${path}.mbps: só existe nas fases de download e upload`);
+    if (p.phase !== 'latency' && p.ms !== undefined) out.push(`${path}.ms: só existe na fase de latência`);
+  },
+);
+
+const SpeedSummary = shape(
+  {
+    ok: [REQ, bool],
+    error: [OPT, oneOf('offline', 'cancelled', 'failed')],
+    latencyMs: [OPT, number(0, 600000)],
+    jitterMs: [OPT, number(0, 600000)],
+    downMbps: [OPT, number(0, 100000)],
+    upMbps: [OPT, number(0, 100000)],
+    bytesDown: [REQ, integer(0, Number.MAX_SAFE_INTEGER)],
+    bytesUp: [REQ, integer(0, Number.MAX_SAFE_INTEGER)],
+    server: [OPT, string({ nonEmpty: true })],
+  },
+  (r, path, out) => {
+    if (r.ok && r.error !== undefined) out.push(`${path}.error: presente com ok = true`);
+    if (!r.ok && r.error === undefined) out.push(`${path}.error: um teste que falhou tem de dizer por quê`);
+    if (r.ok && (r.downMbps === undefined || r.upMbps === undefined)) out.push(`${path}: com ok = true, downMbps e upMbps têm de vir`);
+  },
+);
+
 // Evento extra do simulador (não existe no Android): onde a pessoa virtual está.
 const SimEvent = shape({
   t: [REQ, number(0)],
@@ -435,6 +471,8 @@ export const TYPES = Object.freeze({
   PingSummary,
   LanDevice,
   LanProgress,
+  SpeedProgress,
+  SpeedSummary,
   SimEvent,
 });
 
@@ -444,33 +482,36 @@ export const TYPES = Object.freeze({
 
 /**
  * A tabela de bridge.js: se o método é assíncrono (callAsync), a forma dos argumentos e a
- * forma da resposta.
+ * forma da resposta. Os argumentos seguem o que o lado nativo (Bridge.java) aceita: o que ele
+ * trata como opcional (com valor padrão) é opcional aqui; o que ele recusa com
+ * "argumentos inválidos" é erro aqui.
  *
- * Observação: a tabela do bridge.js diz share -> {ok:true}; o simulador responde
- * {ok:false} quando o navegador não deixa compartilhar nem copiar, então aqui vale boolean.
+ * Observação: a tabela do bridge.js diz share -> {ok:true}, mas tanto o Android (não achou
+ * app para compartilhar) quanto o simulador (o navegador não deixou) podem responder
+ * {ok:false}; por isso aqui vale boolean.
  */
 export const METHODS = Object.freeze({
   info: { async: false, args: empty, result: DeviceInfo },
   status: { async: false, args: empty, result: Status },
   lastScan: { async: false, args: empty, result: LastScan },
   connection: { async: false, args: empty, result: Connection },
-  watchRssi: { async: false, args: shape({ intervalMs: [REQ, number(1, 3600000)] }), result: okTrue },
+  watchRssi: { async: false, args: shape({ intervalMs: [OPT, number(1, 3600000)] }), result: okTrue },
   unwatchRssi: { async: false, args: empty, result: okTrue },
   openSettings: { async: false, args: shape({ which: [REQ, oneOf(...SETTINGS_PANELS)] }), result: okAny },
   keepAwake: { async: false, args: shape({ on: [REQ, bool] }), result: okTrue },
-  vibrate: { async: false, args: shape({ ms: [REQ, number(0, 60000)] }), result: okTrue },
+  vibrate: { async: false, args: shape({ ms: [OPT, number(0, 60000)] }), result: okTrue },
   setBars: {
     async: false,
-    args: shape({ color: [REQ, string({ re: /^#[0-9a-fA-F]{6}$/, what: 'uma cor #rrggbb' })], dark: [REQ, bool] }),
+    args: shape({ color: [REQ, string({ re: /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/, what: 'uma cor #rrggbb' })], dark: [OPT, bool] }),
     result: okTrue,
   },
-  share: { async: false, args: shape({ title: [REQ, string()], text: [REQ, string()] }), result: okAny },
+  share: { async: false, args: shape({ title: [OPT, string()], text: [REQ, string()] }), result: okAny },
   saveFile: {
     async: false,
     args: shape(
       {
-        name: [REQ, string({ nonEmpty: true })],
-        mime: [REQ, string({ re: /^[\w.+-]+\/[\w.+-]+(;.*)?$/, what: 'um tipo MIME' })],
+        name: [REQ, string({ test: (v) => v.trim() !== '', what: 'um nome de arquivo' })],
+        mime: [OPT, string({ re: /^[\w.+-]+\/[\w.+*-]+$/, what: 'um tipo MIME' })],
         text: [OPT, string()],
         base64: [OPT, string({ re: /^[A-Za-z0-9+/]*={0,2}$/, what: 'base64' })],
       },
@@ -483,13 +524,14 @@ export const METHODS = Object.freeze({
   cancel: { async: false, args: shape({ op: [REQ, oneOf(...CANCEL_OPS)] }), result: okTrue },
   requestPermission: { async: true, args: empty, result: Status },
   scan: { async: true, args: empty, result: ScanAnswer },
-  rtt: { async: true, args: shape({ bssids: [REQ, list(bssid)] }), result: shape({ results: [REQ, list(RttResult)] }) },
+  rtt: { async: true, args: shape({ bssids: [REQ, list(string())] }), result: shape({ results: [REQ, list(RttResult)] }) },
   ping: {
     async: true,
-    args: shape({ host: [REQ, string({ nonEmpty: true })], count: [REQ, integer(1, 1000)], timeoutMs: [REQ, integer(1, 600000)] }),
+    args: shape({ host: [REQ, string({ nonEmpty: true })], count: [OPT, integer(1, 50)], timeoutMs: [OPT, integer(200, 5000)] }),
     result: PingSummary,
   },
   lanScan: { async: true, args: empty, result: LanAnswer },
+  speedTest: { async: true, args: shape({ mode: [REQ, oneOf('full', 'light')] }), result: SpeedSummary },
 });
 
 /** Eventos do contrato (os que o Android também emite). */
@@ -501,6 +543,7 @@ export const EVENTS = Object.freeze({
   ping: PingReply,
   lan: LanDevice,
   lanProgress: LanProgress,
+  speed: SpeedProgress,
 });
 
 /** Eventos que só o simulador emite. */

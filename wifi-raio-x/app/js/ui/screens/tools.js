@@ -20,15 +20,15 @@ import { listRow, sectionHeader } from '../components.js';
 
 /** @type {readonly Tool[]} */
 export const TOOLS = Object.freeze([
-  { id: 'medidor', title: 'Medidor de sinal', name: 'Medidor de sinal e caça-roteador', desc: 'Ande pela casa e veja onde o sinal melhora', icon: 'target', group: 'medir' },
+  { id: 'medidor', title: 'Medidor de sinal', name: 'Medidor de sinal e caça-roteador', desc: 'Ache o roteador e os pontos de sinal fraco', icon: 'target', group: 'medir' },
   { id: 'historico', title: 'Sinal no tempo', name: 'Sinal ao longo do tempo', desc: 'Gráfico das redes nos últimos minutos', icon: 'timeline', group: 'medir' },
-  { id: 'velocidade', title: 'Velocidade', name: 'Teste de velocidade', desc: 'Download, upload e resposta da sua internet', icon: 'speed', group: 'medir' },
+  { id: 'velocidade', title: 'Velocidade', name: 'Teste de velocidade', desc: 'Download, upload e tempo de resposta', icon: 'speed', group: 'medir' },
   { id: 'ping', title: 'Latência', name: 'Latência / ping', desc: 'Tempo de resposta e perda de pacotes', icon: 'ping', group: 'medir' },
-  { id: 'conexao', title: 'Conexão', name: 'Detalhes da conexão', desc: 'Endereço IP, roteador, DNS e velocidade do enlace', icon: 'link', group: 'rede' },
-  { id: 'dispositivos', title: 'Dispositivos', name: 'Dispositivos na rede', desc: 'Quem está conectado ao seu Wi-Fi agora', icon: 'devices', group: 'rede' },
+  { id: 'conexao', title: 'Conexão', name: 'Detalhes da conexão', desc: 'Endereço IP, roteador e DNS', icon: 'link', group: 'rede' },
+  { id: 'dispositivos', title: 'Dispositivos', name: 'Dispositivos na rede', desc: 'Quem está conectado ao seu Wi-Fi', icon: 'devices', group: 'rede' },
   { id: 'exportar', title: 'Exportar', name: 'Exportar dados', desc: 'Salve ou compartilhe a lista de redes', icon: 'export', group: 'app' },
-  { id: 'ajustes', title: 'Ajustes', name: 'Ajustes', desc: 'Tema, ritmo das buscas e modo demonstração', icon: 'settings', group: 'app', file: 'settings' },
-  { id: 'sobre', title: 'Sobre', name: 'Sobre e limitações', desc: 'O que o app faz, privacidade e o que é estimativa', icon: 'info', group: 'app', file: 'about' },
+  { id: 'ajustes', title: 'Ajustes', name: 'Ajustes', desc: 'Tema, buscas e modo demonstração', icon: 'settings', group: 'app', file: 'settings' },
+  { id: 'sobre', title: 'Sobre', name: 'Sobre e limitações', desc: 'Privacidade e o que é estimativa', icon: 'info', group: 'app', file: 'about' },
 ]);
 
 const GROUPS = [

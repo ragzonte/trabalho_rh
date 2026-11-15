@@ -17,6 +17,8 @@
 //               ao sair da tela, e um erro dentro delas mostra o aviso "tentar de novo".
 //   bridge      a ponte (bridge.js) para tudo o que NÃO é varredura: ping, conexão, compartilhar...
 //   scanLoop    scanNow(), setMode('normal'|'mapping'|'paused'), getState()   (scan-loop.js)
+//               O modo vale enquanto a tela estiver aberta: ao sair dela (ou se ela quebrar) o
+//               roteador devolve o modo que estava antes, para uma pausa nunca ficar esquecida.
 //   prefs       armazenamento "wrx.*" (prefs.js)
 //   navigate(caminho, {replace})   ex.: ctx.navigate('/ferramentas/ping')
 //   route       { path, tab, sub: string[], query: URLSearchParams }  a rota que abriu a tela
@@ -24,7 +26,13 @@
 //   setActions(...nós)             botões extras na barra de cima (iconButton de components.js)
 //   onBack(fn)                     fn() é chamada no "voltar" antes de sair da tela; devolva true se tratou
 //   onCleanup(fn)                  fn() roda ao sair da tela (além do unmount)
-//   app         { version, hasNative, isDemo(), setDemo(ligado, {world}), reconnect(), goBack() }
+//   app         { version, hasNative, demoLocked, isDemo(), setDemo(ligado, {world}), reconnect(), goBack() }
+//
+// Sinal da rede conectada: o app mantém bridge.watchRssi(1000) ligado e guarda as leituras em
+// store (state.rssi, store.rssiHistory()). Uma ferramenta que precise de leituras mais rápidas
+// chama ctx.bridge.watchRssi(250) e, ao sair, ctx.bridge.watchRssi(1000).
+// Posição da pessoa virtual na demonstração: ctx.bridge.on('sim', fn) (4 vezes por segundo; não
+// passa pelo store). Controles do simulador: (await import('./sim/backend.js')).currentSim().
 //
 // Rotas: #/redes · #/canais · #/melhor · #/mapa · #/ferramentas · #/ferramentas/<id>
 // Sub-rotas dos outros destinos (#/mapa/salvos/3) chegam à mesma tela: se ela devolveu
@@ -250,8 +258,8 @@ function updateStatusLine() {
   const { scan, loop, backend } = store.get();
   let text;
   let tone = null;
+  // com dados na tela a idade continua à vista durante a busca (quem gira é o ícone)
   if (scan.scanning && !scan.dataAt) text = 'Buscando redes…';
-  else if (scan.scanning) text = 'Buscando…';
   else if (!scan.dataAt && scan.seq > 0) text = 'Lista guardada pelo celular';
   else if (!scan.dataAt) text = loop.paused ? 'Busca em pausa' : 'Aguardando a primeira busca';
   else {
@@ -388,7 +396,7 @@ function moduleFor(route, attempt) {
 }
 
 function makeScope(route) {
-  const scope = { route, dead: false, cleanups: [], backHandlers: [], failed: false };
+  const scope = { route, dead: false, cleanups: [], backHandlers: [], failed: false, loopMode: scanLoop.getState().mode };
   // store "da tela": as inscrições morrem com ela e um erro num ouvinte vira o aviso de erro
   const scoped = Object.create(store);
   scoped.subscribe = (selector, listener, options) => {
@@ -464,6 +472,8 @@ function disposeScope(entry) {
     }
   }
   scope.backHandlers.length = 0;
+  // a tela pode ter pausado ou acelerado as buscas e não ter devolvido (ou ter quebrado antes)
+  if (scanLoop.getState().mode !== scope.loopMode) scanLoop.setMode(scope.loopMode);
 }
 
 /** Erro inesperado numa tela: aviso amigável com "tentar de novo", sem derrubar o resto do app. */

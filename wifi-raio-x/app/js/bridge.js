@@ -146,6 +146,26 @@
  * @property {boolean} [gateway]   é o roteador
  */
 
+/**
+ * @typedef {Object} SpeedProgress   evento 'speed', várias vezes por segundo durante o teste
+ * @property {'latency'|'download'|'upload'} phase
+ * @property {number} progress      0..1 dentro da fase
+ * @property {number} [mbps]        velocidade instantânea (média móvel) em Mb/s, nas fases de download/upload
+ * @property {number} [ms]          última latência medida, na fase 'latency'
+ * @property {number} bytes         bytes trafegados até agora na fase
+ *
+ * @typedef {Object} SpeedSummary
+ * @property {boolean} ok
+ * @property {string} [error]       'offline' | 'cancelled' | 'failed' quando ok = false
+ * @property {number} [latencyMs]   mediana das latências
+ * @property {number} [jitterMs]
+ * @property {number} [downMbps]
+ * @property {number} [upMbps]
+ * @property {number} bytesDown     quanto do plano de dados/franquia o teste usou
+ * @property {number} bytesUp
+ * @property {string} [server]      local do servidor quando informado (ex.: "GRU")
+ */
+
 // ---------------------------------------------------------------------------
 // Tabela dos métodos (nome, argumentos -> resposta). `A` = assíncrono (callAsync).
 //
@@ -161,15 +181,17 @@
 //   setBars         {color, dark}               -> {ok:true}          cor (#rrggbb) das barras do sistema; dark = fundo escuro (ícones claros)
 //   share           {title, text}               -> {ok:true}
 //   saveFile        {name, mime, text|base64}   -> {ok:boolean}       abre o "compartilhar/salvar" do Android com o arquivo
-//   cancel          {op}                        -> {ok:true}          op: 'ping' | 'lan'
+//   cancel          {op}                        -> {ok:true}          op: 'ping' | 'lan' | 'speed'
 // A requestPermission {}                        -> Status
 // A scan            {}                          -> {accepted:boolean, reason?:string}  (o resultado chega no evento 'scan')
 // A rtt             {bssids:string[]}           -> {results: RttResult[]}
 // A ping            {host, count, timeoutMs}    -> PingSummary        (emite 'ping' a cada resposta)
 // A lanScan         {}                          -> {devices: LanDevice[]}  (emite 'lan' a cada aparelho e 'lanProgress' {done,total})
+// A speedTest       {mode}                      -> SpeedSummary       mode: 'full' (~8 s por direção) | 'light' (~3 s, gasta poucos dados);
+//                                                                     usa https://speed.cloudflare.com (__down?bytes=N e __up); emite 'speed'
 //
 // Eventos: 'scan' ScanEvent · 'rssi' RssiSample · 'status' Status · 'connection' Connection
-//          'ping' PingReply · 'lan' LanDevice · 'lanProgress' {done:number,total:number}
+//          'ping' PingReply · 'lan' LanDevice · 'lanProgress' {done:number,total:number} · 'speed' SpeedProgress
 // ---------------------------------------------------------------------------
 
 const listeners = new Map(); // nome do evento -> Set<função>
@@ -307,6 +329,8 @@ export const rtt = (bssids) => asyncCall('rtt')({ bssids });
 export const ping = (host, count = 10, timeoutMs = 1000) => asyncCall('ping')({ host, count, timeoutMs });
 /** @type {() => Promise<{devices: LanDevice[]}>} */
 export const lanScan = asyncCall('lanScan');
+/** Teste de velocidade da internet (feito pelo lado nativo; a interface só mostra o progresso do evento 'speed'). @type {(mode?: 'full'|'light') => Promise<SpeedSummary>} */
+export const speedTest = (mode = 'full') => asyncCall('speedTest')({ mode });
 export const cancel = (op) => sync('cancel')({ op });
 
 export const openSettings = (which) => sync('openSettings')({ which });

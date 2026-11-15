@@ -13,16 +13,38 @@ const DEFAULTS = {
   crossFloorWeight: 0.3,
   walkSpeed: 0.45, // m/s: corda mediana entre varreduras seguidas de quem anda fazendo o levantamento
   dbToM: 0.45,
+  defaultRadius: 3.5,
+  initMode: 1, // 0: MDS direto; 1: desdobrado (Isomap)
+  isoK: 6,
+  isoSmooth: 0.5,
+  isoLen: 1,
+  isoFloorQ: 0.1,
+  isoWeightPower: 2,
   refine: 1,
   h: 1.0, // largura do núcleo dos campos (m)
+  hStart: 0,
+  hHold: 1,
   lambda: 0.5, // encolhimento da previsão quando há poucos vizinhos
   sigma: 4, // dB
   vmax: 0.9,
   motionW: 4,
   motionSlack: 0.5,
+  motionPad: 0,
+  targetRadius: 0,
+  springW: 0,
+  springSigma: 0.25,
+  springShort: 0.5,
   outer: 4,
   inner: 40,
   missW: 0.5,
+  wCap: 2,
+  meanMode: 1,
+  fitMissW: 0.3,
+  nMin: 1.6,
+  nMax: 5,
+  nDefault: 2.5,
+  apDz: 0.6,
+  farPenalty: 0.02,
 };
 
 export function solve(survey, options = {}) {
@@ -48,13 +70,17 @@ function solveInner(survey, options) {
   const data = prepare(survey);
   if (data.M < 3) return fallbackSolution(survey, 'poucos pontos');
   data.edges = motionEdges(data);
-  const diss = dissimilarity(data, P);
-  let X = embed(data, diss, P);
+  const diss = P.initMode === 0 ? dissimilarity(data, P) : null;
+  let X = P.initMode === 0 ? embed(data, diss, P) : embedIso(data, P);
   X = rescale(data, X, diss, P);
   const dbg = {};
   if (P.refine) X = refineFields(data, X, P, dbg, diss);
   const out = finish(survey, data, X);
   out.debug = dbg;
+  if (P.keepData) {
+    dbg.data = data;
+    dbg.X = X;
+  }
   return out;
 }
 
@@ -135,7 +161,27 @@ function prepare(survey) {
   for (let q = 0; q < M * R; q++) if (cnt[q] > 0) F[q] = sum[q] / cnt[q];
   all.sort((p, q) => p - q);
   const floorLevel = all.length ? all[Math.floor(all.length * 0.03)] : -90; // limiar de detecção observado
-  return { scans, nodes, nodeOfScan, radios, idRadio, R, M, F, cnt, floorLevel };
+  // Andares e média de cada rádio por andar.
+  const floorList = [...new Set(nodes.map((n) => n.floor))].sort((p, q) => p - q);
+  const NF = floorList.length;
+  const floorIdx = Int32Array.from(nodes, (n) => floorList.indexOf(n.floor));
+  const floorNodes = new Float64Array(NF);
+  for (let a = 0; a < M; a++) floorNodes[floorIdx[a]]++;
+  const floorMean = new Float64Array(R * NF);
+  for (let k = 0; k < R; k++) {
+    for (let f = 0; f < NF; f++) {
+      let s = 0;
+      let c = 0;
+      for (let a = 0; a < M; a++) {
+        if (floorIdx[a] !== f) continue;
+        const v = F[a * R + k];
+        s += Number.isNaN(v) ? floorLevel - 2 : v;
+        c++;
+      }
+      floorMean[k * NF + f] = c ? s / c : floorLevel;
+    }
+  }
+  return { scans, nodes, nodeOfScan, radios, idRadio, R, M, F, cnt, floorLevel, floorList, floorIdx, floorNodes, floorMean };
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +266,237 @@ function embed(data, diss, P) {
   let X = classicalMds(T, M);
   X = smacof(X, T, Wt, M, P.smacofIters);
   return X;
+}
+
+// Imersão inicial "desdobrada" (família Isomap): as distâncias entre impressões digitais saturam depois
+// de poucos metros, então só os pares vizinhos são confiáveis; as distâncias longas saem do caminho mais
+// curto num grafo de vizinhança (k vizinhos mais parecidos + a própria sequência da caminhada).
+function embedIso(data, P) {
+  const { M, R, F, floorIdx, floorLevel, scans, nodeOfScan, nodes } = data;
+  const NF = data.floorList.length;
+  const cens = floorLevel - 2;
+  const Y = new Float64Array(M * R);
+  for (let a = 0; a < M; a++) {
+    for (let k = 0; k < R; k++) {
+      const v = F[a * R + k];
+      // Centrado por andar: a laje vira deslocamento constante e some.
+      Y[a * R + k] = (Number.isNaN(v) ? cens : v) - data.floorMean[k * NF + floorIdx[a]];
+    }
+  }
+  // Sequência de visitas aos nós.
+  const seq = [];
+  for (let i = 0; i < scans.length; i++) if (seq[seq.length - 1] !== nodeOfScan[i]) seq.push(nodeOfScan[i]);
+  // Suavização no tempo (vizinhos de caminhada no mesmo andar): tira ruído na escolha dos vizinhos.
+  const S = new Float64Array(M * R);
+  const SW = new Float64Array(M);
+  const addTo = (a, b, w) => {
+    SW[a] += w;
+    for (let k = 0; k < R; k++) S[a * R + k] += w * Y[b * R + k];
+  };
+  for (let p = 0; p < seq.length; p++) {
+    const a = seq[p];
+    addTo(a, a, nodes[a].scans.length);
+    for (const q of [p - 1, p + 1]) {
+      if (q < 0 || q >= seq.length) continue;
+      const b = seq[q];
+      if (floorIdx[a] === floorIdx[b]) addTo(a, b, P.isoSmooth);
+    }
+  }
+  for (let a = 0; a < M; a++) for (let k = 0; k < R; k++) S[a * R + k] /= SW[a] || 1;
+  const dist2 = (Z, a, b) => {
+    let s = 0;
+    for (let k = 0; k < R; k++) {
+      const e = Z[a * R + k] - Z[b * R + k];
+      s += e * e;
+    }
+    return s / R;
+  };
+  const DS = new Float64Array(M * M);
+  for (let a = 0; a < M; a++) for (let b = a + 1; b < M; b++) DS[a * M + b] = DS[b * M + a] = dist2(S, a, b);
+  // Grafo: k vizinhos mais parecidos no mesmo andar + arestas da caminhada.
+  const INF = 1e30;
+  const Gd = new Float64Array(M * M).fill(INF);
+  const edgeVals = [];
+  const order = new Int32Array(M);
+  const setEdge = (a, b) => {
+    if (Gd[a * M + b] < INF) return;
+    Gd[a * M + b] = Gd[b * M + a] = -1; // marca; o comprimento entra depois
+    edgeVals.push(DS[a * M + b]);
+  };
+  for (let a = 0; a < M; a++) {
+    let n = 0;
+    for (let b = 0; b < M; b++) if (b !== a && floorIdx[b] === floorIdx[a]) order[n++] = b;
+    const cand = Array.from(order.subarray(0, n)).sort((p, q) => DS[a * M + p] - DS[a * M + q]);
+    for (let q = 0; q < Math.min(P.isoK, cand.length); q++) setEdge(a, cand[q]);
+  }
+  for (let p = 1; p < seq.length; p++) if (seq[p] !== seq[p - 1] && floorIdx[seq[p]] === floorIdx[seq[p - 1]]) setEdge(seq[p], seq[p - 1]);
+  edgeVals.sort((p, q) => p - q);
+  const floor2 = edgeVals.length ? edgeVals[Math.floor(edgeVals.length * P.isoFloorQ)] : 0;
+  const med2 = edgeVals.length ? edgeVals[edgeVals.length >> 1] : 1;
+  const lenOf = (v) => (P.isoLen === 1 ? Math.max(0.1 * med2, v - floor2) : Math.sqrt(Math.max(v, 1e-9)));
+  for (let q = 0; q < M * M; q++) if (Gd[q] === -1) Gd[q] = lenOf(DS[q]);
+  for (let a = 0; a < M; a++) Gd[a * M + a] = 0;
+  // Caminhos mais curtos (Floyd–Warshall).
+  for (let k = 0; k < M; k++) {
+    const rk = k * M;
+    for (let i = 0; i < M; i++) {
+      const dik = Gd[i * M + k];
+      if (dik >= INF) continue;
+      const ri = i * M;
+      for (let j = 0; j < M; j++) {
+        const v = dik + Gd[rk + j];
+        if (v < Gd[ri + j]) Gd[ri + j] = v;
+      }
+    }
+  }
+  // MDS por andar sobre as distâncias geodésicas.
+  const X = new Float64Array(2 * M);
+  const byFloor = Array.from({ length: NF }, () => []);
+  for (let a = 0; a < M; a++) byFloor[floorIdx[a]].push(a);
+  for (const list of byFloor) {
+    const n = list.length;
+    if (n === 0) continue;
+    if (n < 3) {
+      list.forEach((a, q) => {
+        X[2 * a] = q;
+        X[2 * a + 1] = 0;
+      });
+      continue;
+    }
+    const T = new Float64Array(n * n);
+    const Wt = new Float64Array(n * n);
+    let maxFinite = 0;
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) if (Gd[list[i] * M + list[j]] < INF) maxFinite = Math.max(maxFinite, Gd[list[i] * M + list[j]]);
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        let d = Gd[list[i] * M + list[j]];
+        if (d >= INF) d = 1.5 * maxFinite; // componentes soltas: longe
+        T[i * n + j] = d;
+        Wt[i * n + j] = 1 / Math.pow(Math.max(d, 1e-6), P.isoWeightPower);
+      }
+    }
+    const Z = smacof(classicalMds(T, n), T, Wt, n, P.smacofIters);
+    list.forEach((a, q) => {
+      X[2 * a] = Z[2 * q];
+      X[2 * a + 1] = Z[2 * q + 1];
+    });
+  }
+  if (NF > 1) alignFloors(data, X, S, byFloor, seq);
+  return X;
+}
+
+// Encaixa os andares uns sobre os outros: cada nó de um andar "aponta" para os nós do andar de
+// referência com impressão digital (centrada por andar) mais parecida; a escada amarra a translação.
+function alignFloors(data, X, S, byFloor, seq) {
+  const { M, R, floorIdx } = data;
+  let ref = 0;
+  byFloor.forEach((l, f) => {
+    if (l.length > byFloor[ref].length) ref = f;
+  });
+  const done = new Set([ref]);
+  const dist2 = (a, b) => {
+    let s = 0;
+    for (let k = 0; k < R; k++) {
+      const e = S[a * R + k] - S[b * R + k];
+      s += e * e;
+    }
+    return s;
+  };
+  // Do andar mais próximo do de referência para fora.
+  const todo = byFloor.map((_, f) => f).filter((f) => f !== ref).sort((p, q) => Math.abs(p - ref) - Math.abs(q - ref));
+  for (const f of todo) {
+    const list = byFloor[f];
+    if (!list.length) continue;
+    const anchors = [];
+    for (let a = 0; a < M; a++) if (done.has(floorIdx[a])) anchors.push(a);
+    const src = [];
+    const dst = [];
+    const wts = [];
+    for (const a of list) {
+      const cand = anchors.map((b) => [dist2(a, b), b]).sort((p, q) => p[0] - q[0]).slice(0, 5);
+      let tx = 0;
+      let ty = 0;
+      for (const [, b] of cand) {
+        tx += X[2 * b];
+        ty += X[2 * b + 1];
+      }
+      src.push([X[2 * a], X[2 * a + 1]]);
+      dst.push([tx / cand.length, ty / cand.length]);
+      wts.push(1);
+    }
+    // Escada: quem acabou de trocar de andar está perto de onde estava.
+    for (let p = 1; p < seq.length; p++) {
+      const a = seq[p - 1];
+      const b = seq[p];
+      const fa = floorIdx[a];
+      const fb = floorIdx[b];
+      if (fa === fb) continue;
+      const w = 0.15 * list.length;
+      if (fb === f && done.has(fa)) {
+        src.push([X[2 * b], X[2 * b + 1]]);
+        dst.push([X[2 * a], X[2 * a + 1]]);
+        wts.push(w);
+      } else if (fa === f && done.has(fb)) {
+        src.push([X[2 * a], X[2 * a + 1]]);
+        dst.push([X[2 * b], X[2 * b + 1]]);
+        wts.push(w);
+      }
+    }
+    const fit = rigidFit(src, dst, wts);
+    for (const a of list) {
+      const x = X[2 * a];
+      const y = X[2 * a + 1];
+      X[2 * a] = fit.a * x + fit.b * y + fit.tx;
+      X[2 * a + 1] = fit.c * x + fit.d * y + fit.ty;
+    }
+    done.add(f);
+  }
+}
+
+// Melhor rotação (com ou sem espelho) + translação, com pesos, sem escala.
+function rigidFit(src, dst, wts) {
+  let sw = 0;
+  let sx = 0;
+  let sy = 0;
+  let dx = 0;
+  let dy = 0;
+  for (let i = 0; i < src.length; i++) {
+    const w = wts[i];
+    sw += w;
+    sx += w * src[i][0];
+    sy += w * src[i][1];
+    dx += w * dst[i][0];
+    dy += w * dst[i][1];
+  }
+  sx /= sw;
+  sy /= sw;
+  dx /= sw;
+  dy /= sw;
+  let a = 0;
+  let b = 0;
+  let am = 0;
+  let bm = 0;
+  for (let i = 0; i < src.length; i++) {
+    const w = wts[i];
+    const px = src[i][0] - sx;
+    const py = src[i][1] - sy;
+    const qx = dst[i][0] - dx;
+    const qy = dst[i][1] - dy;
+    a += w * (px * qx + py * qy);
+    b += w * (px * qy - py * qx);
+    am += w * (px * qx - py * qy);
+    bm += w * (px * qy + py * qx);
+  }
+  const mirror = Math.hypot(am, bm) > Math.hypot(a, b);
+  const ang = mirror ? Math.atan2(bm, am) : Math.atan2(b, a);
+  const c = Math.cos(ang);
+  const sn = Math.sin(ang);
+  const m = mirror ? -1 : 1;
+  const out = { a: c, b: -sn * m, c: sn, d: c * m, tx: 0, ty: 0 };
+  out.tx = dx - (out.a * sx + out.b * sy);
+  out.ty = dy - (out.c * sx + out.d * sy);
+  return out;
 }
 
 function classicalMds(T, n) {
@@ -374,82 +651,282 @@ function radiusOf(X) {
 }
 
 function rescale(data, X, diss, P) {
-  let k = stepScale(data, X, P);
+  let k = P.targetRadius > 0 ? P.targetRadius / Math.max(1e-9, radiusOf(X)) : stepScale(data, X, P);
   if (k == null) {
     if (P.keepRadius) k = P.keepRadius / Math.max(1e-9, radiusOf(X));
+    else if (!diss) k = P.defaultRadius / Math.max(1e-9, radiusOf(X));
     else k = P.distPower === 2 ? P.dbToM * 0.1 : P.dbToM;
   }
   return X.map((v) => v * k);
 }
 
 // ---------------------------------------------------------------------------
-// Refino: campos latentes (regressão por núcleo, deixando o próprio ponto de fora) + movimento
+// Modelo físico de cada aparelho: rssi = p0(rádio, andar) − 10 n log10(d)
+// ---------------------------------------------------------------------------
+
+const LOG10 = Math.log(10);
+
+// Ajusta posição (busca em grade + refino) e curva de cada aparelho com as posições atuais dos nós.
+function fitApModels(data, X, P, prev) {
+  const { M, R, F, cnt, nodes, radios, floorLevel } = data;
+  const floorList = data.floorList;
+  const NF = floorList.length;
+  const fi = data.floorIdx;
+  let cx = 0;
+  let cy = 0;
+  for (let a = 0; a < M; a++) {
+    cx += X[2 * a];
+    cy += X[2 * a + 1];
+  }
+  cx /= M;
+  cy /= M;
+  let rad = 0;
+  for (let a = 0; a < M; a++) rad = Math.max(rad, Math.hypot(X[2 * a] - cx, X[2 * a + 1] - cy));
+  rad = Math.max(rad, 1);
+  // Candidatos: grade sobre a área levantada (com folga) e anéis para os vizinhos distantes.
+  const cand = [];
+  const G = 8;
+  for (let i = -G; i <= G; i++) for (let j = -G; j <= G; j++) cand.push([cx + (i / G) * 1.6 * rad, cy + (j / G) * 1.6 * rad]);
+  for (const rr of [2.4, 3.6, 5.5, 9]) {
+    for (let q = 0; q < 16; q++) {
+      const ang = (q + (rr > 3 ? 0.5 : 0)) * (Math.PI / 8);
+      cand.push([cx + rr * rad * Math.cos(ang), cy + rr * rad * Math.sin(ang)]);
+    }
+  }
+  const model = {
+    ax: new Float64Array(R),
+    ay: new Float64Array(R),
+    n: new Float64Array(R),
+    p0: new Float64Array(R * NF),
+    h2: new Float64Array(R * NF),
+    apFloor: new Int32Array(R),
+    rms: new Float64Array(R),
+    devs: [],
+  };
+  const byDev = new Map();
+  radios.forEach((r, k) => {
+    if (!byDev.has(r.device)) byDev.set(r.device, []);
+    byDev.get(r.device).push(k);
+  });
+  const L = new Float64Array(M);
+  for (const [dev, ks] of byDev) {
+    // Observações do aparelho: por grupo (rádio, andar).
+    const NG = ks.length * NF;
+    const obsNode = [];
+    const obsGroup = [];
+    const obsY = [];
+    const obsW = [];
+    const gW = new Float64Array(NG);
+    const gY = new Float64Array(NG);
+    const floorSum = new Float64Array(NF);
+    const floorCnt = new Float64Array(NF);
+    ks.forEach((k, q) => {
+      for (let a = 0; a < M; a++) {
+        const v = F[a * R + k];
+        const g = q * NF + fi[a];
+        let y;
+        let w;
+        if (Number.isNaN(v)) {
+          y = floorLevel - 3;
+          w = P.fitMissW;
+        } else {
+          y = v;
+          w = Math.min(P.wCap, cnt[a * R + k]);
+          floorSum[fi[a]] += v;
+          floorCnt[fi[a]]++;
+        }
+        obsNode.push(a);
+        obsGroup.push(g);
+        obsY.push(y);
+        obsW.push(w);
+        gW[g] += w;
+        gY[g] += w * y;
+      }
+    });
+    // Andar do aparelho: onde ele chega mais forte (entre os andares em que foi ouvido de verdade).
+    let apF = 0;
+    let bestLevel = -Infinity;
+    for (let f = 0; f < NF; f++) {
+      if (floorCnt[f] < 3) continue;
+      // Média das leituras conta pouco se quase nunca aparece: usa também a taxa de detecção.
+      const level = floorSum[f] / floorCnt[f] + 10 * Math.log10(floorCnt[f] / Math.max(1, data.floorNodes[f] * ks.length) + 0.05);
+      if (level > bestLevel) {
+        bestLevel = level;
+        apF = f;
+      }
+    }
+    const nObs = obsY.length;
+    let ySS = 0;
+    for (let o = 0; o < nObs; o++) {
+      const g = obsGroup[o];
+      const yc = obsY[o] - gY[g] / gW[g];
+      ySS += obsW[o] * yc * yc;
+    }
+    const gL = new Float64Array(NG);
+    const evalAt = (ax, ay, dz) => {
+      for (let a = 0; a < M; a++) {
+        const dx = X[2 * a] - ax;
+        const dy = X[2 * a + 1] - ay;
+        const df = (floorList[fi[a]] - floorList[apF]) * FLOOR_HEIGHT;
+        L[a] = 5 * Math.log10(dx * dx + dy * dy + dz * dz + df * df);
+      }
+      gL.fill(0);
+      for (let o = 0; o < nObs; o++) gL[obsGroup[o]] += obsW[o] * L[obsNode[o]];
+      let sLL = 0;
+      let sLY = 0;
+      for (let o = 0; o < nObs; o++) {
+        const g = obsGroup[o];
+        const lc = L[obsNode[o]] - gL[g] / gW[g];
+        const yc = obsY[o] - gY[g] / gW[g];
+        sLL += obsW[o] * lc * lc;
+        sLY += obsW[o] * lc * yc;
+      }
+      let n = sLL > 1e-9 ? -sLY / sLL : P.nDefault;
+      n = Math.max(P.nMin, Math.min(P.nMax, n));
+      // SS residual com n fixo: ySS + 2 n sLY + n² sLL
+      const ss = ySS + 2 * n * sLY + n * n * sLL;
+      return { ss, n };
+    };
+    let best = { ss: Infinity };
+    const tryAt = (ax, ay, dz) => {
+      if (Math.hypot(ax - cx, ay - cy) > 12 * rad) return;
+      const r = evalAt(ax, ay, dz);
+      // Leve preferência por posições próximas (entre ajustes equivalentes).
+      const far = Math.hypot(ax - cx, ay - cy) / rad;
+      const score = r.ss * (1 + P.farPenalty * Math.max(0, far - 1));
+      if (score < (best.score ?? Infinity)) best = { ...r, score, ax, ay, dz };
+    };
+    const dzs = NF > 1 ? [P.apDz] : [P.apDz, FLOOR_HEIGHT];
+    for (const dz of dzs) for (const c of cand) tryAt(c[0], c[1], dz);
+    const pk = prev && prev.devs.find((d) => d.device === dev);
+    if (pk) tryAt(pk.ax, pk.ay, pk.dz);
+    // Refino local (busca em padrão).
+    let step = 0.1 * rad;
+    for (let moves = 0; moves < 30 && step > 0.08; moves++) {
+      let improved = false;
+      const bx = best.ax;
+      const by = best.ay;
+      for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
+        const before = best.score;
+        tryAt(bx + ox * step, by + oy * step, best.dz);
+        if (best.score < before) improved = true;
+      }
+      if (!improved) step *= 0.5;
+    }
+    // p0 de cada grupo com a posição e o n finais.
+    evalAt(best.ax, best.ay, best.dz);
+    const dfOf = (f) => (floorList[f] - floorList[apF]) * FLOOR_HEIGHT;
+    ks.forEach((k, q) => {
+      model.ax[k] = best.ax;
+      model.ay[k] = best.ay;
+      model.n[k] = best.n;
+      model.apFloor[k] = apF;
+      for (let f = 0; f < NF; f++) {
+        const g = q * NF + f;
+        model.h2[k * NF + f] = best.dz * best.dz + dfOf(f) * dfOf(f);
+        model.p0[k * NF + f] = gW[g] > 0 ? gY[g] / gW[g] + best.n * (gL[g] / gW[g]) : floorLevel;
+      }
+    });
+    model.devs.push({ device: dev, ax: best.ax, ay: best.ay, dz: best.dz, n: best.n, apFloor: apF, radios: ks, explained: 1 - best.ss / Math.max(1e-9, ySS), nObs });
+  }
+  return model;
+}
+
+// ---------------------------------------------------------------------------
+// Refino: campos latentes (média física + resíduo por núcleo, deixando o próprio ponto de fora) + movimento
 // ---------------------------------------------------------------------------
 
 function refineFields(data, X0, P, dbg, diss) {
-  const { M, R, F, cnt, nodes, scans, nodeOfScan, floorLevel } = data;
-  // Observações por nó/rádio: valor, peso, e se é "não ouvido" (censurado).
-  const val = new Float64Array(M * R);
+  const { M, R, F, cnt, nodes, floorLevel } = data;
+  const NF = data.floorList.length;
+  const fi = data.floorIdx;
+  const obs = new Float64Array(M * R); // nível observado (ou limiar, se não ouvido)
   const wgt = new Float64Array(M * R);
   const miss = new Uint8Array(M * R);
-  const floors = [...new Set(nodes.map((n) => n.floor))];
-  for (let k = 0; k < R; k++) {
-    for (const f of floors) {
-      let s = 0;
-      let c = 0;
-      for (let a = 0; a < M; a++) {
-        if (nodes[a].floor !== f) continue;
-        const v = F[a * R + k];
-        s += Number.isNaN(v) ? floorLevel - 2 : v;
-        c++;
-      }
-      const mean = c ? s / c : floorLevel;
-      for (let a = 0; a < M; a++) {
-        if (nodes[a].floor !== f) continue;
-        const v = F[a * R + k];
-        if (Number.isNaN(v)) {
-          val[a * R + k] = floorLevel - 2 - mean;
-          wgt[a * R + k] = P.missW;
-          miss[a * R + k] = 1;
-        } else {
-          val[a * R + k] = v - mean;
-          wgt[a * R + k] = Math.min(2, cnt[a * R + k]);
-        }
-      }
+  const cens = floorLevel - 2;
+  for (let q = 0; q < M * R; q++) {
+    if (Number.isNaN(F[q])) {
+      obs[q] = cens;
+      wgt[q] = P.missW;
+      miss[q] = 1;
+    } else {
+      obs[q] = F[q];
+      wgt[q] = Math.min(P.wCap, cnt[q]);
     }
   }
   const edges = data.edges;
-  const sameFloor = (a, b) => nodes[a].floor === nodes[b].floor;
-  const inv2h2 = 1 / (2 * P.h * P.h);
+  let inv2h2 = 1 / (2 * P.h * P.h);
   const s2 = P.sigma * P.sigma;
+  const cut = 2.5 * P.sigma;
+  const val = new Float64Array(M * R); // resíduo usado como vizinho
+  const own = new Float64Array(M * R); // resíduo usado no próprio custo
+  const flow = new Uint8Array(M * R); // o resíduo depende da posição (média física)?
+  const mgx = new Float64Array(M * R); // gradiente da média física
+  const mgy = new Float64Array(M * R);
   const num = new Float64Array(M * R);
   const den = new Float64Array(M * R);
-  const g1 = new Float64Array(M * R); // dcusto/dpred
+  const g1 = new Float64Array(M * R); // d custo / d num
+  const gv = new Float64Array(M * R); // d custo / d val (como vizinho) + próprio
   const pred = new Float64Array(M * R);
   const Wm = new Float64Array(M * M);
+  let model = null;
 
   const cost = (X, G) => {
     G.fill(0);
     num.fill(0);
     den.fill(0);
+    // Média física e resíduos.
+    for (let a = 0; a < M; a++) {
+      const xa = X[2 * a];
+      const ya = X[2 * a + 1];
+      const f = fi[a];
+      for (let k = 0; k < R; k++) {
+        const q = a * R + k;
+        let m;
+        if (model) {
+          const dx = xa - model.ax[k];
+          const dy = ya - model.ay[k];
+          const d2 = dx * dx + dy * dy + model.h2[k * NF + f];
+          m = model.p0[k * NF + f] - 5 * model.n[k] * Math.log10(d2);
+          const gfac = (-10 * model.n[k]) / (LOG10 * d2);
+          mgx[q] = gfac * dx;
+          mgy[q] = gfac * dy;
+        } else {
+          m = data.floorMean[k * NF + f];
+          mgx[q] = 0;
+          mgy[q] = 0;
+        }
+        const r = obs[q] - m;
+        own[q] = r;
+        if (miss[q] && r > 0) {
+          val[q] = 0; // a média já está abaixo do limiar: nada a corrigir
+          flow[q] = 0;
+        } else {
+          val[q] = r;
+          flow[q] = 1;
+        }
+      }
+    }
     for (let a = 0; a < M; a++) {
       for (let b = a + 1; b < M; b++) {
-        if (!sameFloor(a, b)) {
+        if (fi[a] !== fi[b]) {
           Wm[a * M + b] = 0;
           continue;
         }
         const dx = X[2 * a] - X[2 * b];
         const dy = X[2 * a + 1] - X[2 * b + 1];
         const w = Math.exp(-(dx * dx + dy * dy) * inv2h2);
-        Wm[a * M + b] = Wm[b * M + a] = w;
+        Wm[a * M + b] = w;
         if (w < 1e-4) continue;
         const ra = a * R;
         const rb = b * R;
         for (let k = 0; k < R; k++) {
-          num[ra + k] += w * wgt[rb + k] * val[rb + k];
-          den[ra + k] += w * wgt[rb + k];
-          num[rb + k] += w * wgt[ra + k] * val[ra + k];
-          den[rb + k] += w * wgt[ra + k];
+          const wa = w * wgt[ra + k];
+          const wb = w * wgt[rb + k];
+          num[ra + k] += wb * val[rb + k];
+          den[ra + k] += wb;
+          num[rb + k] += wa * val[ra + k];
+          den[rb + k] += wa;
         }
       }
     }
@@ -458,14 +935,9 @@ function refineFields(data, X0, P, dbg, diss) {
       const D = den[q] + P.lambda;
       const p = num[q] / D;
       pred[q] = p;
-      let e = val[q] - p;
-      if (miss[q]) {
-        // Não ouvido: só custa se o campo prevê sinal acima do limiar.
-        e = e < 0 ? e : 0;
-      }
-      // Huber
+      let e = own[q] - p;
+      if (miss[q] && e > 0) e = 0; // não ouvido: só custa se o campo prevê sinal acima do limiar
       const ae = Math.abs(e);
-      const cut = 2.5 * P.sigma;
       let dc;
       if (ae <= cut) {
         c += (wgt[q] * e * e) / (2 * s2);
@@ -474,7 +946,8 @@ function refineFields(data, X0, P, dbg, diss) {
         c += (wgt[q] * (cut * ae - 0.5 * cut * cut)) / s2;
         dc = (wgt[q] * cut * Math.sign(e)) / s2;
       }
-      g1[q] = -dc / D; // d custo / d num (o termo em den entra com −pred)
+      g1[q] = -dc / D;
+      gv[q] = dc; // parte própria: d custo / d own
     }
     for (let a = 0; a < M; a++) {
       for (let b = a + 1; b < M; b++) {
@@ -484,8 +957,14 @@ function refineFields(data, X0, P, dbg, diss) {
         const rb = b * R;
         let dw = 0;
         for (let k = 0; k < R; k++) {
-          dw += g1[ra + k] * wgt[rb + k] * (val[rb + k] - pred[ra + k]);
-          dw += g1[rb + k] * wgt[ra + k] * (val[ra + k] - pred[rb + k]);
+          const ga = g1[ra + k];
+          const gb = g1[rb + k];
+          const wa = wgt[ra + k];
+          const wb = wgt[rb + k];
+          dw += ga * wb * (val[rb + k] - pred[ra + k]) + gb * wa * (val[ra + k] - pred[rb + k]);
+          // val[a] entra no num de b (e vice-versa)
+          if (flow[ra + k]) gv[ra + k] += gb * w * wa;
+          if (flow[rb + k]) gv[rb + k] += ga * w * wb;
         }
         const f = -dw * w * 2 * inv2h2;
         const dx = X[2 * a] - X[2 * b];
@@ -496,47 +975,78 @@ function refineFields(data, X0, P, dbg, diss) {
         G[2 * b + 1] -= f * dy;
       }
     }
-    // Movimento: ninguém anda mais que vmax.
+    if (model) {
+      // Cadeia pela média física: d own/dx = d val/dx = −∇m
+      for (let a = 0; a < M; a++) {
+        let gx = 0;
+        let gy = 0;
+        for (let k = 0; k < R; k++) {
+          const q = a * R + k;
+          gx -= gv[q] * mgx[q];
+          gy -= gv[q] * mgy[q];
+        }
+        G[2 * a] += gx;
+        G[2 * a + 1] += gy;
+      }
+    }
+    // Movimento: ninguém anda mais que vmax; quem está andando faz passos de tamanho parecido.
     for (const e of edges) {
       const dx = X[2 * e.a] - X[2 * e.b];
       const dy = X[2 * e.a + 1] - X[2 * e.b + 1];
       const d = Math.sqrt(dx * dx + dy * dy) + 1e-9;
-      const lim = P.vmax * e.tmax;
+      let f = 0;
+      const lim = P.vmax * e.tmax + P.motionPad;
       if (d > lim) {
         const ex = (d - lim) / P.motionSlack;
         c += 0.5 * P.motionW * ex * ex;
-        const f = (P.motionW * ex) / P.motionSlack / d;
-        G[2 * e.a] += f * dx;
-        G[2 * e.a + 1] += f * dy;
-        G[2 * e.b] -= f * dx;
-        G[2 * e.b + 1] -= f * dy;
+        f += (P.motionW * ex) / P.motionSlack / d;
       }
+      if (P.springW > 0 && e.informative) {
+        const d0 = P.walkSpeed * e.texp;
+        const sd = P.springSigma * e.texp + 0.2;
+        const ex = (d - d0) / sd;
+        const w = ex < 0 ? P.springW * P.springShort : P.springW;
+        c += 0.5 * w * ex * ex;
+        f += (w * ex) / sd / d;
+      }
+      G[2 * e.a] += f * dx;
+      G[2 * e.a + 1] += f * dy;
+      G[2 * e.b] -= f * dx;
+      G[2 * e.b + 1] -= f * dy;
     }
     return c;
   };
   let X = Float64Array.from(X0);
-  if (P.gradCheck) {
-    const G = new Float64Array(2 * M);
-    const c0 = cost(X, G);
-    const Gs = Float64Array.from(G);
-    const tmp = new Float64Array(2 * M);
-    const out = [];
-    for (const q of [0, 1, 7, 2 * M - 3]) {
-      const Xp = Float64Array.from(X);
-      Xp[q] += 1e-5;
-      const c1 = cost(Xp, tmp);
-      out.push([Gs[q], (c1 - c0) / 1e-5]);
-    }
-    dbg.gradCheck = out;
-  }
   const hist = [];
   const radius0 = radiusOf(X);
   for (let o = 0; o < P.outer; o++) {
+    // Do grosso para o fino: campos muito lisos primeiro (estrutura global), detalhe depois.
+    const frac = P.outer > 1 ? Math.min(1, o / Math.max(1, P.outer - 1 - P.hHold)) : 1;
+    const h = P.hStart > 0 ? P.hStart * Math.pow(P.h / P.hStart, frac) : P.h;
+    inv2h2 = 1 / (2 * h * h);
+    if (P.meanMode) model = fitApModels(data, X, P, model);
+    if (P.gradCheck && o === 0) {
+      const G = new Float64Array(2 * M);
+      const c0 = cost(X, G);
+      const Gs = Float64Array.from(G);
+      const tmp = new Float64Array(2 * M);
+      const out = [];
+      for (const q of [0, 1, 7, 2 * M - 3]) {
+        const Xp = Float64Array.from(X);
+        Xp[q] += 1e-5;
+        const c1 = cost(Xp, tmp);
+        out.push([Gs[q], (c1 - c0) / 1e-5]);
+      }
+      dbg.gradCheck = out;
+    }
     const r = lbfgs(cost, X, P.inner);
     X = rescale(data, r.x, diss, { ...P, keepRadius: radius0 });
     hist.push(r.f);
   }
+  if (P.meanMode) model = fitApModels(data, X, P, model);
   dbg.costHist = hist;
+  dbg.note = `cost ${hist[hist.length - 1].toFixed(0)}`;
+  data.model = model;
   return X;
 }
 
@@ -682,3 +1192,6 @@ function finish(survey, data, X) {
   }
   return { points, aps, scaleConf: 0.2 };
 }
+
+// (desenvolvimento) acesso às etapas internas para os diagnósticos; sai na versão final.
+export const _dev = { DEFAULTS, prepare, motionEdges, dissimilarity, embed, embedIso, rescale, fitApModels, refineFields, finish, lbfgs };

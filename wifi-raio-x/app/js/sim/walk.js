@@ -317,7 +317,8 @@ function smoothPath(world, nav, floor, cells) {
  */
 export function planWalk(world, options = {}) {
   const kind = options.kind || 'tour';
-  const rng = createRng('walk', world.seed, options.seed ?? 1, kind);
+  // world.key já mistura semente e nome do mundo: mundos diferentes, caminhadas independentes.
+  const rng = createRng('walk', world.key ?? world.seed, options.seed ?? 1, kind);
   const nav = navGrid(world);
   const floorOrder = (options.floorOrder || Array.from({ length: world.floors }, (_, k) => k)).filter((f) => f >= 0 && f < world.floors);
 
@@ -657,7 +658,8 @@ function insetPolygon(poly, dist) {
  * @param {WalkPlan} plan
  * @param {Object} [options]
  * @param {number} [options.scanIntervalS]  3.5 = limite de varreduras desligado; 30 = limite padrão do Android
- * @param {number|number[]} [options.speed] passo do usuário em m/s, ou faixa [mín, máx] (padrão 0.4 a 0.9)
+ * @param {number|number[]} [options.speed] passo do usuário em m/s (fixo, sem paradas), ou faixa [mín, máx]
+ *        de cruzeiro (padrão 0.4 a 0.9; nas manobras curtas cai abaixo do mínimo e há paradas)
  * @param {number} [options.stillScans]     varreduras feitas em cada ponto marcado (padrão 3; com limite, 1)
  * @param {boolean} [options.track]         grava o sinal da rede conectada a cada 2 s (padrão true)
  * @param {number} [options.labelRate]      fração dos pontos marcados que o usuário batiza com o nome do cômodo
@@ -669,7 +671,7 @@ function insetPolygon(poly, dist) {
 export function simulateSurvey(world, plan, options = {}) {
   const interval = Math.max(3, options.scanIntervalS ?? 3.5);
   const stillScans = Math.max(1, options.stillScans ?? (interval > 10 ? 1 : 3));
-  const rng = createRng('survey', world.seed, options.seed ?? 1, plan.kind, interval);
+  const rng = createRng('survey', world.key ?? world.seed, options.seed ?? 1, plan.kind, interval);
   const speedRange = Array.isArray(options.speed) ? options.speed : options.speed ? [options.speed, options.speed] : [0.4, 0.9];
   const labelRate = options.labelRate ?? 0.8;
 
@@ -681,8 +683,12 @@ export function simulateSurvey(world, plan, options = {}) {
   };
 
   // --- movimento: lista de trechos [t0, t1] com posição inicial e final ---
-  // Cada pessoa tem o seu passo (no miolo da faixa); ele ainda varia de trecho em trecho.
-  const pace = rng.float(speedRange[0] + 0.25 * (speedRange[1] - speedRange[0]), speedRange[1] - 0.25 * (speedRange[1] - speedRange[0]));
+  // Cada pessoa tem o seu passo; ele ainda varia bastante de trecho em trecho, cai nas manobras
+  // (quinas, portas) e é interrompido por paradas. Sem isso o relógio viraria uma trena:
+  // tempo x passo daria a distância andada com poucos por cento de erro.
+  const span = speedRange[1] - speedRange[0];
+  const steady = !(span > 0); // velocidade fixa pedida por quem chamou: sem variação nenhuma
+  const pace = rng.float(speedRange[0] + 0.15 * span, speedRange[1] - 0.15 * span);
   const segs = [];
   const stills = []; // {t0, t1, spot, label}
   const floorMarks = []; // {t, floor}: quando o usuário avisou o app que mudou de andar
@@ -702,13 +708,15 @@ export function simulateSurvey(world, plan, options = {}) {
     if (step.type === 'move') {
       const len = Math.hypot(step.x - cur.x, step.y - cur.y);
       if (len < 1e-6) continue;
-      const v = Math.max(speedRange[0], Math.min(speedRange[1], pace * rng.float(0.8, 1.2)));
+      let v = Math.max(speedRange[0], Math.min(speedRange[1], pace * rng.float(0.7, 1.3)));
+      if (!steady && len < 0.9) v *= rng.float(0.6, 0.95); // manobra curta: mais devagar
       heading = Math.atan2(step.y - cur.y, step.x - cur.x);
       const next = { x: step.x, y: step.y, z: cur.z, floor: cur.floor };
       segs.push({ t0: t, t1: t + len / v, a: cur, b: next, heading });
       t += len / v;
       cur = next;
-      if (rng.chance(0.06)) hold(rng.float(1.5, 5)); // parada para olhar a tela
+      // Parada para olhar a tela, abrir uma porta, desviar de um móvel; às vezes demorada.
+      if (!steady && rng.chance(0.09)) hold(rng.chance(0.15) ? rng.float(6, 14) : rng.float(1.5, 6));
     } else if (step.type === 'stairs') {
       const run = Math.hypot(step.x - cur.x, step.y - cur.y);
       const dur = Math.max(6, Math.hypot(run, FLOOR_HEIGHT) / 0.45) * rng.float(0.9, 1.2);

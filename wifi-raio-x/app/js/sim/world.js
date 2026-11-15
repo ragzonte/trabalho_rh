@@ -18,6 +18,8 @@ import { createRng, hashSeed, hashGaussian, hashUniform } from './prng.js';
 export const PHONE_HEIGHT = 1.2;
 /** Metade da espessura de uma parede (m): mais perto que isso é "dentro da parede". */
 export const WALL_HALF_THICKNESS = 0.08;
+// Tolerância (fração do comprimento) para dizer que um raio passou "na ponta" de uma parede.
+const EDGE_EPS = 1e-9;
 
 /** Perda por parede atravessada, em dB, nas faixas de [2,4 GHz, 5 GHz, 6 GHz]. */
 export const MATERIALS = {
@@ -51,7 +53,11 @@ export const DEFAULT_RF = {
   floorDbm: -96,
   missProb: 0.03, // beacon perdido mesmo com sinal bom
   sweepS: 2.5, // duração de uma varredura completa
-  staleMinS: 12, // o Android repete leituras antigas por 12 a 20 s
+  // Leituras antigas na lista: alguns aparelhos devolvem o que o driver ainda guarda de varreduras
+  // anteriores (12 a 20 s). O Android "puro" filtra o que é mais velho que o começo da varredura,
+  // então `staleCarry: false` também é um celular realista.
+  staleCarry: true,
+  staleMinS: 12,
   staleMaxS: 20,
 };
 
@@ -254,7 +260,9 @@ function makeField(rng, corrM, corrZ, waves) {
 export function createWorld(spec, seed = 1, rfOverrides = {}) {
   const rf = { ...DEFAULT_RF, ...(spec.rf || {}), ...rfOverrides };
   const floors = Math.max(1, spec.floors | 0);
-  const worldSeed = hashSeed('wrx-world', seed);
+  // O nome entra na semente: sem ele, mundos diferentes com a mesma semente (apartamento 1,
+  // sobrado 1...) teriam o mesmo roteador "de fábrica", a mesma sombra e o mesmo usuário.
+  const worldSeed = hashSeed('wrx-world', seed, String(spec.name ?? ''));
 
   // --- contorno por andar ---
   const perFloorOutline = Array.isArray(spec.outline[0][0]);
@@ -458,6 +466,7 @@ export function createWorld(spec, seed = 1, rfOverrides = {}) {
 
   /**
    * Decompõe a perda entre um roteador e uma posição.
+   * `wallCount` pode ter meio ponto: raio que passa exatamente na ponta de uma parede.
    * @returns {{d:number, p0:number, n:number, distance:number, walls:number, wallCount:number, slabs:number, slabCount:number, shadow:number, rssi:number}}
    */
   function explain(apRef, pos) {
@@ -504,14 +513,22 @@ export function createWorld(spec, seed = 1, rfOverrides = {}) {
         const den = dx * ey - dy * ex;
         if (Math.abs(den) < 1e-12) continue;
         const t = ((w.x1 - ax) * ey - (w.y1 - ay) * ex) / den;
-        if (t < t0 || t >= t1) continue;
+        // Entre andares o trecho é [t0, t1): paredes empilhadas contam uma vez só. Nas pontas do
+        // próprio raio (roteador ou celular em cima da parede) entra uma tolerância.
+        if (t < (t0 === 0 ? -EDGE_EPS : t0) || t >= (t1 === 1 ? 1 + EDGE_EPS : t1)) continue;
         const u = ((w.x1 - ax) * dy - (w.y1 - ay) * dx) / den;
-        if (u < 0 || u >= 1) continue;
+        if (u < -EDGE_EPS || u > 1 + EDGE_EPS) continue;
+        // Raio que passa exatamente pela ponta de uma parede (emenda de dois trechos, quina,
+        // batente de porta): vale meia travessia. É a média dos dois raios vizinhos, um de cada
+        // lado da ponta; sem isso a emenda contaria 0 ou 2 paredes conforme o arredondamento.
+        // O mesmo vale para o roteador (ou o celular) exatamente em cima de uma parede.
+        let weight = u < EDGE_EPS || u > 1 - EDGE_EPS ? 0.5 : 1;
+        if ((t0 === 0 && t < EDGE_EPS) || (t1 === 1 && t > 1 - EDGE_EPS)) weight *= 0.5;
         // Raio rasante atravessa mais material: aumenta um pouco, com teto.
         const cos = Math.abs(dx * w.nx + dy * w.ny) / d;
         const grazing = Math.min(1.4, 1 / Math.sqrt(Math.max(cos, 1e-3)));
-        wallSum += w.loss[band] * grazing;
-        wallCount++;
+        wallSum += w.loss[band] * grazing * weight;
+        wallCount += weight;
       }
       outside += (t1 - t0) * horiz - insideLength(outlines[k], ax, ay, dx, dy, t0, t1, horiz);
     }
@@ -683,8 +700,8 @@ export function createWorld(spec, seed = 1, rfOverrides = {}) {
         });
         continue;
       }
-      // Não ouviu agora, mas o Android ainda guarda a leitura velha por alguns segundos.
-      const old = prevMap.get(ap.bssid);
+      // Não ouviu agora, mas o aparelho ainda guarda a leitura velha por alguns segundos.
+      const old = rf.staleCarry ? prevMap.get(ap.bssid) : null;
       if (old) {
         const age = old.ageMs + (t - q.prev.t) * 1000;
         if (age <= ap.staleS * 1000) out.push({ ...old, ageMs: Math.round(age) });
@@ -761,6 +778,8 @@ export function createWorld(spec, seed = 1, rfOverrides = {}) {
     name: spec.name,
     spec,
     seed,
+    /** Semente já misturada com o nome do mundo: é a que a caminhada e o levantamento usam. */
+    key: worldSeed,
     rf,
     bounds,
     floors,

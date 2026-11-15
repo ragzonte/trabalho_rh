@@ -9,6 +9,8 @@
 //   solveOracleField  teto mais alto ainda: conhece o mapa de rádio REAL (paredes e sombra incluídas)
 //                     e também usa o limite de velocidade. É o limite físico.
 //   solveCollapse     todos os pontos na origem: a resposta de quem não sabe nada (nota 100).
+//   solveTimeLoop     só o relógio, sem olhar o Wi-Fi: uma volta de círculo ao longo do tempo. É o
+//                     piso de quem só aproveita "o usuário deu uma volta pela casa e voltou".
 //
 // Os oráculos recebem a verdade em `options.truth`, que a bancada só entrega a este arquivo.
 
@@ -146,6 +148,22 @@ export function solveCollapse(survey) {
     aps: Object.fromEntries(Object.keys(survey.aps).map((id) => [id, { x: 0, y: 0, z: 1, p0: -40, n: 2.5, conf: 0 }])),
     scaleConf: 0,
   };
+}
+
+/**
+ * Referência "só o relógio": ignora todas as leituras e põe as varreduras, na ordem do tempo, numa
+ * única volta de um círculo de 3 m de raio. Quem usa o Wi-Fi tem de ganhar disto com folga, em
+ * todos os modos (nos modos de pontos a visita é uma volta só pela casa, e o círculo engana um pouco).
+ */
+export function solveTimeLoop(survey) {
+  const scans = survey.scans;
+  const t0 = scans.length ? scans[0].t : 0;
+  const span = scans.length > 1 ? scans[scans.length - 1].t - t0 : 1;
+  const points = scans.map((s) => {
+    const a = (2 * Math.PI * (s.t - t0)) / (span || 1);
+    return { x: 3 * Math.cos(a), y: 3 * Math.sin(a), z: s.floor * FLOOR_HEIGHT, conf: 0 };
+  });
+  return { points, aps: {}, scaleConf: 0 };
 }
 
 // ---------------------------------------------------------------------------

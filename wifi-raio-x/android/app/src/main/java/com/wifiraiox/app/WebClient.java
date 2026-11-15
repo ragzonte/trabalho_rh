@@ -19,6 +19,12 @@ class WebClient extends WebViewClient {
         /** A página principal mudou de endereço (thread da interface). */
         void onPageUrl(String url);
 
+        /**
+         * O documento principal do app foi pedido: uma página nova vai nascer (primeira carga ou
+         * recarga). Chamado antes de qualquer script dela rodar, de uma thread do WebView.
+         */
+        void onAppPageRequested();
+
         /** Abrir fora do app (thread da interface). */
         void openExternal(Uri uri);
 
@@ -58,6 +64,7 @@ class WebClient extends WebViewClient {
     public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
         Uri uri = request.getUrl();
         if (isAppUrl(uri)) {
+            if (request.isForMainFrame()) host.onAppPageRequested();
             WebResourceResponse response = loader.shouldInterceptRequest(uri);
             return response != null ? response : WebAssets.status(404, "Not Found");
         }

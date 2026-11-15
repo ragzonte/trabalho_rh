@@ -302,16 +302,19 @@ export function normalizeScan(event, options) {
 //      digital" de fábrica (modelo no WPS / elementos de fabricante).
 //
 // 3. Vetos (valem para o grupo inteiro; só a certeza passa por cima):
-//    - mesma faixa em frequências diferentes: um rádio só fala num canal (exceção: roteador
-//      tri-band com um rádio na parte baixa e outro na parte alta dos 5 GHz);
+//    - mesma faixa em frequências diferentes: um rádio só fala num canal (exceção tolerada: os
+//      dois rádios de 5 GHz de um roteador tri-band, um na parte baixa e outro na parte alta
+//      da faixa, e só com a mesma raiz de nome e sem explicação melhor);
 //    - mesma frequência com sinais diferentes, ou com o MESMO nome de rede: são dois rádios, logo
 //      duas caixas (nós de um mesh, por exemplo);
 //    - nomes "irmãos" de fábrica, iguais fora o final ("VIVOFIBRA-8A20" / "VIVOFIBRA-8A28",
 //      "AP 302" / "AP 304"): cada caixa tem o seu.
 //
-// Quando há mais de um jeito de formar os pares (lote da operadora: 2,4 GHz do vizinho tão perto
-// do meu 5 GHz quanto o meu 2,4), vale a explicação mais econômica (menos caixas; no empate, a
-// menor soma de distâncias) e só se ela for única. Empatou, ninguém é juntado.
+// Ordem das junções: primeiro o par de endereços mais próximo que nenhum concorrente iguala
+// (concorrente = outro par que usa um dos dois BSSIDs e não cabe na mesma caixa). Quando sobra
+// empate (lote da operadora: o 2,4 GHz do vizinho tão perto do meu 5 GHz quanto o meu 2,4), vale
+// a explicação mais econômica: menos caixas, depois menos "tri-bands" presumidos, depois a menor
+// soma de distâncias. E só se ela for única: empatou de novo, ninguém é juntado.
 
 const MAX_STEP = 32; // maior distância entre endereços da mesma caixa (APs corporativos: 16 redes por rádio)
 const VAP_STEP = 3; // redes do mesmo rádio são numeradas em sequência
@@ -321,7 +324,7 @@ const OCTET_STEP = 4;
 const SAME_RADIO_DB = 4; // beacons do mesmo rádio chegam com o mesmo sinal, fora o ruído da medida
 const SAME_RADIO_STALE_DB = 8; // ...mas leituras de momentos diferentes variam mais
 const SAME_SCAN_MS = 2500;
-const MAX_SEARCH_LINKS = 14; // disputas maiores que isto ficam sem resolver (2^14 combinações)
+const MAX_SEARCH_LINKS = 12; // acima disto (2^12 combinações) a disputa é reduzida pelas pontas antes
 
 const STRONG = 2;
 const WEAK = 1;
@@ -359,17 +362,19 @@ function sameRadioLook(a, b) {
   return Math.abs(a.rssi - b.rssi) <= (together ? SAME_RADIO_DB : SAME_RADIO_STALE_DB);
 }
 
-function vetoes(a, b) {
-  if (a.band !== null && a.band === b.band && a.freq !== null && b.freq !== null) {
-    if (a.freq === b.freq) {
-      if (a.ssid !== null && a.ssid === b.ssid) return true;
-      if (!sameRadioLook(a, b)) return true;
-    } else {
-      const split = a.band === '5' && Math.min(a.freq, b.freq) < 5470 && Math.max(a.freq, b.freq) >= 5470;
-      if (!split) return true;
-    }
-  }
-  return siblingNames(a, b);
+const VETO = 2;
+const STRAIN = 1;
+
+/**
+ * Dois BSSIDs podem morar na mesma caixa? VETO = não; STRAIN = só se não houver explicação
+ * melhor (os dois rádios de 5 GHz de um roteador tri-band); 0 = nada contra.
+ */
+function clash(a, b) {
+  if (siblingNames(a, b)) return VETO;
+  if (a.band === null || a.band !== b.band || a.freq === null || b.freq === null) return 0;
+  if (a.freq === b.freq) return (a.ssid !== null && a.ssid === b.ssid) || !sameRadioLook(a, b) ? VETO : 0;
+  const split = a.band === '5' && Math.min(a.freq, b.freq) < 5470 && Math.max(a.freq, b.freq) >= 5470;
+  return split ? STRAIN : VETO;
 }
 
 /** Força do segundo indício para um par de endereços próximos (0 = nenhum). */
@@ -443,7 +448,11 @@ export function groupByDevice(aps) {
     members[root] = members[root].concat(members[child]);
     members[child] = [];
   };
-  const clusterVeto = (x, y) => members[x].some((i) => members[y].some((j) => vetoes(nodes[i], nodes[j])));
+  const clusterClash = (x, y) => {
+    let worst = 0;
+    for (const i of members[x]) for (const j of members[y]) worst = Math.max(worst, clash(nodes[i], nodes[j]));
+    return worst;
+  };
 
   // --- 1. certeza
   const byBssid = new Map();
@@ -474,7 +483,7 @@ export function groupByDevice(aps) {
         union(i, j);
         continue;
       }
-      if (vetoes(nodes[i], nodes[j])) continue;
+      if (clash(nodes[i], nodes[j]) === VETO) continue;
       const tier = hintTier(nodes[i], nodes[j], dist);
       if (tier === STRONG) strong.push({ i, j, d: dist.d });
       else if (tier === WEAK) weak.push({ i, j, d: dist.d });
@@ -491,8 +500,12 @@ export function groupByDevice(aps) {
       if (x === y) continue;
       const key = x < y ? `${x}|${y}` : `${y}|${x}`;
       const known = links.get(key);
-      if (known) known.d = Math.min(known.d, p.d);
-      else if (!clusterVeto(x, y)) links.set(key, { x: Math.min(x, y), y: Math.max(x, y), d: p.d });
+      if (known) {
+        known.d = Math.min(known.d, p.d);
+        continue;
+      }
+      const level = clusterClash(x, y);
+      if (level !== VETO) links.set(key, { x: Math.min(x, y), y: Math.max(x, y), d: p.d, strained: level === STRAIN });
     }
     return [...links.values()].sort((a, b) => a.d - b.d || a.x - b.x || a.y - b.y);
   };
@@ -504,7 +517,7 @@ export function groupByDevice(aps) {
     const k = ids.length;
     const at = new Map(ids.map((id, i) => [id, i]));
     const edges = links.map((l) => [at.get(l.x), at.get(l.y), l.d]);
-    const veto = ids.map((x) => ids.map((y) => x !== y && clusterVeto(x, y)));
+    const clashes = ids.map((x) => ids.map((y) => (x === y ? 0 : clusterClash(x, y))));
     let best = null;
     let tie = false;
     const local = new Array(k);
@@ -517,6 +530,7 @@ export function groupByDevice(aps) {
       let ok = true;
       let cost = 0;
       let merges = 0;
+      let strain = 0;
       for (let e = 0; e < edges.length && ok; e++) {
         if (!(mask & (1 << e))) continue;
         const a = root(edges[e][0]);
@@ -529,14 +543,20 @@ export function groupByDevice(aps) {
         }
       }
       for (let i = 0; i < k && ok; i++) {
-        for (let j = i + 1; j < k && ok; j++) if (veto[i][j] && root(i) === root(j)) ok = false;
+        for (let j = i + 1; j < k && ok; j++) {
+          if (clashes[i][j] === 0 || root(i) !== root(j)) continue;
+          if (clashes[i][j] === VETO) ok = false;
+          else strain += 1;
+        }
       }
       if (!ok) continue;
+      // Melhor = mais junções; depois menos "tri-bands" presumidos; depois endereços mais próximos
       const key = local.map((_, i) => root(i)).join(',');
-      if (best === null || merges > best.merges || (merges === best.merges && cost < best.cost)) {
-        best = { merges, cost, key, mask };
+      const order = best === null ? -1 : best.merges - merges || strain - best.strain || cost - best.cost;
+      if (order < 0) {
+        best = { merges, strain, cost, key, mask };
         tie = false;
-      } else if (merges === best.merges && cost === best.cost && key !== best.key) {
+      } else if (order === 0 && key !== best.key) {
         tie = true;
       }
     }
@@ -547,6 +567,7 @@ export function groupByDevice(aps) {
   };
 
   const settle = (pairs) => {
+    const tried = new Set(); // ilhas que já foram resolvidas (ou deram empate)
     for (;;) {
       const links = linksOf(pairs);
       if (!links.length) return;
@@ -559,12 +580,14 @@ export function groupByDevice(aps) {
       const rivals = (l) => {
         const out = [];
         for (const id of [l.x, l.y]) {
-          for (const m of touching.get(id)) if (m !== l && clusterVeto(other(m, id), other(l, id))) out.push(m);
+          for (const m of touching.get(id)) if (m !== l && clusterClash(other(m, id), other(l, id)) > 0) out.push(m);
         }
         return out;
       };
-      // O elo mais curto que nenhum concorrente iguala (sem concorrente nenhum também serve)
-      const clear = links.find((l) => rivals(l).every((m) => m.d > l.d));
+      // O elo mais curto que nenhum concorrente iguala (sem concorrente nenhum também serve).
+      // Um elo "tri-band" só passa direto quando é a única opção dos dois lados.
+      const sole = (l) => touching.get(l.x).length === 1 && touching.get(l.y).length === 1;
+      const clear = links.find((l) => (l.strained ? sole(l) : rivals(l).every((m) => m.d > l.d)));
       if (clear) {
         union(clear.x, clear.y);
         continue;
@@ -587,13 +610,21 @@ export function groupByDevice(aps) {
         for (const id of ids) seen.add(id);
         const island = links.filter((l) => ids.has(l.x));
         if (island.length <= MAX_SEARCH_LINKS) {
-          solve(island);
+          const signature = island.map((l) => `${l.x}|${l.y}`).join(' ');
+          if (!tried.has(signature)) solve(island);
+          tried.add(signature);
           continue;
         }
         // Ilha grande demais para testar tudo (dezenas de APs em fila): come pelas pontas. Um
         // grupo com uma única opção fica com ela, desde que o concorrente tenha para onde ir.
-        const single = (id) => touching.get(id).length === 1;
-        const leaf = island.find((l) => (single(l.x) || single(l.y)) && rivals(l).every((m) => !single(m.x) && !single(m.y)));
+        // (Os elos "tri-band" não entram nesta conta: são sempre a última hipótese.)
+        const firm = island.filter((l) => !l.strained);
+        const options = new Map();
+        for (const l of firm) for (const id of [l.x, l.y]) options.set(id, (options.get(id) || 0) + 1);
+        const single = (id) => options.get(id) === 1;
+        const leaf = firm.find(
+          (l) => (single(l.x) || single(l.y)) && rivals(l).every((m) => m.strained || (!single(m.x) && !single(m.y))),
+        );
         if (leaf) {
           union(leaf.x, leaf.y);
           merged = true;

@@ -334,6 +334,67 @@ public class ConnectionTest extends AllSdks {
     }
 
     @Test
+    public void withTwoWifiNetworksTheOneWithInternetWins() throws Exception {
+        homeWifi();
+        Fixtures.noNetworks();
+        bridge.onStart();
+        ConnectivityManager.NetworkCallback cb = registeredCallback();
+        Network main = org.robolectric.shadows.ShadowNetwork.newInstance(101);
+        Network iot = org.robolectric.shadows.ShadowNetwork.newInstance(102);
+        cb.onAvailable(main);
+        cb.onCapabilitiesChanged(main, Fixtures.capabilities(NetworkCapabilities.TRANSPORT_WIFI,
+                NetworkCapabilities.NET_CAPABILITY_INTERNET, NetworkCapabilities.NET_CAPABILITY_VALIDATED));
+        cb.onLinkPropertiesChanged(main, homeLink());
+        // rede secundária, sem internet, chega depois
+        cb.onAvailable(iot);
+        cb.onCapabilitiesChanged(iot, Fixtures.capabilities(NetworkCapabilities.TRANSPORT_WIFI));
+        cb.onLinkPropertiesChanged(iot, Fixtures.linkProperties("wlan1", new String[] {"10.10.10.5/24"}, null));
+        JSONObject c = connection();
+        assertEquals("192.168.15.37", c.get("ip"));
+        assertEquals("wlan0", c.get("iface"));
+        assertEquals(true, c.get("validated"));
+
+        cb.onLost(main);
+        assertEquals("10.10.10.5", connection().get("ip"));
+    }
+
+    @Test
+    public void grantingLocationReRegistersTheCallbackAndRefreshesTheEvent() throws Exception {
+        Fixtures.denyLocation();
+        Fixtures.wifi().setConnectionInfo(Fixtures.wifiInfo(null, "02:00:00:00:00:00", -55, 300, 5200));
+        Fixtures.wifiNetwork(homeLink());
+        bridge.onStart();
+        settle();
+        ConnectivityManager.NetworkCallback before = registeredCallback();
+        assertFalse(page.lastEvent("connection").has("ssid"));
+
+        // permissão concedida: o Android passa a revelar a rede
+        Fixtures.grantLocation();
+        homeWifi();
+        page.clear();
+        bridge.onPermissionsResult(Permissions.REQUEST_LOCATION, new String[] {Fixtures.FINE, Fixtures.COARSE}, new int[] {0, 0});
+        settle();
+        ConnectivityManager.NetworkCallback after = registeredCallback();
+        assertTrue("registro novo: só ele recebe o nome sem censura no Android 12+", before != after);
+        assertEquals("Casa 5G", page.lastEvent("connection").get("ssid"));
+        assertEquals("granted", page.lastEvent("status").get("permission"));
+    }
+
+    @Test
+    public void resumeRechecksTheConnection() throws Exception {
+        Fixtures.wifi().setConnectionInfo(Fixtures.wifiInfo(null, "02:00:00:00:00:00", -55, 300, 5200));
+        Fixtures.wifiNetwork(homeLink());
+        bridge.onStart();
+        settle();
+        // o usuário foi às configurações e religou a Localização: nenhum aviso de rede chega por isso
+        homeWifi();
+        page.clear();
+        bridge.onResume();
+        settle();
+        assertEquals("Casa 5G", page.lastEvent("connection").get("ssid"));
+    }
+
+    @Test
     public void lanTargetComesFromTheWifiLink() throws Exception {
         ConnectionTracker tracker = new ConnectionTracker(activity, new android.os.Handler(android.os.Looper.getMainLooper()), c -> { });
         Fixtures.noNetworks();

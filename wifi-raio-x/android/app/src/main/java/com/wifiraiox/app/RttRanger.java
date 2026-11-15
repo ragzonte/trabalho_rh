@@ -94,8 +94,10 @@ final class RttRanger {
                 String bssid = r.BSSID.toLowerCase(Locale.ROOT);
                 if (wanted.contains(bssid) && seen.add(bssid)) out.add(r);
             }
-        } catch (RuntimeException ignored) {
+        } catch (SecurityException ignored) {
             // sem permissão não há varredura; ninguém é medido
+        } catch (RuntimeException ignored) {
+            // serviço de Wi-Fi indisponível
         }
         return out;
     }

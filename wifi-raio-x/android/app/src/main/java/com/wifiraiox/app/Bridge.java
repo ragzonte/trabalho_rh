@@ -416,6 +416,25 @@ public final class Bridge implements Emitter {
         trustedPage = WebClient.isAppUrl(url);
     }
 
+    /**
+     * Uma página nova vai nascer (primeira carga ou recarga). Tudo o que a anterior deixou em
+     * andamento é encerrado, e as respostas que ela esperava são descartadas: os ids recomeçam do 1
+     * na página nova e uma resposta atrasada cairia na chamada errada. Pode vir de qualquer thread.
+     */
+    void onNewPage() {
+        if (destroyed) return;
+        pending.clear();
+        pinger.cancel();
+        lan.cancel();
+        rssi.unwatch();
+        Sys.runOnMain(main, () -> {
+            rtt.cancelAll();
+            permissions.flush();
+            Window window = activity.getWindow();
+            if (window != null) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        });
+    }
+
     void onStart() {
         if (destroyed) return;
         scanner.start();
@@ -427,6 +446,7 @@ public final class Bridge implements Emitter {
         if (destroyed) return;
         rssi.setResumed(true);
         emitStatus(true); // o usuário pode ter voltado das configurações com algo diferente
+        connection.refresh(); // ex.: Localização religada -> o nome da rede volta a aparecer
     }
 
     void onPause() {
@@ -441,7 +461,9 @@ public final class Bridge implements Emitter {
 
     void onPermissionsResult(int requestCode, String[] names, int[] results) {
         if (destroyed) return;
-        if (permissions.onResult(requestCode, names, results)) emitStatus(true);
+        if (!permissions.onResult(requestCode, names, results)) return;
+        emitStatus(true);
+        if (permissions.hasFineLocation()) connection.restart(); // agora o Android entrega nome e BSSID
     }
 
     /** Encerra tudo: ninguém fica esperando resposta, nenhuma thread ou registro sobrevive à Activity. */

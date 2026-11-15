@@ -227,14 +227,12 @@ final class LanScanner {
             events.onDevice(device);
         }
 
-        void step() {
-            int now;
-            synchronized (this) {
-                now = ++done;
-                long t = System.nanoTime() / 1_000_000;
-                if (cancelled || now >= total || t - lastProgressAt < PROGRESS_EVERY_MS) return; // o 100% sai no fim
-                lastProgressAt = t;
-            }
+        /** Mais um endereço concluído. O aviso sai com o lock para os números nunca chegarem fora de ordem. */
+        synchronized void step() {
+            int now = ++done;
+            long t = System.nanoTime() / 1_000_000;
+            if (cancelled || now >= total || t - lastProgressAt < PROGRESS_EVERY_MS) return; // o 100% sai no fim
+            lastProgressAt = t;
             events.onProgress(now, total);
         }
 

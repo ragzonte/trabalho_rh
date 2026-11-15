@@ -30,9 +30,19 @@
 //
 // patch() em detalhe
 //   Escreva a tela como uma função estado -> árvore e chame patch(raiz, arvore) a cada mudança:
-//   os nós existentes são reaproveitados (mesma `key`, ou mesma posição e mesma tag), então a
-//   rolagem, o foco, o texto sendo digitado e as animações em curso continuam como estavam.
-//   Os ouvintes passam a ser os da árvore nova. `ref` é chamado de novo com o nó que ficou.
+//   os nós existentes são reaproveitados (mesma `key`, ou mesma posição e mesma tag), então o
+//   foco, o texto sendo digitado e as animações em curso continuam como estavam, e a rolagem
+//   (da raiz e de quem rola em volta dela) fica exatamente onde o usuário deixou.
+//   - Dê `key` a tudo o que pode mudar de ordem, entrar ou sair (linhas de lista, cartões opcionais).
+//   - Os ouvintes passam a ser os da árvore nova (podem capturar os dados novos à vontade).
+//   - `ref` é chamado de novo com o nó que ficou no documento.
+//   - Classes e atributos postos "por fora" num nó gerenciado são sobrescritos; para um nó que
+//     outro código controla (canvas de gráfico, visualizador 3D), use `keep: true`.
+//
+// Camadas
+//   sheet(), confirmDialog() e os bloqueios (ui/gates.js) entram numa pilha única: a camada de
+//   cima prende o foco (Tab), deixa o resto da página inerte e é a que o "voltar"/Esc fecha.
+//   Quem criar uma camada própria (um filho direto de <body>) registra-a com pushLayer().
 
 import { icon } from './icons.js';
 
@@ -270,6 +280,57 @@ function morphNode(old, next) {
   morphChildren(old, Array.from(next.childNodes));
 }
 
+// Mudar um nó de lugar com insertBefore tira o foco dele. Onde existe moveBefore (Chromium
+// recente) o nó muda de lugar sem perder nada; nos demais, keepStable devolve o foco depois.
+function moveNode(parent, node, before) {
+  if (typeof parent.moveBefore === 'function' && node.parentNode === parent) {
+    try {
+      parent.moveBefore(node, before);
+      return;
+    } catch {
+      // cai para o caminho de sempre
+    }
+  }
+  parent.insertBefore(node, before);
+}
+
+// Roda `work` (que reorganiza os filhos de `root`) e põe de volta o que o navegador mexe por
+// conta própria: o foco e a rolagem — de `root` e de quem rola em volta dele. Numa lista que se
+// reordena sozinha, a tela fica parada onde o usuário a deixou em vez de seguir uma linha.
+function keepStable(root, work) {
+  const active = document.activeElement;
+  const inside = active && active !== document.body && root.contains(active) ? active : null;
+  let range = null;
+  if (inside && typeof inside.selectionStart === 'number') {
+    try {
+      range = [inside.selectionStart, inside.selectionEnd];
+    } catch {
+      range = null; // alguns tipos de <input> não têm seleção
+    }
+  }
+  const scrolled = [];
+  for (let el = root; el && el.nodeType === 1; el = el.parentNode) {
+    if (el.scrollTop !== 0 || el.scrollLeft !== 0) scrolled.push([el, el.scrollTop, el.scrollLeft]);
+  }
+
+  work();
+
+  if (inside && inside.isConnected && document.activeElement !== inside) {
+    inside.focus({ preventScroll: true });
+    if (range) {
+      try {
+        inside.setSelectionRange(range[0], range[1]);
+      } catch {
+        // idem
+      }
+    }
+  }
+  for (const [el, top, left] of scrolled) {
+    if (el.scrollTop !== top) el.scrollTop = top;
+    if (el.scrollLeft !== left) el.scrollLeft = left;
+  }
+}
+
 function morphChildren(parent, nextKids) {
   let keyed = null;
   for (let node = parent.firstChild; node; node = node.nextSibling) {
@@ -289,7 +350,7 @@ function morphChildren(parent, nextKids) {
     }
     if (match) {
       if (match === cursor) cursor = cursor.nextSibling;
-      else parent.insertBefore(match, cursor);
+      else moveNode(parent, match, cursor);
       morphNode(match, next);
     } else {
       parent.insertBefore(next, cursor);
@@ -308,7 +369,8 @@ function morphChildren(parent, nextKids) {
  * existem (veja o cabeçalho). Devolve `root`.
  */
 export function patch(root, ...children) {
-  morphChildren(root, flatten(children));
+  const next = flatten(children);
+  keepStable(root, () => morphChildren(root, next));
   return root;
 }
 
@@ -326,26 +388,28 @@ export function patch(root, ...children) {
 export function patchList(parent, items, spec) {
   const old = parent.__rows || new Map();
   const rows = new Map();
-  let cursor = parent.firstChild;
-  items.forEach((item, index) => {
-    const key = String(spec.key(item, index));
-    if (rows.has(key)) return; // chave repetida: fica só a primeira
-    let el = old.get(key);
-    if (el && el.parentNode === parent) {
-      if (spec.update) spec.update(el, item, index);
-      else morphNode(el, spec.create(item, index));
-    } else {
-      el = spec.create(item, index);
+  keepStable(parent, () => {
+    let cursor = parent.firstChild;
+    items.forEach((item, index) => {
+      const key = String(spec.key(item, index));
+      if (rows.has(key)) return; // chave repetida: fica só a primeira
+      let el = old.get(key);
+      if (el && el.parentNode === parent) {
+        if (spec.update) spec.update(el, item, index);
+        else morphNode(el, spec.create(item, index));
+      } else {
+        el = spec.create(item, index);
+      }
+      rows.set(key, el);
+      if (el === cursor) cursor = cursor.nextSibling;
+      else moveNode(parent, el, cursor);
+    });
+    while (cursor) {
+      const gone = cursor;
+      cursor = cursor.nextSibling;
+      parent.removeChild(gone);
     }
-    rows.set(key, el);
-    if (el === cursor) cursor = cursor.nextSibling;
-    else parent.insertBefore(el, cursor);
   });
-  while (cursor) {
-    const gone = cursor;
-    cursor = cursor.nextSibling;
-    parent.removeChild(gone);
-  }
   parent.__rows = rows;
   return parent;
 }
@@ -483,7 +547,7 @@ export function sheet({ title, subtitle, content, footer, tall = false, onClose 
   );
   const panel = h(
     'div',
-    { class: ['sheet', tall && 'sheet--tall'], role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId, tabIndex: -1 },
+    { class: ['sheet', tall && 'sheet--tall', footer && 'sheet--footer'], role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId, tabIndex: -1 },
     grab,
     header,
     body,
@@ -547,7 +611,11 @@ export function sheet({ title, subtitle, content, footer, tall = false, onClose 
     zone.addEventListener('pointerdown', (ev) => {
       if (ev.target.closest('button')) return;
       start(ev.clientY, false);
-      zone.setPointerCapture(ev.pointerId);
+      try {
+        zone.setPointerCapture(ev.pointerId); // o arrasto continua valendo fora do cabeçalho
+      } catch {
+        // ponteiro que já não existe (evento sintético): segue sem a captura
+      }
     });
     zone.addEventListener('pointermove', (ev) => move(ev.clientY, ev));
     zone.addEventListener('pointerup', end);

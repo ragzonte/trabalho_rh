@@ -105,7 +105,7 @@ export function mount(root, ctx) {
         ['Android', info && info.platform === 'android' ? info.release : null],
         ['Modo', info && info.platform === 'sim' ? 'Demonstração (simulador)' : null],
         ['Faixas de Wi-Fi', info ? bandsText(info.bands) : null],
-        ['Mede distância por Wi-Fi (RTT)', info ? (info.rtt ? 'Sim' : 'Não') : null],
+        ['Distância por Wi-Fi (RTT)', info ? (info.rtt ? 'Mede' : 'Não mede') : null],
         ['Versão do app', info ? info.appVersion : null],
       ]),
     ),

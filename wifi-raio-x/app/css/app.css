@@ -44,7 +44,7 @@
   --tap: 44px;
   --topbar-h: 56px;
   --nav-h: 64px;
-  --rail-w: 80px;
+  --rail-w: 88px;
   --content-max: 720px;
 
   --dur: 180ms;
@@ -106,7 +106,7 @@
   --warning-line: rgba(251, 191, 36, 0.36);
   --info-line: rgba(56, 189, 248, 0.36);
   --good-line: rgba(52, 211, 153, 0.36);
-  --danger-fill: #ef4444;
+  --danger-fill: #dc2626;
   --danger-ink: #ffffff;
 
   /* gráficos: paleta categórica segura para daltônicos (Okabe-Ito, clareada) */
@@ -141,7 +141,7 @@
   --line-strong: #b4c0d1;
   --text: #0f172a;
   --muted: #5b6779;
-  --faint: #6b7789;
+  --faint: #626e80;
 
   --accent: #0284c7;
   --accent-text: #0369a1;
@@ -156,7 +156,7 @@
   --sig-4: #c2410c;
   --sig-5: #b91c1c;
 
-  --band-24: #b45309;
+  --band-24: #a84d08;
   --band-5: #0369a1;
   --band-6: #6d28d9;
   --band-24-soft: rgba(245, 158, 11, 0.16);
@@ -164,7 +164,7 @@
   --band-6-soft: rgba(124, 58, 237, 0.1);
 
   --critical: #b91c1c;
-  --warning: #a8530a;
+  --warning: #a84d08;
   --info: #0369a1;
   --good: #047857;
   --critical-soft: rgba(220, 38, 38, 0.08);
@@ -516,22 +516,25 @@ canvas {
   justify-content: center;
   height: calc(var(--nav-h) + var(--safe-b));
   padding: 0 var(--safe-r) var(--safe-b) var(--safe-l);
-  background: var(--surface);
+  /* mesma cor do fundo: a barra de navegação do Android (pintada com --bg) continua esta sem emenda */
+  background: var(--bg);
   border-top: 1px solid var(--line);
   -webkit-user-select: none;
   user-select: none;
 }
 
+/* Cada item tem a largura do próprio rótulo mais uma parte igual da sobra: em 360 px
+   "Melhor Wi-Fi" e "Ferramentas" não cabem em cinco colunas iguais sem encostar um no outro. */
 .bottomnav__item {
-  flex: 1 1 0;
-  min-width: 0;
-  max-width: 144px;
+  flex: 1 1 auto;
+  min-width: 56px;
+  max-width: 168px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 4px;
-  padding: 0 2px;
+  padding: 0 4px;
   color: var(--muted);
   font-size: var(--fs-xs);
   font-weight: 500;
@@ -549,9 +552,9 @@ canvas {
   transition: background-color var(--dur) var(--ease);
 }
 
+/* mesma espessura de letra do item apagado: trocar de aba não mexe na largura dos itens */
 .bottomnav__item[aria-current='page'] {
   color: var(--text);
-  font-weight: 600;
 }
 
 .bottomnav__item[aria-current='page'] .bottomnav__icon {
@@ -713,6 +716,22 @@ canvas {
   border-top: 1px solid var(--line);
 }
 
+/* grupo de linhas dentro de uma lista (mantém o traço separador entre o grupo e a linha de cima) */
+.list__group {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.list > * + .list__group::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: var(--sp-4);
+  right: var(--sp-4);
+  border-top: 1px solid var(--line);
+}
+
 .row--tappable {
   cursor: pointer;
   transition: background-color 120ms var(--ease);
@@ -795,6 +814,7 @@ canvas {
    (vai para uma segunda linha escondida), em vez de aparecer cortado pela metade. */
 .row__sub--clip {
   flex-wrap: wrap;
+  align-content: flex-start; /* sem isto as duas linhas dividem os 20 px e a de baixo aparece */
   gap: 0;
   height: 20px;
   overflow: hidden;
@@ -817,6 +837,12 @@ canvas {
 
 .row__sub--clip > .badge--plain {
   gap: 4px;
+  height: 20px; /* todos os itens com a altura da linha, senão a segunda linha sobe e aparece */
+}
+
+/* dentro do selo o separador é um item a mais: desconta o espaçamento entre os itens */
+.row__sub--clip > * + .badge--plain::before {
+  margin-right: 2px;
 }
 
 .row__sub--clip > .badge--plain > .dot {
@@ -1798,8 +1824,8 @@ canvas {
   flex: 1;
 }
 
-.sheet__footer ~ .sheet__body,
-.sheet:has(.sheet__footer) .sheet__body {
+/* com rodapé, quem cuida da margem de baixo (e da barra do sistema) é ele */
+.sheet--footer > .sheet__body {
   padding-bottom: var(--sp-4);
 }
 
@@ -2064,6 +2090,7 @@ canvas {
     height: 72px;
     margin-bottom: 0;
   }
+  .gate__art::before,
   .gate__art::after {
     display: none;
   }
@@ -2500,12 +2527,13 @@ textarea.input {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* 0 s (e não "quase zero"): assim nada fica um instante no valor antigo */
   *,
   *::before,
   *::after {
-    animation-duration: 1ms !important;
+    animation-duration: 0s !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 1ms !important;
+    transition-duration: 0s !important;
     scroll-behavior: auto !important;
   }
   /* quem indica "trabalhando" continua se mexendo, só mais devagar */

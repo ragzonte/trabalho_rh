@@ -134,17 +134,18 @@ function vendorOf(bssid) {
   return VENDOR_BY_OUI.get(String(bssid).slice(0, 8).toLowerCase()) || null;
 }
 
-// Endereços que cada operadora/fabricante entrega de fábrica. dns 'gw' = o próprio roteador.
+// Endereços que cada operadora/fabricante entrega de fábrica (dns 'gw' = o próprio roteador)
+// e o plano de internet contratado, em Mb/s [download, upload].
 const NETS = {
-  vivo: { gw: '192.168.15.1', dns: 'gw', lease: 14400, v6: '2804:7f4', gwHost: 'menuvivofibra.br' },
-  claro: { gw: '192.168.0.1', dns: ['181.213.132.2', '181.213.132.3'], lease: 3600, v6: '2804:14d', gwHost: null },
-  tplink: { gw: '192.168.68.1', dns: ['192.168.68.1', '1.1.1.1'], lease: 7200, v6: '2804:431', gwHost: 'tplinkdeco.net' },
-  huawei: { gw: '192.168.100.1', dns: 'gw', lease: 86400, v6: '2804:d45', gwHost: null },
-  zte: { gw: '192.168.1.1', dns: 'gw', lease: 86400, v6: '2804:214', gwHost: null },
-  intelbras: { gw: '10.0.0.1', dns: ['10.0.0.1', '8.8.8.8'], lease: 7200, v6: null, gwHost: 'meuintelbras.local' },
-  dlink: { gw: '192.168.0.1', dns: 'gw', lease: 86400, v6: null, gwHost: 'dlinkrouter.local' },
-  office: { gw: '192.168.10.1', dns: ['192.168.10.1', '8.8.8.8'], lease: 28800, v6: null, gwHost: 'gateway.corp.local' },
-  generic: { gw: '192.168.1.1', dns: ['8.8.8.8', '8.8.4.4'], lease: 43200, v6: null, gwHost: null },
+  vivo: { gw: '192.168.15.1', dns: 'gw', lease: 14400, v6: '2804:7f4', gwHost: 'menuvivofibra.br', plan: [300, 150] },
+  claro: { gw: '192.168.0.1', dns: ['181.213.132.2', '181.213.132.3'], lease: 3600, v6: '2804:14d', gwHost: null, plan: [500, 50] },
+  tplink: { gw: '192.168.68.1', dns: ['192.168.68.1', '1.1.1.1'], lease: 7200, v6: '2804:431', gwHost: 'tplinkdeco.net', plan: [600, 300] },
+  huawei: { gw: '192.168.100.1', dns: 'gw', lease: 86400, v6: '2804:d45', gwHost: null, plan: [400, 200] },
+  zte: { gw: '192.168.1.1', dns: 'gw', lease: 86400, v6: '2804:214', gwHost: null, plan: [200, 100] },
+  intelbras: { gw: '10.0.0.1', dns: ['10.0.0.1', '8.8.8.8'], lease: 7200, v6: null, gwHost: 'meuintelbras.local', plan: [100, 50] },
+  dlink: { gw: '192.168.0.1', dns: 'gw', lease: 86400, v6: null, gwHost: 'dlinkrouter.local', plan: [50, 10] },
+  office: { gw: '192.168.10.1', dns: ['192.168.10.1', '8.8.8.8'], lease: 28800, v6: null, gwHost: 'gateway.corp.local', plan: [500, 500] },
+  generic: { gw: '192.168.1.1', dns: ['8.8.8.8', '8.8.4.4'], lease: 43200, v6: null, gwHost: null, plan: [200, 100] },
 };
 
 const GUEST_SSID = /visitante|convidad|guest/i;
@@ -156,16 +157,20 @@ export function savedNetworks(world) {
   return main.length ? main : own;
 }
 
+// Semente do mundo já misturada com o nome dele (mundos diferentes, sorteios independentes).
+const keyOf = (world) => world.key ?? world.seed;
+
 /**
- * Endereçamento da rede local do mundo (o que o DHCP do roteador entregaria ao celular).
+ * Endereçamento da rede local do mundo (o que o DHCP do roteador entregaria ao celular) e o
+ * plano de internet da casa.
  * @returns {{gateway:string, prefix:number, ip:string, dns:string[], ipv6:string[], iface:string, mtu:number,
- *            leaseSec:number, gatewayHost:?string, base:string}}
+ *            leaseSec:number, gatewayHost:?string, base:string, downMbps:number, upMbps:number}}
  */
 export function networkOf(world) {
   const router = savedNetworks(world)[0] || world.aps[0] || null;
   const vendor = router ? vendorOf(router.bssid) : null;
   const conf = NETS[vendor ? vendor.net : 'generic'];
-  const h = hashSeed('wrx-net', world.seed, router ? router.bssid : world.name);
+  const h = hashSeed('wrx-net', keyOf(world), router ? router.bssid : world.name);
   const base = conf.gw.slice(0, conf.gw.lastIndexOf('.'));
   const group = (k) => hashSeed(h, 'v6', k).toString(16).slice(-4).replace(/^0+(?=.)/, '');
   const ipv6 = [`fe80::${group(1)}:${group(2)}:${group(3)}:${group(4)}`];
@@ -181,6 +186,8 @@ export function networkOf(world) {
     leaseSec: conf.lease,
     gatewayHost: conf.gwHost,
     base,
+    downMbps: conf.plan[0],
+    upMbps: conf.plan[1],
   };
 }
 
@@ -257,7 +264,7 @@ export function householdOf(world, net, hostile) {
         { host: HOSTILE_TEXT.lanLong, ms: [30, 160] },
       ]
     : [];
-  const h = hashSeed('wrx-lan', world.seed, world.name);
+  const h = hashSeed('wrx-lan', keyOf(world), world.name);
   [...list, ...extra].forEach((d, i) => {
     let n = 2 + (hashSeed(h, 'ip', i) % 252);
     while (used.has(n)) n = n >= 253 ? 2 : n + 1;
@@ -308,6 +315,12 @@ function asciiHex(text) {
   return s;
 }
 
+function utf8Hex(text) {
+  let s = '';
+  for (const byte of new TextEncoder().encode(text)) s += byte.toString(16).padStart(2, '0');
+  return s;
+}
+
 /**
  * Perfil fixo de cada BSSID do mundo: o que o beacon dele anuncia além do nome.
  * @param {ReturnType<import('./world.js').createWorld>} world
@@ -337,10 +350,10 @@ export function describeAps(world) {
 
   const profiles = new Map();
   for (const ap of world.aps) {
-    const h = hashSeed('wrx-ap', world.seed, ap.bssid);
+    const h = hashSeed('wrx-ap', keyOf(world), ap.bssid);
     const u = (label) => hashUniform(h, label);
     // O que é do aparelho (modelo, chip, país) vale para todos os rádios dele.
-    const hd = hashSeed('wrx-device', world.seed, ap.device);
+    const hd = hashSeed('wrx-device', keyOf(world), ap.device);
     const ud = (label) => hashUniform(hd, label);
     const vendor = vendorOf(ap.bssid);
     const mesh = ap.own && (devicesBySsid.get(ap.ssid)?.size ?? 0) >= 2;
@@ -353,7 +366,7 @@ export function describeAps(world) {
       else nss = u('nss') < 0.8 ? 2 : 4;
     }
 
-    const roaming = mesh ? { k: true, v: true, r: true, mdid: hashSeed('wrx-md', world.seed, ap.ssid) & 0xffff } : null;
+    const roaming = mesh ? { k: true, v: true, r: true, mdid: hashSeed('wrx-md', keyOf(world), ap.ssid) & 0xffff } : null;
     const capabilities = roaming ? withFastTransition(ap.capabilities) : ap.capabilities;
     const sec = parseCapabilities(capabilities);
     const rsnSection = sec.sections.rsn;
@@ -411,7 +424,7 @@ export function describeAps(world) {
     let load = null;
     if (ap.own || ud('load') < 0.65) {
       const n = rivals(ap);
-      const radio = hashSeed('wrx-radio', world.seed, ap.device, ap.band);
+      const radio = hashSeed('wrx-radio', keyOf(world), ap.device, ap.band);
       let stations;
       if (!ap.own) stations = Math.floor(Math.pow(u('sta'), 1.6) * 9);
       else if (office) stations = GUEST_SSID.test(ap.ssid) ? (ap.band ? 1 : 0) : ap.band ? 7 : 3;
@@ -426,8 +439,15 @@ export function describeAps(world) {
       };
     }
 
+    // O Android entrega todos os elementos do beacon, a começar pelo nome (0) e pelo TIM (5),
+    // que o encodeIes não monta. Rede oculta anuncia o nome vazio.
+    const head = [{ id: 0, ext: 0, hex: utf8Hex(ap.ssid) }];
+    const tim = { id: 5, ext: 0, hex: u('dtim') < 0.6 ? '00010000' : '00030000' };
+
     profiles.set(ap.bssid, {
       bssid: ap.bssid,
+      head,
+      tim,
       vendor: vendor ? vendor.name : null,
       nss,
       mesh,
@@ -471,7 +491,11 @@ export function loadAt(profile, t) {
  */
 export function iesAt(profile, t) {
   const load = loadAt(profile, t);
-  const ies = encodeIes(load ? { ...profile.spec, bssLoad: load } : profile.spec);
+  const body = encodeIes(load ? { ...profile.spec, bssLoad: load } : profile.spec);
+  // Na ordem do beacon: nome, taxas, canal (DS), TIM e o resto.
+  let cut = 0;
+  while (cut < body.length && (body[cut].id === 1 || body[cut].id === 3)) cut += 1;
+  const ies = [...profile.head.map((e) => ({ ...e })), ...body.slice(0, cut), { ...profile.tim }, ...body.slice(cut)];
   for (const e of profile.extra) ies.push({ ...e });
   return ies;
 }

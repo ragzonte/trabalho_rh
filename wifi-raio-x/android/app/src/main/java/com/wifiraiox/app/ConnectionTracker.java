@@ -168,6 +168,21 @@ final class ConnectionTracker {
         }
     }
 
+    /** Algo de fora pode ter mudado o que o Android deixa ver (ex.: Localização religada): confere e avisa se mudou. */
+    void refresh() {
+        if (tracking()) changed();
+    }
+
+    /**
+     * Registra o callback de novo. Depois que a permissão de localização é concedida, só um registro
+     * novo recebe de imediato o nome e o BSSID da rede sem censura.
+     */
+    void restart() {
+        if (!tracking()) return;
+        stop();
+        start();
+    }
+
     boolean tracking() {
         synchronized (lock) {
             return callback != null;
@@ -185,8 +200,8 @@ final class ConnectionTracker {
     JSONObject rssiSample() {
         WifiInfo tracked;
         synchronized (lock) {
-            Entry e = current();
-            tracked = e == null ? null : e.info;
+            Map.Entry<Network, Entry> e = pick();
+            tracked = e == null ? null : e.getValue().info;
         }
         return ConnectionMapper.rssiSample(connectionInfo(), tracked, System.currentTimeMillis());
     }
@@ -226,11 +241,12 @@ final class ConnectionTracker {
     private Snapshot snapshot() {
         Snapshot s = new Snapshot();
         synchronized (lock) {
-            for (Map.Entry<Network, Entry> e : networks.entrySet()) { // a mais recente fica por último
-                s.network = e.getKey();
-                s.caps = e.getValue().caps;
-                s.link = e.getValue().link;
-                s.info = e.getValue().info;
+            Map.Entry<Network, Entry> best = pick();
+            if (best != null) {
+                s.network = best.getKey();
+                s.caps = best.getValue().caps;
+                s.link = best.getValue().link;
+                s.info = best.getValue().info;
             }
         }
         ConnectivityManager cm = Sys.connectivity(context);
@@ -258,10 +274,24 @@ final class ConnectionTracker {
         return e;
     }
 
-    private Entry current() {
-        Entry last = null;
-        for (Entry e : networks.values()) last = e;
-        return last;
+    /**
+     * Com o lock. O Android 12+ pode manter dois Wi-Fi ao mesmo tempo (o principal e um secundário
+     * sem internet): vale o que tem internet, de preferência validada; no empate, o mais recente.
+     */
+    private Map.Entry<Network, Entry> pick() {
+        Map.Entry<Network, Entry> best = null;
+        int bestScore = -1;
+        for (Map.Entry<Network, Entry> e : networks.entrySet()) {
+            NetworkCapabilities caps = e.getValue().caps;
+            int score = 0;
+            if (caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) score += 2;
+            if (caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) score += 1;
+            if (score >= bestScore) {
+                best = e;
+                bestScore = score;
+            }
+        }
+        return best;
     }
 
     /** getAllNetworks() está obsoleto desde o Android 12 mas segue funcionando; é só o plano B. */

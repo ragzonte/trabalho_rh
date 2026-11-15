@@ -43,16 +43,23 @@
 //   loop         ScanLoopState (scan-loop.js): mode, paused, throttled, intervalMs, nextAt...
 //                loop.throttled === true -> o Android está limitando as buscas (mostre a idade dos dados)
 //
-//   aps          Ap[]       um por BSSID, do sinal mais forte para o mais fraco. Campos de core/model.js
+//   aps          Ap[]       um por BSSID, do sinal mais forte para o mais fraco (por `rssi`, a última leitura;
+//                           quem quiser uma ordem mais calma reordena por `rssiSmooth`). Campos do Ap de core/model.js
 //                           (id, bssid, ssid, hidden, name, rssi, quality, level, freq, band, channel, occ,
-//                           widthMHz, security, gen, ..., ageMs, stale, raw) MAIS os que o store acrescenta:
+//                           widthMHz, security, ie, gen, standard, standardLabel, nss, stations, utilization,
+//                           distanceM, ageMs, stale, randomizedMac, rttResponder, raw...), os do ApTracker
+//                           (rssiSmooth, firstSeen, lastSeen, seenCount) MAIS os que o store acrescenta:
 //                             vendor       nome do fabricante pelo MAC | null
 //                             vendorGuess  true = fabricante provável (BSSID virtual do roteador)
 //                             connected    é o BSSID em que o celular está conectado
 //                             favorite     o SSID está em "minhas redes"
 //                             own          o BSSID está em state.own
-//   devices      aparelhos físicos (core/model.js groupByDevice): BSSIDs do mesmo roteador juntos
-//   networks     redes por nome (core/model.js groupBySsid)
+//                           `ageMs` e `stale` contam a partir da última varredura (stale = não foi ouvido nela).
+//                           Um BSSID sai da lista depois de 90 s sem ser ouvido.
+//   devices      aparelhos físicos (core/model.js groupByDevice): {id, bssids, aps, ssids, bands, bestRssi}
+//   networks     redes por nome (core/model.js groupBySsid): {key, ssid, name, hidden, security, aps,
+//                devices, bands, best, mesh}
+//                Os Ap dentro de devices/networks são os mesmos objetos de `aps`.
 //
 // Derivados que não ficam no estado:
 //   store.apById(bssid)     -> Ap | null (da lista atual)
@@ -135,7 +142,7 @@ const macOf = (x) => (typeof x === 'string' ? x.toLowerCase() : '');
  * @param {(err:unknown) => void} [deps.onError]  chamado quando um ouvinte lança (o store segue funcionando)
  */
 export function createStore({ prefs = null, now = Date.now, onError } = {}) {
-  let tracker = new ApTracker();
+  let tracker = null; // criado na primeira varredura, já sabendo a versão do Android
   let vendors = null; // OuiLookup de core/oui.js
   let rssiLog = [];
 
@@ -238,8 +245,8 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
     if (connectedBssid) {
       own.add(connectedBssid);
       for (const device of devices) {
-        const members = Array.isArray(device.aps) ? device.aps : [];
-        if (members.some((ap) => ap.bssid === connectedBssid)) for (const ap of members) own.add(ap.bssid);
+        const members = Array.isArray(device.bssids) ? device.bssids : [];
+        if (members.includes(connectedBssid)) for (const bssid of members) own.add(bssid);
       }
     }
     return own;
@@ -251,7 +258,9 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
     const favorites = 'favorites' in extra ? extra.favorites : state.favorites;
     const connectedBssid = connection && connection.connected ? macOf(connection.bssid) : '';
 
-    const aps = tracker.list({ maxAgeMs: MAX_AP_AGE_MS, now: now() });
+    // idades contadas a partir da última varredura (o padrão do rastreador), não de "agora":
+    // `stale` quer dizer "não foi ouvido na última", mesmo que ela tenha sido há meio minuto
+    const aps = tracker ? tracker.list({ maxAgeMs: MAX_AP_AGE_MS }) : [];
     for (const ap of aps) {
       const v = vendorOf(ap.bssid);
       ap.vendor = v && v.name ? v.name : null;
@@ -259,9 +268,10 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
       ap.connected = !!connectedBssid && ap.bssid === connectedBssid;
       ap.favorite = !!ap.ssid && favorites.has(ap.ssid);
     }
-    aps.sort((a, b) => (b.rssi ?? -999) - (a.rssi ?? -999) || (a.bssid < b.bssid ? -1 : 1));
+    // o rastreador ordena pelo sinal suavizado; as telas mostram `rssi`, então a ordem segue ele
+    aps.sort((a, b) => (b.rssi ?? -Infinity) - (a.rssi ?? -Infinity) || (a.bssid < b.bssid ? -1 : a.bssid > b.bssid ? 1 : 0));
     const devices = groupByDevice(aps);
-    const networks = groupBySsid(aps);
+    const networks = groupBySsid(aps, { devices });
     const own = ownSet(aps, devices, connectedBssid, favorites);
     for (const ap of aps) ap.own = own.has(ap.bssid);
     byId = new Map(aps.map((ap) => [ap.bssid, ap]));
@@ -299,7 +309,7 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
 
     apById: (bssid) => byId.get(macOf(bssid)) || null,
     connectedAp: () => state.aps.find((ap) => ap.connected) || null,
-    history: (bssid) => tracker.history(macOf(bssid)),
+    history: (bssid) => (tracker ? tracker.history(macOf(bssid)) : []),
     rssiHistory: () => rssiLog.slice(),
     isFavorite: (ssid) => state.favorites.has(ssid),
     isOwn: (bssid) => state.own.has(macOf(bssid)),
@@ -338,6 +348,7 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
     ingestScan(ev) {
       if (!ev || typeof ev !== 'object' || !Array.isArray(ev.aps)) return;
       const t = now();
+      if (!tracker) tracker = new ApTracker({ sdk: state.info && typeof state.info.sdk === 'number' ? state.info.sdk : undefined });
       tracker.update(ev);
       const fresh = ev.fresh !== false;
       let dataAt = state.scan.dataAt;
@@ -387,7 +398,7 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
     },
 
     resetScanData() {
-      tracker = new ApTracker();
+      tracker = null;
       rssiLog = [];
       commit(derive({ scan: EMPTY_SCAN, rssi: null, connection: null, status: null, info: null }));
     },

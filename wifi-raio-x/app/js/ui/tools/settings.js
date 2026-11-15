@@ -128,7 +128,7 @@ export function mount(root, ctx) {
         }),
         demoOn
           ? h(
-              'div',
+              'div.list__group',
               { key: 'worlds', role: 'radiogroup', 'aria-label': 'Casa virtual' },
               presets === null
                 ? h('div.row', null, spinner({ label: 'Carregando' }))

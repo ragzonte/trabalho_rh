@@ -364,21 +364,28 @@ export const METRICS = [
 /**
  * Junta os resultados de vários cenários.
  * `score` = média das notas (falhas entram com FAIL_SCORE); as demais medidas ignoram as falhas.
+ * `scoreSe` = erro-padrão dessa média (desvio entre cenários / raiz de n): diferenças de nota
+ * menores que isso entre dois solucionadores são ruído.
  * @param {ReturnType<typeof evaluate>[]} list
  */
 export function aggregate(list) {
+  const scores = list.map((r) => (isNum(r.score) ? r.score : FAIL_SCORE));
+  const score = scores.length ? mean(scores) : null;
   const out = {
     count: list.length,
     failures: list.filter((r) => !r.ok).length,
     floorErrors: list.filter((r) => r.ok && !r.floorOk).length,
-    score: list.length ? mean(list.map((r) => (isNum(r.score) ? r.score : FAIL_SCORE))) : null,
+    score,
+    scoreSe: scores.length > 1 ? Math.sqrt(scores.reduce((s, v) => s + (v - score) ** 2, 0) / (scores.length - 1) / scores.length) : null,
     mean: {},
     median: {},
+    max: {},
   };
   for (const key of METRICS) {
     const values = list.map((r) => r[key]).filter(isNum);
     out.mean[key] = mean(values);
     out.median[key] = median(values);
+    out.max[key] = values.length ? Math.max(...values) : null;
   }
   return out;
 }

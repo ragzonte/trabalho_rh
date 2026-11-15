@@ -1,0 +1,662 @@
+// Nota dos canais: "em que canal o meu roteador deveria estar?"
+//
+// MODELO (o mesmo para as três faixas e todas as larguras)
+//
+// Um canal candidato é um bloco [lo, hi] de `widthMHz` com um canal primário de 20 MHz. Para
+// cada rádio vizinho calcula-se a potência que ele despeja dentro do bloco:
+//     p = dbmToMw(rssi) · interferenceFactor(ocupação do vizinho, lo, hi)
+// (BSSIDs do mesmo aparelho na mesma frequência são UM rádio com várias redes: contam uma vez,
+// com um pequeno acréscimo pelos beacons de cada rede extra.)
+//
+// O estrago depende de o vizinho conseguir ou não "combinar a vez" com o nosso roteador:
+//
+// 1. Mesmo canal primário e sinal acima de −82 dBm (limiar de detecção de preâmbulo do 802.11):
+//    os dois se ouvem e dividem o tempo educadamente (CSMA/CA). O custo é o tempo de ar que o
+//    vizinho ocupa: um ciclo de trabalho estimado pelo número de aparelhos conectados (BSS Load),
+//    ou 8% quando ele não informa. Quando o vizinho também mede a ocupação do canal (BSS Load),
+//    o que passar do ciclo dele é carga extra X = (medido − ciclo)/(1 − ciclo), de quem quer que
+//    seja; vale a maior entre os que medem. Tempo de ar tomado: T = 1 − (1 − X)·Π(1 − ciclo).
+//    (Um vizinho sozinho que mede 60% dá T = 60%. Com vários, parte do tráfego pode ser contada
+//    duas vezes: preferimos errar para o lado pessimista a deixar que uma rede a mais melhore a
+//    nota de um canal.)
+//
+// 2. Qualquer outro caso (canal parcialmente sobreposto, primário diferente dentro do mesmo
+//    bloco, vazamento do canal ao lado, ou mesmo canal com sinal fraco demais para decodificar):
+//    o vizinho é ruído. Enquanto ele transmite, um enlace de referência (−65 dBm) perde a fração
+//    x = 1 − C(com o ruído)/C(sem ele) da capacidade de Shannon. É aqui que entra a escala
+//    logarítmica: o que conta são os dB acima do piso de ruído. Como não há coordenação, os
+//    quadros colidem e são retransmitidos, e o controle de taxa despenca: a perda é ampliada por
+//    (1 + 1,5·x), ou seja, até 2,5 vezes o tempo de ar do vizinho quando o ruído é forte. Por
+//    unidade de potência isso é pior que dividir o canal; ruído fraco quase não custa.
+//
+// Nota = 100 · (1 − T) · Π(1 − perda de cada ruído): a fração da capacidade que sobra. Canal
+// vazio = 100. Cada vizinho só entra multiplicando por algo ≤ 1, então acrescentar uma rede
+// nunca aumenta a nota. Leituras velhas (ageMs > 30 s) pesam menos: metade a cada 30 s a mais.
+//
+// Dentro de um bloco largo, o primário escolhido é o que dá a maior nota: com vizinho forte, o
+// mesmo primário dele (dividir é melhor que brigar); com vizinho fraco, tanto faz ou outro.
+//
+// Simplificações assumidas: a máscara espectral do padrão é pessimista para o vazamento entre
+// canais; não modelamos a queda para uma largura menor quando só parte do bloco está ocupada
+// (canais largos saem um pouco piores do que são); o ciclo de trabalho é uma estimativa.
+
+import { blocksOf, blocksContaining, channelList, interferenceFactor, overlapMHz, maskDb } from './channels.js';
+import { dbmToMw, mwToDbm, noiseFloorDbm } from './signal.js';
+import { asAp, groupByDevice, normalizeBssid } from './model.js';
+
+const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
+const isObj = (x) => x !== null && typeof x === 'object';
+const round1 = (x) => Math.round(x * 10) / 10;
+
+// --- parâmetros do modelo
+const PREAMBLE_DETECT_DBM = -82;
+const DEFAULT_DUTY = 0.08; // rádio que não informa nada: uns dois aparelhos em uso leve
+const IDLE_DUTY = 0.02; // só beacons e manutenção
+const DUTY_PER_STATION = 0.03;
+const MAX_DUTY = 0.5;
+const EXTRA_NETWORK_DUTY = 0.015; // beacons de cada rede a mais no mesmo rádio
+const REFERENCE_SIGNAL_DBM = -65; // enlace "bom" típico dentro de casa
+const COLLISION_GAIN = 1.5; // quanto as colisões ampliam a perda quando o ruído é forte
+const MAX_LOSS = 0.95;
+const NEGLIGIBLE_MW = 1e-11; // −110 dBm dentro do bloco: 16 dB abaixo do piso de ruído, não muda nada
+const STALE_AFTER_MS = 30_000;
+const STALE_HALF_LIFE_MS = 30_000;
+
+// --- política de recomendação
+const STANDARD_24 = new Set([1, 6, 11]);
+const KEEP_MARGIN = 8; // menos que isto de ganho não compensa o trabalho de trocar
+const DFS_HANDICAP = 5; // um canal DFS só ganha de um comum se for mais que isto melhor
+const OFF_STANDARD_TOLERANCE = 3;
+const NEARLY_EMPTY_SCORE = 97; // 2,4 GHz: 40 MHz só com a faixa praticamente vazia
+const GOOD_SCORE = { 40: 60, 80: 70, 160: 80, 320: 85 };
+
+const PSC = new Set(channelList('6').filter((c) => c.psc).map((c) => c.channel));
+const CHANNEL_NOTE = {};
+for (const band of ['2.4', '5', '6']) {
+  CHANNEL_NOTE[band] = new Map(channelList(band, { all: true }).map((c) => [c.channel, c.note]));
+}
+
+const NOTE_OFF_STANDARD =
+  'Fora do trio 1, 6 e 11: um roteador aqui atrapalha (e é atrapalhado por) dois canais padrão ao mesmo tempo';
+const NOTE_40_IN_24 = 'Em 2,4 GHz, 40 MHz ocupam mais da metade da faixa: só vale a pena sem vizinhos por perto';
+const NOTE_DFS_BLOCK =
+  'Parte deste bloco usa canais DFS (divididos com radares): o roteador pode demorar a entrar no ar ou mudar de canal sozinho';
+const NOTE_NOT_PSC = 'Fora dos canais preferenciais (PSC): alguns aparelhos demoram a encontrar a rede';
+const NOTE_UNII4 = 'Usa a faixa U-NII-4 (5,9 GHz), que poucos roteadores e aparelhos aceitam';
+const NOTE_SELF_LOAD = 'A ocupação medida neste canal inclui o tráfego da sua própria rede';
+
+function normBand(band) {
+  const s = band == null ? '' : String(band).trim().replace(',', '.');
+  return s === '2.4' || s === '5' || s === '6' ? s : null;
+}
+
+function bssidSet(list) {
+  const out = new Set();
+  if (list == null) return out;
+  const items = typeof list === 'string' ? [list] : typeof list[Symbol.iterator] === 'function' ? list : [];
+  for (const item of items) {
+    const id = normalizeBssid(isObj(item) ? item.bssid : item);
+    if (id) out.add(id);
+  }
+  return out;
+}
+
+function toAps(aps) {
+  const out = [];
+  for (const item of Array.isArray(aps) ? aps : []) if (isObj(item)) out.push(asAp(item));
+  return out;
+}
+
+/** Peso de uma leitura conforme a idade: 1 até 30 s, depois cai pela metade a cada 30 s. */
+function freshness(ageMs) {
+  if (!isNum(ageMs) || ageMs <= STALE_AFTER_MS) return 1;
+  return Math.pow(0.5, (ageMs - STALE_AFTER_MS) / STALE_HALF_LIFE_MS);
+}
+
+/** Fração da capacidade que o enlace de referência mantém com `mw` de ruído extra na banda. */
+function capacityKept(mw, widthMHz) {
+  const signal = dbmToMw(REFERENCE_SIGNAL_DBM);
+  const floor = dbmToMw(noiseFloorDbm(widthMHz));
+  return Math.log2(1 + signal / (floor + mw)) / Math.log2(1 + signal / floor);
+}
+
+/**
+ * Prepara a análise de uma faixa: separa as redes do usuário e junta os BSSIDs dos vizinhos em
+ * rádios (mesmo aparelho, mesma frequência). `all` já normalizado; `devices` = groupByDevice(all).
+ */
+function buildContext(all, band, exclude, devices) {
+  const excluded = bssidSet(exclude);
+  const own = [];
+  const others = [];
+  for (const ap of all) {
+    if (ap.band !== band) continue;
+    if (ap.id && excluded.has(ap.id)) own.push(ap);
+    else if (isNum(ap.rssi) && ap.occ.segments.length > 0) others.push(ap);
+  }
+
+  const deviceOf = new Map();
+  for (const device of devices || groupByDevice(all)) for (const ap of device.aps) deviceOf.set(ap, device.id);
+
+  const radios = new Map();
+  others.forEach((ap, index) => {
+    const key = `${deviceOf.get(ap) ?? `?${index}`}|${ap.freq}`;
+    const radio = radios.get(key);
+    if (!radio) radios.set(key, { lead: ap, aps: [ap] });
+    else {
+      radio.aps.push(ap);
+      if (ap.rssi > radio.lead.rssi) radio.lead = ap;
+    }
+  });
+
+  const list = [];
+  for (const radio of radios.values()) {
+    let stations = null;
+    let utilization = null;
+    let weight = 0;
+    for (const ap of radio.aps) {
+      if (isNum(ap.stations)) stations = (stations ?? 0) + ap.stations;
+      if (isNum(ap.utilization)) utilization = Math.max(utilization ?? 0, ap.utilization);
+      weight = Math.max(weight, freshness(ap.ageMs));
+    }
+    const base = stations === null ? DEFAULT_DUTY : IDLE_DUTY + DUTY_PER_STATION * stations;
+    list.push({
+      ap: radio.lead,
+      channel: radio.lead.channel,
+      rssi: radio.lead.rssi,
+      occ: radio.lead.occ,
+      mw: dbmToMw(radio.lead.rssi),
+      duty: Math.min(MAX_DUTY, base + EXTRA_NETWORK_DUTY * (radio.aps.length - 1)),
+      utilization,
+      weight,
+    });
+  }
+  return { band, own, others, radios: list };
+}
+
+/** Avalia um bloco com um canal primário fixo. Devolve os números sem arredondar. */
+function evaluate(ctx, block, primary, shares) {
+  const width = block.widthMHz;
+  const selfOnPrimary = ctx.own.some((ap) => ap.channel === primary);
+  let airtimeLeft = 1;
+  let noiseLeft = 1;
+  let measured = null;
+  let extra = 0;
+  for (const { radio, mw } of shares) {
+    if (radio.channel === primary && radio.rssi >= PREAMBLE_DETECT_DBM) {
+      airtimeLeft *= 1 - radio.weight * radio.duty;
+      if (radio.utilization !== null) {
+        measured = Math.max(measured ?? 0, radio.utilization);
+        extra = Math.max(extra, (radio.weight * (radio.utilization - radio.duty)) / (1 - radio.duty));
+      }
+      continue;
+    }
+    const x = 1 - capacityKept(mw, width);
+    let loss = radio.duty * x * (1 + COLLISION_GAIN * x);
+    // Mesmo canal, mas fraco demais para combinar a vez: nunca custa mais do que dividir
+    if (radio.channel === primary) loss = Math.min(loss, radio.duty);
+    noiseLeft *= 1 - Math.min(MAX_LOSS, radio.weight * loss);
+  }
+  // A ocupação que os vizinhos medem no canal em que o usuário já está inclui o tráfego dele
+  // mesmo; usá-la seria punir o canal atual pelo próprio uso.
+  if (!selfOnPrimary) airtimeLeft *= 1 - extra;
+  const airtime = 1 - airtimeLeft;
+  return { primary, capacity: airtimeLeft * noiseLeft, airtime, utilization: measured, selfOnPrimary };
+}
+
+/** Canais que podem ser o primário de um bloco, já na ordem de preferência. */
+function primariesOf(band, block) {
+  if (band === '6') {
+    const psc = block.channels.filter((c) => PSC.has(c));
+    if (psc.length) return psc;
+  }
+  if (band === '2.4' && block.widthMHz === 40) {
+    const standard = block.channels.filter((c) => STANDARD_24.has(c));
+    if (standard.length) return standard;
+  }
+  return block.channels;
+}
+
+function recommendable(band, block, primary) {
+  if (band === '2.4') return STANDARD_24.has(primary);
+  if (band === '5') return !block.channels.some((c) => c >= 169);
+  return PSC.has(primary);
+}
+
+function notesFor(band, block, primary, result) {
+  const notes = [];
+  const add = (text) => {
+    if (text && !notes.includes(text)) notes.push(text);
+  };
+  if (band === '2.4') {
+    if (!STANDARD_24.has(primary)) add(NOTE_OFF_STANDARD);
+    if (block.widthMHz >= 40) add(NOTE_40_IN_24);
+  }
+  add(CHANNEL_NOTE[band].get(primary));
+  if (band === '5') {
+    if (block.dfs && !notes.some((n) => n.startsWith('DFS'))) add(NOTE_DFS_BLOCK);
+    if (block.channels.some((c) => c >= 169)) add(NOTE_UNII4);
+  }
+  if (band === '6' && !PSC.has(primary)) add(NOTE_NOT_PSC);
+  if (result.selfOnPrimary && result.utilization !== null) add(NOTE_SELF_LOAD);
+  return notes;
+}
+
+/**
+ * Nota completa de um bloco. `only` fixa o canal primário; `prefer` é o primário que vence os
+ * empates (o canal em que o usuário já está).
+ */
+function rateBlock(ctx, block, only, prefer) {
+  const band = ctx.band;
+  const shares = [];
+  let total = 0;
+  let busiest = null;
+  for (const radio of ctx.radios) {
+    const mw = radio.mw * interferenceFactor(radio.occ, block.lo, block.hi);
+    if (!(mw >= NEGLIGIBLE_MW)) continue;
+    shares.push({ radio, mw });
+    total += radio.weight * mw;
+    if (busiest === null || radio.weight * mw > busiest.mw) busiest = { radio, mw: radio.weight * mw };
+  }
+
+  let primaries = isNum(only) ? [only] : primariesOf(band, block);
+  if (primaries.includes(prefer)) primaries = [prefer, ...primaries.filter((c) => c !== prefer)];
+  let best = null;
+  for (const primary of primaries) {
+    const result = evaluate(ctx, block, primary, shares);
+    if (best === null || result.capacity > best.capacity) best = result;
+  }
+
+  let coChannel = 0;
+  let overlapping = 0;
+  for (const ap of ctx.others) {
+    if (ap.channel === best.primary) coChannel += 1;
+    else if (overlapMHz(ap.occ, block) > 0) overlapping += 1;
+  }
+
+  return {
+    band,
+    channel: best.primary,
+    center: block.center,
+    centerFreq: block.centerFreq,
+    lo: block.lo,
+    hi: block.hi,
+    widthMHz: block.widthMHz,
+    channels: block.channels.slice(),
+    score: round1(100 * best.capacity),
+    interferenceDbm: total > 0 ? round1(mwToDbm(total)) : null,
+    coChannel,
+    overlapping,
+    busiest: busiest
+      ? { ssid: busiest.radio.ap.name, rssi: busiest.radio.rssi, bssid: busiest.radio.ap.id, channel: busiest.radio.channel }
+      : null,
+    utilization: best.utilization === null ? null : Math.round(best.utilization * 100) / 100,
+    airtime: Math.round(best.airtime * 1000) / 1000,
+    dfs: block.dfs,
+    psc: band === '6' && PSC.has(best.primary),
+    unii: block.unii,
+    recommendable: recommendable(band, block, best.primary),
+    notes: notesFor(band, block, best.primary, best),
+  };
+}
+
+/**
+ * Nota de cada canal possível de uma faixa, numa largura.
+ *
+ * 2,4 GHz: canais 1 a 13 (em 40 MHz, os nove pares primário + secundário). 5 e 6 GHz: cada
+ * bloco da largura pedida (5 GHz em 80 MHz: 42, 58, 106, 122, 138, 155, 171).
+ *
+ * @param {import('./model.js').Ap[]} aps  lista do ApTracker (ou ScanAp crus)
+ * @param {{band: '2.4'|'5'|'6', widthMHz?: number, exclude?: Iterable<string>}} options
+ *        exclude = BSSIDs do próprio usuário, que não contam como interferência
+ * @returns {{
+ *   band: string,
+ *   channel: number,            canal primário (o melhor dentro do bloco; nos 6 GHz, um PSC)
+ *   center: number,             número do canal central do bloco (ex.: 42)
+ *   centerFreq: number, lo: number, hi: number, widthMHz: number,
+ *   channels: number[],         canais de 20 MHz do bloco
+ *   score: number,              0..100 (100 = livre), uma casa decimal
+ *   interferenceDbm: number|null,  potência somada dos vizinhos dentro do bloco (null = nenhuma)
+ *   coChannel: number,          redes com o mesmo canal primário
+ *   overlapping: number,        redes com outro primário que invadem o bloco
+ *   busiest: {ssid:string, rssi:number, bssid:string, channel:number}|null,  quem mais interfere
+ *   utilization: number|null,   maior ocupação medida por quem está no canal (BSS Load), 0..1
+ *   airtime: number,            fração do tempo tomada por quem divide o canal (T do modelo), 0..1
+ *   dfs: boolean, psc: boolean, unii: string|null,
+ *   recommendable: boolean,     passa na política (2,4 GHz: 1/6/11; 5 GHz: sem U-NII-4; 6 GHz: PSC)
+ *   notes: string[]
+ * }[]}  na ordem dos canais; [] se a faixa ou a largura não existirem
+ */
+export function rateChannels(aps, options) {
+  const o = isObj(options) ? options : {};
+  const band = normBand(o.band);
+  const width = o.widthMHz === undefined || o.widthMHz === null ? 20 : Number(o.widthMHz);
+  if (band === null) return [];
+  const blocks = blocksOf(band, width);
+  if (!blocks.length) return [];
+  const ctx = buildContext(toAps(aps), band, o.exclude);
+  return blocks.map((block) => rateBlock(ctx, block));
+}
+
+// ---------------------------------------------------------------------------
+// Recomendação
+// ---------------------------------------------------------------------------
+
+const policyScore = (r) => r.score - (r.dfs ? DFS_HANDICAP : 0);
+
+function sameSpot(a, b) {
+  return a !== null && b !== null && a.centerFreq === b.centerFreq && a.channel === b.channel;
+}
+
+/** Ordena pela política: nota (com a desvantagem do DFS), canal atual na frente em empates. */
+function rank(ratings, current) {
+  return ratings
+    .filter((r) => r.recommendable)
+    .sort(
+      (a, b) =>
+        policyScore(b) - policyScore(a) ||
+        Number(sameSpot(b, current)) - Number(sameSpot(a, current)) ||
+        Number(a.dfs) - Number(b.dfs) ||
+        a.centerFreq - b.centerFreq,
+    );
+}
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+/** "canal 6", "canal 36 (80 MHz)"; com `flagDfs`, "canal 100 (80 MHz, DFS)". */
+function channelName(r, flagDfs) {
+  const tags = [];
+  if (r.widthMHz > 20) tags.push(`${r.widthMHz} MHz`);
+  if (flagDfs && r.dfs) tags.push('DFS');
+  return `canal ${r.channel}${tags.length ? ` (${tags.join(', ')})` : ''}`;
+}
+
+function sharingText(r) {
+  if (r.coChannel > 0) {
+    const more = r.overlapping > 0 ? ` e que ainda recebe interferência de ${plural(r.overlapping, 'outra', 'outras')}` : '';
+    return `que você divide com ${plural(r.coChannel, 'rede', 'redes')}${more}`;
+  }
+  if (r.overlapping > 0) return `que recebe interferência de ${plural(r.overlapping, 'rede', 'redes')} em canais sobrepostos`;
+  return 'que está livre';
+}
+
+/**
+ * BSSIDs que não contam contra o roteador do usuário: ele mesmo, as outras redes da mesma caixa
+ * e os outros nós do mesmo mesh que estão no mesmo canal (eles mudam de canal junto com ele;
+ * contá-los faria qualquer outro canal parecer melhor sem ser).
+ */
+function ownBssids(devices, own) {
+  const ids = new Set();
+  if (!own || !own.id) return ids;
+  ids.add(own.id);
+  const family = (ap) => (isObj(ap.security) ? `${ap.security.enterprise}|${ap.security.personal}|${ap.security.open}` : '');
+  const sameNetwork = (ap) =>
+    !own.hidden && !ap.hidden && ap.ssid === own.ssid && ap.freq === own.freq && family(ap) === family(own);
+  for (const device of devices) {
+    if (device.bssids.includes(own.id) || device.aps.some(sameNetwork)) for (const id of device.bssids) ids.add(id);
+  }
+  return ids;
+}
+
+/** Lista normalizada (com o roteador do usuário, se ele não estiver nela) e os aparelhos dela. */
+function prepare(aps, own) {
+  const list = toAps(aps);
+  if (own && own.id && !list.some((ap) => ap.id === own.id)) list.push(own);
+  return { list, devices: groupByDevice(list) };
+}
+
+const DEFAULT_WIDTH = { '2.4': 20, 5: 80, 6: 80 };
+
+/**
+ * Recomenda o canal para o roteador do usuário.
+ *
+ * Política: em 2,4 GHz todos os canais recebem nota, mas só 1, 6 e 11 são recomendados; em
+ * 5 GHz ficam de fora os blocos com U-NII-4 e um canal DFS só vence um comum se for mais de
+ * 5 pontos melhor; em 6 GHz só canais PSC. Com menos de 8 pontos de ganho, fica como está.
+ *
+ * @param {import('./model.js').Ap[]} aps
+ * @param {{band: '2.4'|'5'|'6', widthMHz?: number, own?: import('./model.js').Ap|null}} options
+ *        own = o Ap do roteador do usuário nesta faixa (ou null). widthMHz padrão: a largura
+ *        dele; sem ele, 20 MHz em 2,4 GHz e 80 MHz em 5/6 GHz.
+ * @returns {{
+ *   best: object|null,        nota do melhor canal pela política (formato de rateChannels); com
+ *                             'keep' pode ser outro canal que não o atual: é melhor, mas não o
+ *                             bastante para compensar a troca
+ *   current: object|null,     nota do canal atual, sem contar o próprio roteador (nem as outras
+ *                             redes da mesma caixa, nem os nós do mesmo mesh no mesmo canal)
+ *   ranking: object[],        os 5 melhores candidatos
+ *   gain: number|null,        best.score − current.score (o veredito desconta 5 pontos de quem é DFS)
+ *   verdict: 'keep'|'change', sem `own` é sempre 'change' (= "use o melhor")
+ *   text: string              uma ou duas frases em português
+ * }}
+ */
+export function recommendChannel(aps, options) {
+  const o = isObj(options) ? options : {};
+  const band = normBand(o.band);
+  const own = isObj(o.own) ? asAp(o.own) : null;
+  const ownHere = own !== null && own.band === band && isNum(own.channel) ? own : null;
+
+  let width = o.widthMHz === undefined || o.widthMHz === null ? null : Number(o.widthMHz);
+  if (width === null) width = ownHere && blocksOf(band, ownHere.widthMHz).length ? ownHere.widthMHz : DEFAULT_WIDTH[band];
+
+  const blocks = band === null ? [] : blocksOf(band, width);
+  if (!blocks.length) {
+    return { best: null, current: null, ranking: [], gain: null, verdict: 'keep', text: 'Não há canais com essa largura nesta faixa.' };
+  }
+
+  const { list, devices } = prepare(aps, ownHere);
+  const ctx = buildContext(list, band, ownBssids(devices, ownHere), devices);
+  const ratings = blocks.map((block) => rateBlock(ctx, block, null, ownHere ? ownHere.channel : null));
+
+  let current = null;
+  if (ownHere) {
+    // Em 2,4 GHz/40 MHz e 6 GHz/320 MHz o mesmo primário cabe em dois blocos: vale o que o roteador usa
+    let spots = blocksContaining(band, width, ownHere.channel);
+    const exact = spots.filter((b) => b.centerFreq === ownHere.occ.centerFreq);
+    if (exact.length) spots = exact;
+    for (const block of spots) {
+      const rating = rateBlock(ctx, block, ownHere.channel);
+      if (current === null || rating.score > current.score) current = rating;
+    }
+  }
+
+  const ranking = rank(ratings, current);
+  let best = ranking[0] || null;
+  if (best === null) {
+    return { best: null, current, ranking: [], gain: null, verdict: 'keep', text: 'Nenhum canal desta faixa pode ser recomendado.' };
+  }
+  // O canal atual empata com o melhor: é ele o melhor
+  if (current !== null && current.recommendable && policyScore(current) >= policyScore(best)) best = current;
+
+  const top = ranking.slice(0, 5);
+  if (current === null) {
+    const text =
+      best.score >= 90
+        ? `O ${channelName(best, true)} está livre: é a melhor escolha agora.`
+        : `O ${channelName(best, true)} é o menos disputado agora (nota ${Math.round(best.score)} de 100).`;
+    return { best, current: null, ranking: top, gain: null, verdict: 'change', text };
+  }
+
+  const gain = round1(best.score - current.score);
+  const advantage = policyScore(best) - policyScore(current);
+  const where = `Seu roteador está no ${channelName(current)}, ${sharingText(current)}.`;
+  const offStandard = band === '2.4' && !current.recommendable && advantage >= -OFF_STANDARD_TOLERANCE;
+
+  if (sameSpot(best, current) || (advantage < KEEP_MARGIN && !offStandard)) {
+    const tail =
+      current.score >= 90
+        ? 'Pode deixar como está.'
+        : 'Nenhum outro canal está claramente melhor: pode deixar como está.';
+    return { best, current, ranking: top, gain, verdict: 'keep', text: `${where} ${tail}` };
+  }
+  if (advantage < KEEP_MARGIN) {
+    // Só chega aqui quem está fora do trio 1/6/11 sem ganhar nada com isso
+    const text =
+      `Seu roteador está no canal ${current.channel}, que fica entre os canais padrão: ali ele atrapalha, ` +
+      `e é atrapalhado por, quem usa os canais dos dois lados. Prefira o canal ${best.channel}.`;
+    return { best, current, ranking: top, gain, verdict: 'change', text };
+  }
+  const better = gain >= 25 ? 'bem mais livre' : 'mais livre';
+  return { best, current, ranking: top, gain, verdict: 'change', text: `${where} O ${channelName(best, true)} está ${better}.` };
+}
+
+/** Maior largura que um roteador da geração dada consegue usar na faixa. */
+function widthCap(band, own) {
+  const top = band === '2.4' ? 40 : band === '5' ? 160 : 320;
+  if (!own || !isNum(own.gen)) return top;
+  if (own.gen <= 4) return Math.min(top, 40);
+  if (own.gen <= 6) return Math.min(top, 160);
+  return top;
+}
+
+const BAND_NAME = { '2.4': '2,4 GHz', 5: '5 GHz', 6: '6 GHz' };
+
+/**
+ * Recomenda a largura de canal.
+ *
+ * 2,4 GHz: 20 MHz, a não ser que a faixa esteja praticamente vazia. 5 e 6 GHz: a maior largura
+ * que ainda tem um bloco com nota boa (≥ 60 em 40 MHz, 70 em 80, 80 em 160, 85 em 320).
+ *
+ * @param {import('./model.js').Ap[]} aps
+ * @param {'2.4'|'5'|'6'} band
+ * @param {{own?: import('./model.js').Ap|null}} [options]  o roteador do usuário nesta faixa: sai da
+ *        conta da interferência e limita a largura ao que a geração dele alcança
+ * @returns {{widthMHz: number|null, text: string,
+ *            options: {widthMHz:number, score:number, channel:number, dfs:boolean}[]}}
+ *          `options` = o melhor bloco de cada largura, da maior para a menor
+ */
+export function recommendWidth(aps, band, options) {
+  const b = normBand(band);
+  if (b === null) return { widthMHz: null, text: 'Faixa desconhecida.', options: [] };
+  const o = isObj(options) ? options : {};
+  const own = isObj(o.own) ? asAp(o.own) : null;
+  const ownHere = own !== null && own.band === b ? own : null;
+  const { list, devices } = prepare(aps, ownHere);
+  const ctx = buildContext(list, b, ownBssids(devices, ownHere), devices);
+  const cap = widthCap(b, ownHere);
+
+  const table = [];
+  for (const width of [320, 160, 80, 40, 20]) {
+    if (width > cap) continue;
+    const best = rank(blocksOf(b, width).map((block) => rateBlock(ctx, block)), null)[0];
+    if (best) table.push({ widthMHz: width, score: best.score, channel: best.channel, dfs: best.dfs });
+  }
+  const neighbours = ctx.others.length;
+  const crowd = neighbours === 0 ? 'não há redes vizinhas' : `há ${plural(neighbours, 'rede vizinha', 'redes vizinhas')}`;
+  const pick = table.find((t) => t.widthMHz > 20 && t.score >= (b === '2.4' ? NEARLY_EMPTY_SCORE : GOOD_SCORE[t.widthMHz]));
+
+  if (!pick) {
+    const text =
+      b === '2.4'
+        ? `Use 20 MHz: ${crowd} em 2,4 GHz e um canal de 40 MHz ocuparia mais da metade da faixa.`
+        : `Use 20 MHz: ${crowd} em ${BAND_NAME[b]} e os canais mais largos pegariam interferência demais.`;
+    return { widthMHz: 20, text, options: table };
+  }
+  if (b === '2.4') {
+    return { widthMHz: 40, text: 'A faixa de 2,4 GHz está praticamente vazia aqui: dá para usar 40 MHz.', options: table };
+  }
+  const dfs = pick.dfs ? ' Esse bloco usa canais DFS.' : '';
+  const text = `Use ${pick.widthMHz} MHz: o bloco do canal ${pick.channel} está livre o bastante (nota ${Math.round(pick.score)} de 100).${dfs}`;
+  return { widthMHz: pick.widthMHz, text, options: table };
+}
+
+// ---------------------------------------------------------------------------
+// Gráfico de canais
+// ---------------------------------------------------------------------------
+
+const GRAPH_FLOOR_DBM = -100;
+const GRAPH_RANGE = {
+  '2.4': { min: 2400, max: 2484, sections: [[2400, 2484]] },
+  5: { min: 5150, max: 5850, sections: [[5150, 5350], [5470, 5730], [5730, 5850]] },
+  6: { min: 5925, max: 7125, sections: [[5925, 7125]] },
+};
+
+/** Contorno de um canal: o formato da máscara espectral, do pé esquerdo ao pé direito. */
+function maskOutline(center, width, rssi) {
+  const top = width / 2 - 1;
+  if (rssi <= GRAPH_FLOOR_DBM) return [[center - top, GRAPH_FLOOR_DBM], [center + top, GRAPH_FLOOR_DBM]];
+  // Joelhos da máscara do 802.11 (veja maskDb): W/2 − 1, W/2 + 1, W e 1,5·W; depois segue caindo
+  const side = [[top, rssi]];
+  for (const x of [width / 2 + 1, width, 1.5 * width, 3 * width, 6 * width]) {
+    const [px, py] = side[side.length - 1];
+    const y = rssi + maskDb(x, width);
+    if (y <= GRAPH_FLOOR_DBM) {
+      side.push([px + ((x - px) * (py - GRAPH_FLOOR_DBM)) / (py - y), GRAPH_FLOOR_DBM]);
+      break;
+    }
+    side.push([x, y]);
+  }
+  const points = [];
+  for (let i = side.length - 1; i >= 0; i--) points.push([round1(center - side[i][0]), round1(side[i][1])]);
+  for (const [x, y] of side) points.push([round1(center + x), round1(y)]);
+  return points;
+}
+
+/**
+ * Dados para desenhar o gráfico clássico de canais: cada rede vira uma "montanha" com o
+ * formato da máscara espectral, da largura do canal dela e da altura do sinal.
+ *
+ * @param {import('./model.js').Ap[]} aps
+ * @param {'2.4'|'5'|'6'} band
+ * @returns {{
+ *   band: string|null,
+ *   minFreq: number, maxFreq: number,    limites do eixo X (MHz)
+ *   minDbm: number, maxDbm: number,      limites do eixo Y (dBm); o pé das montanhas fica em minDbm
+ *   sections: {minFreq:number, maxFreq:number}[],  trechos com canais (os 5 GHz têm um buraco no meio)
+ *   ticks: {freq:number, channel:number, dfs:boolean, psc:boolean}[],
+ *   shapes: {bssid:string, ssid:string, hidden:boolean, rssi:number, channel:number|null, widthMHz:number,
+ *            lo:number, hi:number, centerFreq:number, approx:boolean, points:number[][]}[]
+ * }}  `shapes` vem do sinal mais fraco para o mais forte (ordem de desenho); um AP 80+80 gera
+ *     duas formas; `points` = [[MHz, dBm], ...]
+ */
+export function channelGraph(aps, band) {
+  const b = normBand(band);
+  if (b === null) {
+    return { band: null, minFreq: 0, maxFreq: 0, minDbm: GRAPH_FLOOR_DBM, maxDbm: -20, sections: [], ticks: [], shapes: [] };
+  }
+  const range = GRAPH_RANGE[b];
+  let minFreq = range.min;
+  let maxFreq = range.max;
+  let strongest = -Infinity;
+  const shapes = [];
+  for (const ap of toAps(aps)) {
+    if (ap.band !== b || !isNum(ap.rssi)) continue;
+    for (const seg of ap.occ.segments) {
+      const width = seg.hi - seg.lo;
+      const centerFreq = (seg.lo + seg.hi) / 2;
+      minFreq = Math.min(minFreq, seg.lo);
+      maxFreq = Math.max(maxFreq, seg.hi);
+      strongest = Math.max(strongest, ap.rssi);
+      shapes.push({
+        bssid: ap.id,
+        ssid: ap.name,
+        hidden: ap.hidden,
+        rssi: ap.rssi,
+        channel: ap.channel,
+        widthMHz: ap.widthMHz,
+        lo: seg.lo,
+        hi: seg.hi,
+        centerFreq,
+        approx: ap.occ.approx,
+        points: maskOutline(centerFreq, width, ap.rssi),
+      });
+    }
+  }
+  shapes.sort((x, y) => x.rssi - y.rssi || (x.bssid < y.bssid ? -1 : 1));
+
+  const ticks = channelList(b, { all: true })
+    .filter((c) => c.freq - 10 >= minFreq && c.freq + 10 <= maxFreq)
+    .map((c) => ({ freq: c.freq, channel: c.channel, dfs: c.dfs, psc: c.psc }));
+  const sections = range.sections.map(([lo, hi], i, all) => ({
+    minFreq: i === 0 ? minFreq : lo,
+    maxFreq: i === all.length - 1 ? maxFreq : hi,
+  }));
+  return {
+    band: b,
+    minFreq,
+    maxFreq,
+    minDbm: GRAPH_FLOOR_DBM,
+    maxDbm: Math.max(-30, Math.ceil((strongest + 5) / 10) * 10),
+    sections,
+    ticks,
+    shapes,
+  };
+}

@@ -160,8 +160,10 @@ final class WifiScanner {
                 List<ScanResult> got = wifi.getScanResults();
                 if (got != null) results = got;
             }
+        } catch (SecurityException ignored) {
+            // sem permissão o Android costuma devolver lista vazia, mas a documentação promete esta exceção
         } catch (RuntimeException ignored) {
-            // sem permissão o Android devolve lista vazia; alguns aparelhos lançam
+            // serviço de Wi-Fi indisponível
         }
         JSONObject o = new JSONObject();
         Json.put(o, "ts", System.currentTimeMillis());

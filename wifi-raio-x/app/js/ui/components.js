@@ -14,7 +14,7 @@
 // Formulário       switchRow({...}) · select(opções, valor, onChange) · slider({...}) · textField({...})
 // Limite do Android  throttleTip(ctx) · openThrottleHelp(ctx)
 
-import { h, sheet, cssVar, fmtDbm, fmtBand, fmtAgo, uid, NO_VALUE } from './dom.js';
+import { h, sheet, toast, cssVar, fmtDbm, fmtBand, fmtAgo, uid, NO_VALUE } from './dom.js';
 import { icon } from './icons.js';
 import { signalLevel } from '../core/signal.js';
 import { standardInfo } from '../core/phy.js';
@@ -154,18 +154,26 @@ export function securityBadge(security, { plain = false } = {}) {
 function standardShort(source) {
   if (typeof source === 'string') return source;
   if (!source || typeof source !== 'object') return null;
-  if (source.standard && typeof source.standard === 'object' && source.standard.short) return source.standard.short;
-  if (typeof source.standardShort === 'string') return source.standardShort;
+  // Ap de core/model.js: `standard` é o rótulo curto; sem geração conhecida não há o que mostrar
+  if (typeof source.standard === 'string') {
+    if (!isNum(source.gen)) return null;
+    // geração presumida pela faixa e pela largura: é o mínimo, pode ser mais nova
+    return source.genSource === 'inferred' && source.gen < 7 ? `${source.standard}+` : source.standard;
+  }
   const raw = source.raw && typeof source.raw === 'object' ? source.raw : source;
   if (isNum(raw.wifiStandard) && raw.wifiStandard > 0) return standardInfo(raw.wifiStandard, source.band ?? raw.frequency).short;
-  if (isNum(source.gen) && source.gen >= 4) return source.gen === 6 && String(source.band) === '6' ? 'Wi-Fi 6E' : `Wi-Fi ${source.gen}`;
   return null;
 }
 
-/** Selo da geração: "Wi-Fi 6", "Wi-Fi 6E"... Aceita um Ap (do store) ou o texto pronto. Sem dado, devolve null. */
+/**
+ * Selo da geração: "Wi-Fi 6", "Wi-Fi 6E"; "Wi-Fi 5+" quando a geração é só presumida.
+ * Aceita um Ap (do store), um ScanAp cru ou o texto pronto. Sem dado, devolve null.
+ */
 export function standardBadge(source, { plain = false } = {}) {
   const text = standardShort(source);
-  return text ? badge(text, { plain, outline: !plain }) : null;
+  if (!text) return null;
+  const title = source && typeof source === 'object' && typeof source.standardLabel === 'string' ? source.standardLabel : undefined;
+  return badge(text, { plain, outline: !plain, title });
 }
 
 // ---------------------------------------------------------------------------
@@ -194,10 +202,12 @@ export function ssidLabel(ssid, { tag = 'span' } = {}) {
  * @param {{onClick?:(ap:object) => void, showVendor?:boolean}} [options]
  */
 export function apRow(ap, { onClick, showVendor = true } = {}) {
+  // do mais importante para o menos: em telas estreitas os últimos itens ficam de fora
   const sub = [];
-  if (ap.channel != null) sub.push(h('span', null, `Canal ${ap.channel}`));
+  if (ap.connected) sub.push(h('span.accent.strong', null, 'Conectada'));
   if (ap.band) sub.push(bandBadge(ap.band, { plain: true }));
   if (ap.security) sub.push(securityBadge(ap.security, { plain: true }));
+  if (ap.channel != null) sub.push(h('span', null, `Canal ${ap.channel}`));
   if (showVendor && ap.vendor) sub.push(h('span', null, ap.vendor));
   if (ap.stale && isNum(ap.ageMs)) sub.push(h('span', null, `visto ${fmtAgo(ap.ageMs)}`));
 
@@ -211,7 +221,6 @@ export function apRow(ap, { onClick, showVendor = true } = {}) {
         null,
         ssidLabel(ap.ssid),
         ap.favorite ? icon('star-filled', { size: 16, label: 'Minha rede', class: 'accent' }) : null,
-        ap.connected ? badge('Conectada', { tone: 'accent' }) : null,
       ),
       // os itens entram por ordem de importância: o que não couber na linha fica de fora (CSS)
       h('span.row__sub.row__sub--clip', null, sub),
@@ -659,10 +668,14 @@ export function openThrottleHelp(ctx) {
       button('Abrir opções', {
         variant: 'primary',
         icon: 'external',
-        disabled: demo,
-        onClick: () => {
-          ctx.bridge.openSettings('developer').catch(() => {});
+        onClick: async () => {
           panel.close();
+          if (demo) {
+            toast('Na demonstração não há configurações do Android para abrir.');
+            return;
+          }
+          const res = await ctx.bridge.openSettings('developer').catch(() => null);
+          if (!res || res.ok === false) toast('Não foi possível abrir. Procure “Opções do desenvolvedor” nas configurações do Android.');
         },
       }),
     ],

@@ -353,10 +353,39 @@ function prepare(survey, scanIdx) {
     const b = nodeOf[i];
     if (a === b) continue;
     const dt = Math.max(0.5, scans[i].t - scans[i - 1].t);
-    edges.push({ a, b, dt, walking: scans[i].spot == null && scans[i - 1].spot == null });
+    // Tipo do par: 0 = andando nas duas pontas, 1 = uma ponta parada, 2 = dois pontos marcados.
+    const kind = (scans[i].spot != null ? 1 : 0) + (scans[i - 1].spot != null ? 1 : 0);
+    edges.push({ a, b, dt, kind });
   }
 
-  return { scans, N, P, NF, floorList, nodeOf, scanFloor, nodeFloor, radios, devices, R, obs, radioCount, edges, radioOfId };
+  // Visitas: varreduras seguidas no mesmo nó viram um passo só da cadeia de trajetória.
+  const visits = []; // {node, floor, kind}
+  const links = []; // entre a visita v e a v+1: {dt, kind}
+  const visitOf = new Int32Array(N);
+  for (let i = 0; i < N; i++) {
+    if (i > 0 && nodeOf[i] === nodeOf[i - 1]) {
+      visitOf[i] = visits.length - 1;
+      continue;
+    }
+    if (i > 0) {
+      const kind = (scans[i].spot != null ? 1 : 0) + (scans[i - 1].spot != null ? 1 : 0);
+      links.push({ dt: Math.max(0.5, scans[i].t - scans[i - 1].t), kind, floorChange: scanFloor[i] !== scanFloor[i - 1] });
+    }
+    visitOf[i] = visits.length;
+    visits.push({ node: nodeOf[i], floor: scanFloor[i] });
+  }
+
+  // Trincas de varreduras seguidas andando (ritmo regular): base do prior de "andar reto".
+  const triples = [];
+  for (let i = 2; i < N; i++) {
+    if (scans[i].spot != null || scans[i - 1].spot != null || scans[i - 2].spot != null) continue;
+    const d1 = scans[i - 1].t - scans[i - 2].t;
+    const d2 = scans[i].t - scans[i - 1].t;
+    if (d1 > 8 || d2 > 8 || d1 < 1 || d2 < 1 || Math.abs(d1 - d2) > 0.3 * (d1 + d2)) continue;
+    triples.push({ a: nodeOf[i - 2], b: nodeOf[i - 1], c: nodeOf[i], dt: 0.5 * (d1 + d2) });
+  }
+
+  return { scans, N, P, NF, floorList, nodeOf, scanFloor, nodeFloor, radios, devices, R, obs, radioCount, edges, triples, visits, links, visitOf, radioOfId };
 }
 
 // ---------------------------------------------------------------------------
@@ -415,17 +444,16 @@ function initNodes(prep) {
 }
 
 /** Escala o embutimento para metros usando o passo típico entre varreduras consecutivas. */
-function rescaleInit(prep, X) {
+function rescaleInit(prep, X, pace) {
   const { edges, P } = prep;
   const ratios = [];
   for (const e of edges) {
     const d = Math.hypot(X[2 * e.a] - X[2 * e.b], X[2 * e.a + 1] - X[2 * e.b + 1]);
-    if (e.dt < 8 && d > 1e-9) ratios.push(d / e.dt);
+    if (e.kind === 0 && e.dt < 8 && d > 1e-9) ratios.push(d / e.dt);
   }
   let scale;
   if (ratios.length >= 8) {
-    // Passo mediano de ~0,4 m/s (quem anda a 0,4-0,9 m/s faz curvas e pausas).
-    scale = 0.4 / median(ratios);
+    scale = pace / median(ratios);
   } else {
     // Sem caminhada contínua: assume uma casa de raio ~3 m.
     let r2 = 0;
@@ -530,6 +558,19 @@ function buildModel(prep, cfg) {
     heard[o.node * RA + a] = 1;
     m++;
   }
+  // As faixas de um mesmo aparelho atravessam as mesmas paredes e o mesmo corpo: os erros
+  // andam juntos, então duas leituras dele valem menos que duas de aparelhos diferentes.
+  if (cfg.deviceCorr > 0) {
+    const perDev = new Map();
+    for (let k = 0; k < M; k++) {
+      const key = oNode[k] * 4096 + devActive[radios[list[oRad[k]]].device];
+      perDev.set(key, (perDev.get(key) || 0) + 1);
+    }
+    for (let k = 0; k < M; k++) {
+      const c = perDev.get(oNode[k] * 4096 + devActive[radios[list[oRad[k]]].device]);
+      oW[k] /= 1 + cfg.deviceCorr * (c - 1);
+    }
+  }
   // Pares "não ouvi": só valem para rádios que costumam aparecer.
   const cNode = [];
   const cRad = [];
@@ -561,7 +602,7 @@ function buildModel(prep, cfg) {
     P, RA, DA, NF, size, oX, oA, oR, p0Index, mainFloor, list, devList, active, devActive,
     M, oNode, oRad, oFloor, oY, oW,
     C: cNode.length, cNode: Int32Array.from(cNode), cRad: Int32Array.from(cRad),
-    zFloor, radDev, p0Ref, edges, nodeFloor: prep.nodeFloor,
+    zFloor, radDev, p0Ref, edges, triples: prep.triples, nodeFloor: prep.nodeFloor,
     known: prep.known || [],
   };
 }
@@ -666,17 +707,32 @@ function costAndGrad(model, cfg, theta, grad) {
     const dx = theta[2 * e.a] - theta[2 * e.b];
     const dy = theta[2 * e.a + 1] - theta[2 * e.b + 1];
     const dist = Math.sqrt(dx * dx + dy * dy + 1e-9);
-    const limit = cfg.vMax * e.dt;
-    if (dist > limit) {
-      const ex = dist - limit;
-      cost += 0.5 * wv * ex * ex;
-      if (grad) {
-        const g = (wv * ex) / dist;
-        grad[2 * e.a] += g * dx;
-        grad[2 * e.a + 1] += g * dy;
-        grad[2 * e.b] -= g * dx;
-        grad[2 * e.b + 1] -= g * dy;
+    // Passo esperado: andando sem parar, a corda entre duas varreduras fica perto de pace·dt
+    // (corte seco para cima, cauda longa para baixo: curvas e pausas encurtam, nada alonga).
+    let gd = 0; // d custo / d dist
+    if (e.kind === 0 && e.dt < cfg.stepMaxDt) {
+      const mode = cfg.pace * e.dt;
+      const ex = dist - mode;
+      const sd = (ex > 0 ? cfg.stepHi : cfg.stepLo) * mode;
+      cost += (0.5 * cfg.stepWeight * ex * ex) / (sd * sd);
+      gd = (cfg.stepWeight * ex) / (sd * sd);
+    } else {
+      // Parado numa das pontas (ou nas duas): só há teto, e mais baixo (parte do tempo foi parado).
+      const still = e.kind === 2 ? cfg.dwellS : 0;
+      const limit = (e.kind === 1 ? cfg.partFactor : 1) * cfg.pace * cfg.vTop * Math.max(1, e.dt - still);
+      if (dist > limit) {
+        const ex = dist - limit;
+        const sd = cfg.stepHi * cfg.pace * Math.min(e.dt, 4);
+        cost += (0.5 * wv * ex * ex) / (sd * sd);
+        gd = (wv * ex) / (sd * sd);
       }
+    }
+    if (gd !== 0 && grad) {
+      const g = gd / dist;
+      grad[2 * e.a] += g * dx;
+      grad[2 * e.a + 1] += g * dy;
+      grad[2 * e.b] -= g * dx;
+      grad[2 * e.b + 1] -= g * dy;
     }
     if (ws > 0) {
       // Atração fraca entre vizinhos no tempo (passeio aleatório): desempata e alisa.
@@ -687,6 +743,27 @@ function costAndGrad(model, cfg, theta, grad) {
         grad[2 * e.a + 1] += w * dy;
         grad[2 * e.b] -= w * dx;
         grad[2 * e.b + 1] -= w * dy;
+      }
+    }
+  }
+
+  // --- andar reto: a segunda diferença pune o zigue-zague (que é ruído, não caminhada) ---
+  if (cfg.accelWeight > 0) {
+    const triples = model.triples;
+    for (let k = 0; k < triples.length; k++) {
+      const t = triples[k];
+      const ax = theta[2 * t.a] - 2 * theta[2 * t.b] + theta[2 * t.c];
+      const ay = theta[2 * t.a + 1] - 2 * theta[2 * t.b + 1] + theta[2 * t.c + 1];
+      const sd = cfg.accelSigma * cfg.pace * t.dt;
+      const w = cfg.accelWeight / (sd * sd);
+      cost += 0.5 * w * (ax * ax + ay * ay);
+      if (grad) {
+        grad[2 * t.a] += w * ax;
+        grad[2 * t.a + 1] += w * ay;
+        grad[2 * t.b] -= 2 * w * ax;
+        grad[2 * t.b + 1] -= 2 * w * ay;
+        grad[2 * t.c] += w * ax;
+        grad[2 * t.c + 1] += w * ay;
       }
     }
   }
@@ -705,6 +782,31 @@ function costAndGrad(model, cfg, theta, grad) {
       grad[2 * kd.a + 1] += g * dy;
       grad[2 * kd.b] -= g * dx;
       grad[2 * kd.b + 1] -= g * dy;
+    }
+  }
+
+  // --- âncora de tamanho (levantamentos sem caminhada contínua): segura a escala já decidida ---
+  if (model.sizeTarget > 0) {
+    let mx = 0;
+    let my = 0;
+    for (let i = 0; i < P; i++) {
+      mx += theta[2 * i];
+      my += theta[2 * i + 1];
+    }
+    mx /= P;
+    my /= P;
+    let r2 = 0;
+    for (let i = 0; i < P; i++) r2 += (theta[2 * i] - mx) * (theta[2 * i] - mx) + (theta[2 * i + 1] - my) * (theta[2 * i + 1] - my);
+    r2 = r2 / P + 1e-9;
+    const el = 0.5 * Math.log(r2 / (model.sizeTarget * model.sizeTarget));
+    cost += 0.5 * cfg.sizeWeight * el * el;
+    if (grad) {
+      // d el / d x_i = (x_i - mx) / (P·r2)
+      const g = (cfg.sizeWeight * el) / (P * r2);
+      for (let i = 0; i < P; i++) {
+        grad[2 * i] += g * (theta[2 * i] - mx);
+        grad[2 * i + 1] += g * (theta[2 * i + 1] - my);
+      }
     }
   }
 
@@ -761,6 +863,69 @@ function costAndGrad(model, cfg, theta, grad) {
     }
   }
   return cost;
+}
+
+/**
+ * Muda a escala do mapa inteiro por `s` sem mexer (quase) no ajuste das leituras:
+ * posições e roteadores multiplicam por s, p0 sobe 10·n·log10(s) e alpha divide por s.
+ */
+function applyScale(model, theta, s, out) {
+  const { P, RA, DA, NF, oA, oR, p0Index } = model;
+  out.set(theta);
+  for (let i = 0; i < 2 * P; i++) out[i] = theta[i] * s;
+  for (let d = 0; d < DA; d++) {
+    out[oA + 3 * d] = theta[oA + 3 * d] * s;
+    out[oA + 3 * d + 1] = theta[oA + 3 * d + 1] * s;
+  }
+  const done = new Uint8Array(model.size);
+  for (let a = 0; a < RA; a++) {
+    const n = theta[oR + 2 * a];
+    out[oR + 2 * a + 1] = theta[oR + 2 * a + 1] / s;
+    for (let f = 0; f < NF; f++) {
+      const ip = p0Index[a * NF + f];
+      if (done[ip]) continue;
+      done[ip] = 1;
+      out[ip] = theta[ip] + 10 * n * Math.log10(s);
+    }
+  }
+}
+
+/** Busca 1-D da melhor escala (seção áurea em log). Devolve o fator aplicado. */
+function scaleSearch(model, cfg, theta) {
+  const tmp = new Float64Array(theta.length);
+  const f = (ls) => {
+    applyScale(model, theta, Math.exp(ls), tmp);
+    return costAndGrad(model, cfg, tmp, null);
+  };
+  let lo = Math.log(0.4);
+  let hi = Math.log(2.5);
+  const g = 0.381966;
+  let x1 = lo + g * (hi - lo);
+  let x2 = hi - g * (hi - lo);
+  let f1 = f(x1);
+  let f2 = f(x2);
+  for (let it = 0; it < 18; it++) {
+    if (f1 < f2) {
+      hi = x2;
+      x2 = x1;
+      f2 = f1;
+      x1 = lo + g * (hi - lo);
+      f1 = f(x1);
+    } else {
+      lo = x1;
+      x1 = x2;
+      f1 = f2;
+      x2 = hi - g * (hi - lo);
+      f2 = f(x2);
+    }
+  }
+  const best = 0.5 * (lo + hi);
+  if (f(best) < f(0)) {
+    applyScale(model, theta, Math.exp(best), tmp);
+    theta.set(tmp);
+    return Math.exp(best);
+  }
+  return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -866,28 +1031,721 @@ function initDevices(prep, model, cfg, theta) {
 }
 
 // ---------------------------------------------------------------------------
+// Trajetória em grade (HMM): integra a incerteza em vez de maximizar ponto a ponto
+// ---------------------------------------------------------------------------
+
+/** Grade que cobre os nós com folga. O tamanho da célula se ajusta para não passar de `maxCells`. */
+function makeGrid(theta, P, margin, minCell, maxCells) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < P; i++) {
+    minX = Math.min(minX, theta[2 * i]);
+    maxX = Math.max(maxX, theta[2 * i]);
+    minY = Math.min(minY, theta[2 * i + 1]);
+    maxY = Math.max(maxY, theta[2 * i + 1]);
+  }
+  minX -= margin;
+  maxX += margin;
+  minY -= margin;
+  maxY += margin;
+  const area = (maxX - minX) * (maxY - minY);
+  const cell = Math.max(minCell, Math.sqrt(area / maxCells));
+  const nx = Math.max(2, Math.ceil((maxX - minX) / cell));
+  const ny = Math.max(2, Math.ceil((maxY - minY) / cell));
+  const G = nx * ny;
+  const cx = new Float64Array(G);
+  const cy = new Float64Array(G);
+  for (let j = 0; j < ny; j++) {
+    for (let i = 0; i < nx; i++) {
+      cx[j * nx + i] = minX + (i + 0.5) * cell;
+      cy[j * nx + i] = minY + (j + 0.5) * cell;
+    }
+  }
+  return { minX, minY, cell, nx, ny, G, cx, cy };
+}
+
+/** Sinal previsto pela curva de cada rádio em cada célula: pred[(rádio·NF + andar)·G + célula]. */
+function predictGrid(model, theta, grid) {
+  const { RA, NF, oA, oR, p0Index, zFloor, radDev } = model;
+  const { G, cx, cy } = grid;
+  const eps2 = NEAR_M * NEAR_M;
+  const pred = new Float32Array(RA * NF * G);
+  for (let a = 0; a < RA; a++) {
+    const d3 = oA + 3 * radDev[a];
+    const ax = theta[d3];
+    const ay = theta[d3 + 1];
+    const az = theta[d3 + 2];
+    const n = theta[oR + 2 * a];
+    const al = theta[oR + 2 * a + 1];
+    for (let f = 0; f < NF; f++) {
+      const p0 = theta[p0Index[a * NF + f]];
+      const dz = zFloor[f] - az;
+      const base = (a * NF + f) * G;
+      for (let c = 0; c < G; c++) {
+        const dx = cx[c] - ax;
+        const dy = cy[c] - ay;
+        const q = dx * dx + dy * dy + dz * dz + eps2;
+        pred[base + c] = p0 - (5 * n * Math.log(q)) / LN10 - al * Math.sqrt(q);
+      }
+    }
+  }
+  return pred;
+}
+
+/** Sinal previsto pela curva na posição de cada observação (e de cada par "não ouvi"). */
+function predictAtNodes(model, theta) {
+  const { RA, NF, oA, oR, p0Index, M, oNode, oRad, oFloor, C, cNode, cRad, zFloor, radDev, nodeFloor } = model;
+  const eps2 = NEAR_M * NEAR_M;
+  const at = (i, a, f) => {
+    const d3 = oA + 3 * radDev[a];
+    const dx = theta[2 * i] - theta[d3];
+    const dy = theta[2 * i + 1] - theta[d3 + 1];
+    const dz = zFloor[f] - theta[d3 + 2];
+    const q = dx * dx + dy * dy + dz * dz + eps2;
+    return theta[p0Index[a * NF + f]] - (5 * theta[oR + 2 * a] * Math.log(q)) / LN10 - theta[oR + 2 * a + 1] * Math.sqrt(q);
+  };
+  const obs = new Float64Array(M);
+  for (let m = 0; m < M; m++) obs[m] = at(oNode[m], oRad[m], oFloor[m]);
+  const cen = new Float64Array(C);
+  for (let j = 0; j < C; j++) cen[j] = at(cNode[j], cRad[j], nodeFloor[cNode[j]]);
+  return { obs, cen };
+}
+
+/**
+ * Campo residual de cada rádio: o que a curva "sinal x distância" não explica (paredes, sombra)
+ * e que se REPETE no mesmo lugar. Regressão por núcleo dos resíduos sobre as posições atuais.
+ * Guarda somas e pesos por célula, mais a "pegada" de cada nó, para poder tirar a contribuição
+ * do próprio nó (e dos vizinhos no tempo) na hora de avaliar onde ele está.
+ */
+function buildResidualField(model, cfg, theta, grid, h) {
+  const { P, RA, NF, M, oNode, oRad, oFloor, oY, oW, C, cNode, cRad, nodeFloor } = model;
+  const { G, nx, ny, minX, minY, cell } = grid;
+  const at = predictAtNodes(model, theta);
+  // Pegada de cada nó: células dentro de ~2,5 larguras do núcleo.
+  const r = Math.max(1, Math.ceil((2.5 * h) / cell));
+  const footStart = new Int32Array(P + 1);
+  const footCell = [];
+  const footW = [];
+  for (let i = 0; i < P; i++) {
+    footStart[i] = footCell.length;
+    const x = theta[2 * i];
+    const y = theta[2 * i + 1];
+    const ci = Math.floor((x - minX) / cell);
+    const cj = Math.floor((y - minY) / cell);
+    for (let j = cj - r; j <= cj + r; j++) {
+      if (j < 0 || j >= ny) continue;
+      for (let ii = ci - r; ii <= ci + r; ii++) {
+        if (ii < 0 || ii >= nx) continue;
+        const dx = minX + (ii + 0.5) * cell - x;
+        const dy = minY + (j + 0.5) * cell - y;
+        const w = Math.exp((-0.5 * (dx * dx + dy * dy)) / (h * h));
+        if (w < 0.02) continue;
+        footCell.push(j * nx + ii);
+        footW.push(w);
+      }
+    }
+  }
+  footStart[P] = footCell.length;
+  const fc = Int32Array.from(footCell);
+  const fw = Float32Array.from(footW);
+  const S = new Float32Array(RA * NF * G);
+  const W = new Float32Array(RA * NF * G);
+  const resObs = new Float64Array(M);
+  for (let m = 0; m < M; m++) {
+    const res = clamp(oY[m] - at.obs[m], -cfg.fieldClip, cfg.fieldClip);
+    resObs[m] = res;
+    const base = (oRad[m] * NF + oFloor[m]) * G;
+    const i = oNode[m];
+    const w0 = oW[m];
+    for (let k = footStart[i]; k < footStart[i + 1]; k++) {
+      S[base + fc[k]] += w0 * fw[k] * res;
+      W[base + fc[k]] += w0 * fw[k];
+    }
+  }
+  // "Não ouvi": puxa o campo para baixo onde a curva prevê sinal audível.
+  const resCen = new Float64Array(C);
+  const wCen = cfg.censor;
+  for (let j = 0; j < C; j++) {
+    const res = clamp(Math.min(0, DETECT_DBM - 4 - at.cen[j]), -cfg.fieldClip, 0);
+    resCen[j] = res;
+    const i = cNode[j];
+    const base = (cRad[j] * NF + nodeFloor[i]) * G;
+    for (let k = footStart[i]; k < footStart[i + 1]; k++) {
+      S[base + fc[k]] += wCen * fw[k] * res;
+      W[base + fc[k]] += wCen * fw[k];
+    }
+  }
+  // Consulta: contribuição de um nó para o campo de um (rádio, andar).
+  const lookup = new Map();
+  const key = (i, a, f) => (i * RA + a) * NF + f;
+  for (let m = 0; m < M; m++) lookup.set(key(oNode[m], oRad[m], oFloor[m]), { w: oW[m], res: resObs[m] });
+  for (let j = 0; j < C; j++) lookup.set(key(cNode[j], cRad[j], nodeFloor[cNode[j]]), { w: wCen, res: resCen[j] });
+  const contribOf = (i, a, f) => lookup.get(key(i, a, f));
+  return { S, W, footStart, fc, fw, resObs, resCen, h, contribOf };
+}
+
+/** Log-verossimilhança de cada nó em cada célula, com o modelo atual dos rádios (e o campo residual, se houver). */
+function nodeEmissions(model, cfg, theta, grid, sigmaR, field, exclude) {
+  const { P, RA, NF, M, oNode, oRad, oFloor, oY, oW, C, cNode, cRad, nodeFloor } = model;
+  const { G } = grid;
+  const pred = predictGrid(model, theta, grid);
+  const logE = new Float32Array(P * G);
+  const k = cfg.huber;
+  // Com campo residual: tira de (S, W) a contribuição dos nós excluídos (o próprio e vizinhos no tempo).
+  const dS = field ? new Float32Array(G) : null;
+  const dW = field ? new Float32Array(G) : null;
+  const lambda = cfg.fieldLambda;
+  const fieldAt = (base, i, a, f, isObsRadio) => {
+    // Preenche dS/dW com o que sai, só nas pegadas dos nós excluídos.
+    const list = exclude[i];
+    for (const j of list) {
+      for (let q = field.footStart[j]; q < field.footStart[j + 1]; q++) {
+        dS[field.fc[q]] = 0;
+        dW[field.fc[q]] = 0;
+      }
+    }
+    for (const j of list) {
+      const contrib = field.contribOf(j, a, f);
+      if (!contrib) continue;
+      for (let q = field.footStart[j]; q < field.footStart[j + 1]; q++) {
+        dS[field.fc[q]] += contrib.w * field.fw[q] * contrib.res;
+        dW[field.fc[q]] += contrib.w * field.fw[q];
+      }
+    }
+  };
+  const clearAt = (i) => {
+    for (const j of exclude[i]) {
+      for (let q = field.footStart[j]; q < field.footStart[j + 1]; q++) {
+        dS[field.fc[q]] = 0;
+        dW[field.fc[q]] = 0;
+      }
+    }
+  };
+  for (let m = 0; m < M; m++) {
+    const a = oRad[m];
+    const base = (a * NF + oFloor[m]) * G;
+    const i = oNode[m];
+    const out = i * G;
+    const inv = 1 / sigmaR[a];
+    const w = oW[m] * cfg.emissionWeight;
+    const y = oY[m];
+    if (field) {
+      fieldAt(base, i, a, oFloor[m]);
+      const S = field.S;
+      const W = field.W;
+      for (let c = 0; c < G; c++) {
+        const res = (S[base + c] - dS[c]) / (W[base + c] - dW[c] + lambda);
+        const e = Math.abs(y - pred[base + c] - res) * inv;
+        logE[out + c] -= w * (e <= k ? 0.5 * e * e : k * (e - 0.5 * k));
+      }
+      clearAt(i);
+    } else {
+      for (let c = 0; c < G; c++) {
+        const e = Math.abs(y - pred[base + c]) * inv;
+        logE[out + c] -= w * (e <= k ? 0.5 * e * e : k * (e - 0.5 * k));
+      }
+    }
+  }
+  const wc = cfg.censor * cfg.emissionWeight;
+  for (let j = 0; j < C; j++) {
+    const a = cRad[j];
+    const i = cNode[j];
+    const base = (a * NF + nodeFloor[i]) * G;
+    const out = i * G;
+    const inv = 1 / sigmaR[a];
+    if (field) {
+      fieldAt(base, i, a, nodeFloor[i]);
+      const S = field.S;
+      const W = field.W;
+      for (let c = 0; c < G; c++) {
+        const res = (S[base + c] - dS[c]) / (W[base + c] - dW[c] + lambda);
+        const e = (pred[base + c] + res - DETECT_DBM) * inv;
+        if (e > 0) logE[out + c] -= wc * (e <= k ? 0.5 * e * e : k * (e - 0.5 * k));
+      }
+      clearAt(i);
+    } else {
+      for (let c = 0; c < G; c++) {
+        const e = (pred[base + c] - DETECT_DBM) * inv;
+        if (e > 0) logE[out + c] -= wc * (e <= k ? 0.5 * e * e : k * (e - 0.5 * k));
+      }
+    }
+  }
+  return logE;
+}
+
+/** Núcleo de transição: gaussiana truncada (passeio aleatório com teto de velocidade). */
+function makeKernel(cell, sd, rMax) {
+  const r = Math.max(1, Math.ceil(rMax / cell));
+  const dx = [];
+  const dy = [];
+  const w = [];
+  const d2 = [];
+  let total = 0;
+  for (let j = -r; j <= r; j++) {
+    for (let i = -r; i <= r; i++) {
+      const dist2 = (i * i + j * j) * cell * cell;
+      if (dist2 > (rMax + 0.5 * cell) * (rMax + 0.5 * cell)) continue;
+      const v = Math.exp((-0.5 * dist2) / (sd * sd));
+      dx.push(i);
+      dy.push(j);
+      w.push(v);
+      d2.push(dist2);
+      total += v;
+    }
+  }
+  return { n: w.length, dx: Int32Array.from(dx), dy: Int32Array.from(dy), w: Float64Array.from(w, (v) => v / total), d2: Float64Array.from(d2) };
+}
+
+/**
+ * Forward-backward sobre as visitas. Devolve a média a posteriori de cada visita, a
+ * log-verossimilhança marginal e a estatística de passo E|delta|² dos pares andando.
+ */
+function runHmm(prep, model, cfg, grid, logE, q) {
+  const { visits, links } = prep;
+  const { G, nx, ny, cx, cy, cell } = grid;
+  const V = visits.length;
+  const kernels = new Map();
+  const kernelFor = (link) => {
+    // Desvio por eixo do passo: q para dt de referência (3,5 s), crescendo linear com dt;
+    // com uma ponta parada o passo é menor; entre dois pontos marcados vale só "não muito longe".
+    const dtEff = Math.min(link.dt, cfg.hmmMaxDt);
+    let sd = q * (dtEff / 3.5);
+    if (link.kind === 1) sd *= cfg.partFactor;
+    let rMax = cfg.hmmCut * sd;
+    if (link.kind === 2 && link.dt > cfg.stepMaxDt) {
+      sd = q * cfg.spotHop;
+      rMax = 3 * sd;
+    }
+    sd = Math.max(sd, 0.6 * cell);
+    rMax = Math.max(rMax, 1.01 * cell);
+    const key = `${Math.round(sd / cell * 8)}|${Math.round(rMax / cell * 4)}`;
+    let kr = kernels.get(key);
+    if (!kr) kernels.set(key, (kr = makeKernel(cell, sd, rMax)));
+    return kr;
+  };
+  const emis = (v) => {
+    const base = visits[v].node * G;
+    const e = new Float64Array(G);
+    let top = -Infinity;
+    for (let c = 0; c < G; c++) if (logE[base + c] > top) top = logE[base + c];
+    for (let c = 0; c < G; c++) e[c] = Math.exp(logE[base + c] - top);
+    return { e, top };
+  };
+  const spread = (src, kr, out) => {
+    out.fill(0);
+    let top = 0;
+    for (let c = 0; c < G; c++) if (src[c] > top) top = src[c];
+    const tiny = top * 1e-7;
+    for (let c = 0; c < G; c++) {
+      const v = src[c];
+      if (v <= tiny) continue;
+      const ci = c % nx;
+      const cj = (c - ci) / nx;
+      for (let k = 0; k < kr.n; k++) {
+        const i = ci + kr.dx[k];
+        const j = cj + kr.dy[k];
+        if (i < 0 || j < 0 || i >= nx || j >= ny) continue;
+        out[j * nx + i] += v * kr.w[k];
+      }
+    }
+  };
+  const alpha = new Array(V);
+  const E = new Array(V);
+  let loglik = 0;
+  const tmp = new Float64Array(G);
+  for (let v = 0; v < V; v++) {
+    const { e, top } = emis(v);
+    E[v] = e;
+    const a = new Float64Array(G);
+    if (v === 0) for (let c = 0; c < G; c++) a[c] = e[c] / G;
+    else {
+      spread(alpha[v - 1], kernelFor(links[v - 1]), tmp);
+      for (let c = 0; c < G; c++) a[c] = tmp[c] * e[c];
+    }
+    let sum = 0;
+    for (let c = 0; c < G; c++) sum += a[c];
+    if (!(sum > 0)) {
+      // Beco sem saída numérico: recomeça desta visita.
+      for (let c = 0; c < G; c++) a[c] = e[c] / G;
+      sum = 0;
+      for (let c = 0; c < G; c++) sum += a[c];
+      loglik -= 50;
+    }
+    for (let c = 0; c < G; c++) a[c] /= sum;
+    loglik += Math.log(sum) + top;
+    alpha[v] = a;
+  }
+  const mean = new Float64Array(2 * V);
+  const spreadM = new Float64Array(V);
+  let beta = new Float64Array(G).fill(1);
+  let stepSum = 0;
+  let stepCount = 0;
+  const B = new Float64Array(G);
+  for (let v = V - 1; v >= 0; v--) {
+    if (v < V - 1) {
+      const kr = kernelFor(links[v]);
+      for (let c = 0; c < G; c++) B[c] = E[v + 1][c] * beta[c];
+      // Estatística de passo do par (v, v+1): só pares andando, com intervalo normal.
+      const link = links[v];
+      if (link.kind === 0 && link.dt < cfg.stepMaxDt) {
+        const a = alpha[v];
+        let top = 0;
+        for (let c = 0; c < G; c++) if (a[c] > top) top = a[c];
+        const tiny = top * 1e-6;
+        let z = 0;
+        let s2 = 0;
+        for (let c = 0; c < G; c++) {
+          const av = a[c];
+          if (av <= tiny) continue;
+          const ci = c % nx;
+          const cj = (c - ci) / nx;
+          for (let k = 0; k < kr.n; k++) {
+            const i = ci + kr.dx[k];
+            const j = cj + kr.dy[k];
+            if (i < 0 || j < 0 || i >= nx || j >= ny) continue;
+            const w = av * kr.w[k] * B[j * nx + i];
+            z += w;
+            s2 += w * kr.d2[k];
+          }
+        }
+        if (z > 0) {
+          const scale = 3.5 / link.dt;
+          stepSum += (s2 / z) * scale * scale;
+          stepCount++;
+        }
+      }
+      const nb = new Float64Array(G);
+      spread(B, kr, nb);
+      let sum = 0;
+      for (let c = 0; c < G; c++) sum += nb[c];
+      if (sum > 0) for (let c = 0; c < G; c++) nb[c] /= sum;
+      else nb.fill(1);
+      beta = nb;
+    }
+    const a = alpha[v];
+    let sum = 0;
+    let mx = 0;
+    let my = 0;
+    for (let c = 0; c < G; c++) {
+      const p = a[c] * beta[c];
+      sum += p;
+      mx += p * cx[c];
+      my += p * cy[c];
+    }
+    if (sum > 0) {
+      mx /= sum;
+      my /= sum;
+      let var2 = 0;
+      for (let c = 0; c < G; c++) {
+        const p = a[c] * beta[c];
+        if (p > 0) var2 += p * ((cx[c] - mx) * (cx[c] - mx) + (cy[c] - my) * (cy[c] - my));
+      }
+      spreadM[v] = Math.sqrt(var2 / sum);
+    } else {
+      mx = cx[G >> 1];
+      my = cy[G >> 1];
+      spreadM[v] = 10;
+    }
+    mean[2 * v] = mx;
+    mean[2 * v + 1] = my;
+  }
+  return { mean, spread: spreadM, loglik, stepMs: stepCount ? stepSum / stepCount : NaN, stepCount };
+}
+
+/** Vizinhança no tempo de cada nó (inclui o próprio): quem fica de fora do campo ao localizá-lo. */
+function timeNeighbours(prep, window) {
+  const { N, P, nodeOf } = prep;
+  const sets = Array.from({ length: P }, (_, i) => new Set([i]));
+  for (let i = 0; i < N; i++) {
+    for (let d = -window; d <= window; d++) {
+      const j = i + d;
+      if (j >= 0 && j < N) sets[nodeOf[i]].add(nodeOf[j]);
+    }
+  }
+  return sets.map((set) => Array.from(set));
+}
+
+/** Resíduo típico de cada rádio com o campo residual (deixando o próprio nó de fora). */
+function fieldSigmas(model, cfg, theta, grid, field, exclude) {
+  const { RA, NF, M, oNode, oRad, oFloor } = model;
+  const { G, nx, ny, minX, minY, cell } = grid;
+  const s2 = new Float64Array(RA);
+  const cnt = new Float64Array(RA);
+  for (let m = 0; m < M; m++) {
+    const i = oNode[m];
+    const a = oRad[m];
+    const f = oFloor[m];
+    const ci = clamp(Math.floor((theta[2 * i] - minX) / cell), 0, nx - 1);
+    const cj = clamp(Math.floor((theta[2 * i + 1] - minY) / cell), 0, ny - 1);
+    const c = cj * nx + ci;
+    const base = (a * NF + f) * G;
+    let sOut = 0;
+    let wOut = 0;
+    for (const j of exclude[i]) {
+      const contrib = field.contribOf(j, a, f);
+      if (!contrib) continue;
+      for (let q = field.footStart[j]; q < field.footStart[j + 1]; q++) {
+        if (field.fc[q] === c) {
+          sOut += contrib.w * field.fw[q] * contrib.res;
+          wOut += contrib.w * field.fw[q];
+          break;
+        }
+      }
+    }
+    const res = (field.S[base + c] - sOut) / (field.W[base + c] - wOut + cfg.fieldLambda);
+    const e = clamp(field.resObs[m] - res, -12, 12);
+    s2[a] += e * e;
+    cnt[a]++;
+  }
+  const out = new Float64Array(RA);
+  for (let a = 0; a < RA; a++) out[a] = clamp(Math.sqrt((s2[a] + 2 * cfg.sigma * cfg.sigma) / (cnt[a] + 2)), cfg.fieldSigmaMin, cfg.sigmaMax);
+  return out;
+}
+
+/** Resíduo típico de cada rádio (dB) com as posições atuais: dá o peso de cada um. */
+function radioSigmas(model, cfg, theta) {
+  const { RA, NF, oA, oR, p0Index, M, oNode, oRad, oFloor, oY, zFloor, radDev } = model;
+  const s2 = new Float64Array(RA);
+  const cnt = new Float64Array(RA);
+  const eps2 = NEAR_M * NEAR_M;
+  for (let m = 0; m < M; m++) {
+    const i = oNode[m];
+    const a = oRad[m];
+    const d3 = oA + 3 * radDev[a];
+    const dx = theta[2 * i] - theta[d3];
+    const dy = theta[2 * i + 1] - theta[d3 + 1];
+    const dz = zFloor[oFloor[m]] - theta[d3 + 2];
+    const q = dx * dx + dy * dy + dz * dz + eps2;
+    const e = oY[m] - (theta[p0Index[a * NF + oFloor[m]]] - (5 * theta[oR + 2 * a] * Math.log(q)) / LN10 - theta[oR + 2 * a + 1] * Math.sqrt(q));
+    const ce = clamp(e, -12, 12);
+    s2[a] += ce * ce;
+    cnt[a]++;
+  }
+  const out = new Float64Array(RA);
+  for (let a = 0; a < RA; a++) out[a] = clamp(Math.sqrt((s2[a] + 2 * cfg.sigma * cfg.sigma) / (cnt[a] + 2)), cfg.sigmaMin, cfg.sigmaMax);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Escala absoluta quando não há caminhada contínua (só pontos marcados)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tempo andando entre duas varreduras consecutivas, pelo sinal da rede conectada: parado, o
+ * nível fica num platô (só ruído); andando, ele muda. A chegada é o começo do platô final.
+ * Devolve segundos, ou NaN quando não dá para dizer.
+ */
+function walkTimes(survey, prep, cfg) {
+  const scans = prep.scans;
+  const track = Array.isArray(survey.track) ? survey.track : [];
+  const out = new Float64Array(scans.length).fill(NaN); // out[i]: tempo andando entre i-1 e i
+  if (track.length < 8) return out;
+  // Trechos de amostras entre uma varredura e a seguinte.
+  const segs = new Array(scans.length).fill(null);
+  let k = 0;
+  for (let i = 1; i < scans.length; i++) {
+    const t0 = scans[i - 1].t;
+    const t1 = scans[i].t;
+    while (k < track.length && track[k].t <= t0) k++;
+    const seg = [];
+    for (let j = k; j < track.length && track[j].t <= t1 + 0.2; j++) seg.push(track[j]);
+    if (seg.length >= 5 && seg.every((q) => q.id === seg[0].id)) segs[i] = seg;
+  }
+  // Ruído do platô, medido nas últimas amostras antes de cada varredura parada (aí o usuário
+  // com certeza está esperando): a tolerância acompanha o ruído real do aparelho.
+  const dev = [];
+  for (let i = 1; i < scans.length; i++) {
+    if (!segs[i] || scans[i].spot == null) continue;
+    const tail = segs[i].slice(-4).map((q) => q.rssi);
+    const mid = median(tail);
+    for (const v of tail) dev.push(Math.abs(v - mid));
+  }
+  const noise = dev.length >= 12 ? clamp(1.25 * (dev.reduce((t, v) => t + v, 0) / dev.length) * 1.3, 0.6, 3) : 1.1;
+  const tol = cfg.plateauSigmas * noise;
+  for (let i = 1; i < scans.length; i++) {
+    const seg = segs[i];
+    if (!seg) continue;
+    const t0 = scans[i - 1].t;
+    const level = median(seg.slice(seg.length >> 1).map((q) => q.rssi));
+    const off = seg.map((q) => Math.abs(q.rssi - level) > tol);
+    let last = -1;
+    for (let j = seg.length - 1; j >= 0; j--) {
+      if (!off[j]) continue;
+      // Uma amostra solta fora do platô, com as vizinhas dentro, é leitura ruim e não movimento.
+      if (j > 2 && j < seg.length - 1 && !off[j - 1] && !off[j + 1]) continue;
+      last = j;
+      break;
+    }
+    const step = seg.length > 1 ? (seg[seg.length - 1].t - seg[0].t) / (seg.length - 1) : 2;
+    const arrive = last >= 0 ? seg[last].t + 0.5 * step : t0 + cfg.leaveS;
+    out[i] = Math.max(0, arrive - (t0 + cfg.leaveS));
+  }
+  return out;
+}
+
+/**
+ * Indícios de escala para levantamentos sem caminhada contínua. Cada um devolve o fator pelo
+ * qual o mapa atual deveria ser multiplicado (ou NaN), e um desvio em log2.
+ */
+function scaleEvidence(survey, prep, model, cfg, theta) {
+  const { scans, nodeOf } = prep;
+  const out = {};
+  // (1) Tempo andando x distância no mapa entre pontos consecutivos.
+  {
+    const wt = walkTimes(survey, prep, cfg);
+    let sumT = 0;
+    let sumL = 0;
+    let count = 0;
+    for (let i = 1; i < scans.length; i++) {
+      if (!Number.isFinite(wt[i]) || nodeOf[i] === nodeOf[i - 1]) continue;
+      if (scans[i].spot == null || scans[i - 1].spot == null) continue;
+      const a = nodeOf[i - 1];
+      const b = nodeOf[i];
+      sumT += Math.min(wt[i], cfg.walkCapS);
+      sumL += Math.hypot(theta[2 * a] - theta[2 * b], theta[2 * a + 1] - theta[2 * b + 1]);
+      count++;
+    }
+    out.walk = count >= 6 && sumL > 1e-6 && sumT > 0 ? (cfg.walkSpeed * sumT) / sumL : NaN;
+    out.walkCount = count;
+  }
+  // (2) Física perto do roteador: em visada direta o sinal cai ~20 dB por década a partir de p0.
+  {
+    const { RA, NF, oA, M, oNode, oRad, oFloor, oY, zFloor, radDev, p0Ref } = model;
+    const ratios = [];
+    for (let m = 0; m < M; m++) {
+      const a = oRad[m];
+      const drop = p0Ref[a] - cfg.bodyMeanDb - oY[m];
+      if (drop > cfg.nearDropDb) continue; // longe demais: já há parede no meio
+      const d3 = oA + 3 * radDev[a];
+      const i = oNode[m];
+      const rho = Math.hypot(theta[2 * i] - theta[d3], theta[2 * i + 1] - theta[d3 + 1]);
+      const dz = zFloor[oFloor[m]] - theta[d3 + 2];
+      const dPhys = Math.pow(10, drop / (10 * cfg.nLos));
+      // Só vale quando a distância horizontal domina (roteador no teto, colado: não diz nada).
+      if (dPhys < 2 * Math.abs(dz) || rho < 0.5) continue;
+      ratios.push(Math.sqrt(dPhys * dPhys - dz * dz) / rho);
+    }
+    out.physics = ratios.length >= 3 ? median(ratios) : NaN;
+    out.physicsCount = ratios.length;
+  }
+  // (3) Espaçamento: quem marca pontos costuma andar alguns passos entre um e outro.
+  {
+    const hops = [];
+    for (let i = 1; i < scans.length; i++) {
+      if (scans[i].spot == null || scans[i - 1].spot == null || nodeOf[i] === nodeOf[i - 1]) continue;
+      const a = nodeOf[i - 1];
+      const b = nodeOf[i];
+      hops.push(Math.hypot(theta[2 * a] - theta[2 * b], theta[2 * a + 1] - theta[2 * b + 1]));
+    }
+    out.hop = hops.length >= 6 ? cfg.hopM / Math.max(1e-6, median(hops)) : NaN;
+  }
+  return out;
+}
+
+/** Junta os indícios de escala (média em log, pesada pela confiança de cada um). */
+function combineEvidence(ev, cfg) {
+  let sum = 0;
+  let weight = 0;
+  const add = (value, sd) => {
+    if (!Number.isFinite(value) || value <= 0) return;
+    const w = 1 / (sd * sd);
+    sum += w * Math.log(clamp(value, 0.2, 5));
+    weight += w;
+  };
+  add(ev.walk, cfg.evWalkSd);
+  add(ev.physics, cfg.evPhysicsSd);
+  add(ev.hop, cfg.evHopSd);
+  return weight > 0 ? { factor: Math.exp(sum / weight), sd: 1 / Math.sqrt(weight) } : null;
+}
+
+/** Raio quadrático médio dos nós em torno do centro. */
+function cloudRadius(theta, P) {
+  let mx = 0;
+  let my = 0;
+  for (let i = 0; i < P; i++) {
+    mx += theta[2 * i];
+    my += theta[2 * i + 1];
+  }
+  mx /= P;
+  my /= P;
+  let r2 = 0;
+  for (let i = 0; i < P; i++) r2 += (theta[2 * i] - mx) * (theta[2 * i] - mx) + (theta[2 * i + 1] - my) * (theta[2 * i + 1] - my);
+  return { r: Math.sqrt(r2 / Math.max(1, P)), mx, my };
+}
+
+// ---------------------------------------------------------------------------
 // Solução
 // ---------------------------------------------------------------------------
 
 const DEFAULT_CFG = {
   minObs: 5, // leituras para um rádio entrar no ajuste
-  sigma: 4, // dB: ruído + corpo + sombra que a curva não explica
+  sigma: 6, // dB: ruído + corpo + sombra que a curva não explica
   huber: 1.5,
+  deviceCorr: 0, // correlação entre os erros das faixas de um mesmo aparelho
   censor: 0.5, // peso do "não ouvi"
   censorMinObs: 8,
-  vMax: V_MAX,
-  speedWeight: 4, // 1/m²
+  pace: 0.65, // m/s: corda típica entre varreduras de quem anda a 0,4-0,9 m/s com curvas
+  stepHi: 0.22, // desvio relativo acima do passo esperado
+  stepLo: 0.5, // e abaixo
+  stepWeight: 6,
+  stepMaxDt: 8, // s: acima disto o intervalo não diz nada sobre o passo
+  vTop: 1.3, // teto = vTop·pace (trecho reto no passo mais rápido)
+  partFactor: 0.75, // par com uma ponta parada: parte do intervalo foi parado
+  dwellS: 3, // dois pontos marcados seguidos: varredura + sair + chegar
+  speedWeight: 1,
+  accelWeight: 0,
+  accelSigma: 0.8, // desvio da segunda diferença, em passos
   smoothWeight: 0.0,
   knownWeight: 100,
   nPrior: 2.6,
   nSigma: 0.8,
   nInit: 3,
   alphaSigma: 3,
-  p0SigmaHi: 3,
-  p0SigmaLo: 15,
-  zSigma: 2.5,
+  p0SigmaHi: 30,
+  p0SigmaLo: 40,
+  zSigma: 1.0,
   farSigma: 60,
-  maxIter: 400,
+  maxIter: 300,
+  rounds: 3,
+  // HMM
+  emissionWeight: 1,
+  sigmaMin: 3.5,
+  sigmaMax: 9,
+  hmmQ: 1.25, // m: desvio por eixo do passo em 3,5 s (corda rms ~0,5 m/s)
+  hmmCut: 2.2, // truncamento do núcleo, em desvios
+  hmmMaxDt: 7,
+  spotHop: 2.0, // entre pontos marcados distantes no tempo: "alguns passos", em unidades de q
+  hmmMinCell: 0.4,
+  hmmMaxCells: 1200,
+  // campo residual
+  fieldRounds: 2,
+  fieldH: 1.1, // m: largura do núcleo (paredes e sombra mudam em ~1-2 m)
+  fieldLambda: 0.7, // encolhimento para zero onde há poucos vizinhos
+  fieldClip: 15, // dB: resíduo maior que isto é leitura estranha
+  fieldExclude: 1, // varreduras vizinhas no tempo que ficam de fora ao localizar um nó
+  fieldSigmaMin: 2.5,
+  fieldRefit: 0,
+  // escala sem caminhada contínua
+  plateauSigmas: 1.85, // tolerância em torno do platô do sinal conectado, em desvios do ruído
+  leaveS: 0.65, // s entre a varredura chegar e o usuário sair andando
+  walkCapS: 20,
+  walkSpeed: 0.6, // m/s em linha reta entre pontos (anda-se a ~0,65 m/s, com desvios)
+  bodyMeanDb: 1.5, // perda média do corpo
+  nearDropDb: 12, // até ~3,7 m do roteador
+  nLos: 2.1,
+  hopM: 1.85, // m: distância típica entre pontos marcados seguidos
+  evWalkSd: 0.4, // desvios (em log2... aqui em log natural equivalente) de cada indício
+  evPhysicsSd: 0.36,
+  evHopSd: 0.5,
+  sizeWeight: 400,
+  minStepEdges: 10, // abaixo disto a caminhada não ancora a escala
+  lagShift: 0,
+  emRounds: 0,
+  emUpdateQ: 0,
+  emFinalM: 0,
+  mIter: 60,
 };
 
 function emptySolution(survey) {
@@ -964,7 +1822,7 @@ function solveInner(survey, options) {
 
   const theta = new Float64Array(model.size);
   const X0 = initNodes(prep);
-  rescaleInit(prep, X0);
+  rescaleInit(prep, X0, cfg.pace);
   theta.set(X0, 0);
   const warm = options.warmStart;
   if (warm && Array.isArray(warm.points) && warm.points.length === N) {
@@ -1012,14 +1870,167 @@ function solveInner(survey, options) {
     if (cfg.freezeNodes) for (let i = 0; i < model.oA; i++) gu[i] = 0;
     return f;
   };
-  for (let i = 0; i < model.size; i++) u[i] = theta[i] / scale[i];
-  const res = lbfgs(fg, u, { maxIter: cfg.maxIter, deadline, memory: 10 });
-  for (let i = 0; i < model.size; i++) theta[i] = u[i] * scale[i];
+  let res = { f: Infinity, iter: 0 };
+  const notes = [];
+  for (let round = 0; round < cfg.rounds; round++) {
+    for (let i = 0; i < model.size; i++) u[i] = theta[i] / scale[i];
+    res = lbfgs(fg, u, { maxIter: cfg.maxIter, deadline, memory: 10 });
+    for (let i = 0; i < model.size; i++) theta[i] = u[i] * scale[i];
+    const sc = scaleSearch(model, cfg, theta);
+    notes.push(`r${round}:${res.f.toFixed(0)}/${res.iter}/s${sc.toFixed(2)}`);
+    if (now() > deadline) break;
+  }
+  // --- escala: sem caminhada contínua, vem dos indícios (tempo andando, física, espaçamento) ---
+  let stepEdges = 0;
+  for (const e of prep.edges) if (e.kind <= 1 && e.dt < cfg.stepMaxDt) stepEdges++;
+  const anchored = stepEdges >= cfg.minStepEdges || model.known.length > 0;
+  let scaleSd = 0.25;
+  if (!anchored) {
+    const tmp = new Float64Array(model.size);
+    for (let pass = 0; pass < 2; pass++) {
+      const comb = combineEvidence(scaleEvidence(survey, prep, model, cfg, theta), cfg);
+      if (!comb) break;
+      scaleSd = comb.sd;
+      applyScale(model, theta, comb.factor, tmp);
+      theta.set(tmp);
+      notes.push(`ev${pass}:x${comb.factor.toFixed(2)}`);
+      model.sizeTarget = cloudRadius(theta, P).r;
+      for (let i = 0; i < model.size; i++) u[i] = theta[i] / scale[i];
+      res = lbfgs(fg, u, { maxIter: cfg.maxIter, deadline, memory: 10 });
+      for (let i = 0; i < model.size; i++) theta[i] = u[i] * scale[i];
+      if (now() > deadline) break;
+    }
+  }
+  const sizeAfterSlam = cloudRadius(theta, P).r;
   snapshot('slam');
-  progress(0.9, 'ajuste');
+  progress(0.6, 'ajuste');
+
+  const study = {};
+  if (options.debug) study.evidence = scaleEvidence(survey, prep, model, cfg, theta);
+  if (cfg.scaleStudy) {
+    // Estudo de escala: itera só o q do HMM com as emissões paradas e vê onde ele assenta.
+    const sigmaR = radioSigmas(model, cfg, theta);
+    for (let a = 0; a < model.RA; a++) sigmaR[a] *= cfg.studySigmaScale || 1;
+    const grid = makeGrid(theta, P, 3, cfg.hmmMinCell, cfg.hmmMaxCells);
+    const logE = nodeEmissions(model, cfg, theta, grid, sigmaR, null, null);
+    let qq = cfg.hmmQ;
+    const seq = [];
+    for (let k = 0; k < 25; k++) {
+      const hm = runHmm(prep, model, cfg, grid, logE, qq);
+      const qe = Math.sqrt(hm.stepMs / 2);
+      seq.push(qe);
+      if (!Number.isFinite(qe) || Math.abs(qe - qq) < 0.004) break;
+      qq = qe;
+    }
+    study.qSeq = seq;
+    // passo mediano do MAP
+    const st = [];
+    for (const e of prep.edges) if (e.kind === 0 && e.dt < 8) st.push(Math.hypot(theta[2 * e.a] - theta[2 * e.b], theta[2 * e.a + 1] - theta[2 * e.b + 1]) * 3.5 / e.dt);
+    study.mapStepMed = median(st);
+    study.mapStepRms = Math.sqrt(st.reduce((t, v) => t + v * v, 0) / Math.max(1, st.length));
+  }
+
+  // --- EM com a trajetória em grade ---
+  let q = cfg.hmmQ;
+  for (let em = 0; em < cfg.emRounds; em++) {
+    const sigmaR = radioSigmas(model, cfg, theta);
+    const grid = makeGrid(theta, P, Math.max(2, 2 * q), cfg.hmmMinCell, cfg.hmmMaxCells);
+    const logE = nodeEmissions(model, cfg, theta, grid, sigmaR);
+    const hm = runHmm(prep, model, cfg, grid, logE, q);
+    // Posição de cada nó: média das visitas que passaram por ele.
+    const acc = new Float64Array(2 * P);
+    const cnt = new Float64Array(P);
+    for (let v = 0; v < prep.visits.length; v++) {
+      const node = prep.visits[v].node;
+      acc[2 * node] += hm.mean[2 * v];
+      acc[2 * node + 1] += hm.mean[2 * v + 1];
+      cnt[node]++;
+    }
+    for (let i = 0; i < P; i++) {
+      if (cnt[i] > 0) {
+        theta[2 * i] = acc[2 * i] / cnt[i];
+        theta[2 * i + 1] = acc[2 * i + 1] / cnt[i];
+      }
+    }
+    const qEst = Math.sqrt(hm.stepMs / 2);
+    notes.push(`em${em}: ll ${hm.loglik.toFixed(0)} q ${Number.isFinite(qEst) ? qEst.toFixed(2) : '-'} G ${grid.G}`);
+    snapshot(`hmm${em}`);
+    if (cfg.emUpdateQ && Number.isFinite(qEst)) q = clamp(qEst, 0.3 * cfg.hmmQ, 3 * cfg.hmmQ);
+    if (em + 1 < cfg.emRounds || cfg.emFinalM) {
+      // Passo M: reajusta roteadores e curvas com as posições alisadas (nós parados).
+      cfg.freezeNodes = 1;
+      for (let i = 0; i < model.size; i++) u[i] = theta[i] / scale[i];
+      lbfgs(fg, u, { maxIter: cfg.mIter, deadline, memory: 10 });
+      for (let i = 0; i < model.size; i++) theta[i] = u[i] * scale[i];
+      cfg.freezeNodes = 0;
+    }
+    if (now() > deadline) break;
+  }
+  progress(0.7, 'trajetória');
+
+  // --- EM com o campo residual (o que se repete no mesmo lugar) ---
+  const exclude = timeNeighbours(prep, cfg.fieldExclude);
+  for (let it = 0; it < cfg.fieldRounds; it++) {
+    const grid = makeGrid(theta, P, Math.max(2, 2 * q), cfg.hmmMinCell, cfg.hmmMaxCells);
+    const h = Math.max(cfg.fieldH * (q / cfg.hmmQ), 0.75 * grid.cell);
+    const field = buildResidualField(model, cfg, theta, grid, h);
+    const sigmaR = fieldSigmas(model, cfg, theta, grid, field, exclude);
+    const logE = nodeEmissions(model, cfg, theta, grid, sigmaR, field, exclude);
+    const hm = runHmm(prep, model, cfg, grid, logE, q);
+    const acc = new Float64Array(2 * P);
+    const cnt = new Float64Array(P);
+    for (let v = 0; v < prep.visits.length; v++) {
+      const node = prep.visits[v].node;
+      acc[2 * node] += hm.mean[2 * v];
+      acc[2 * node + 1] += hm.mean[2 * v + 1];
+      cnt[node]++;
+    }
+    for (let i = 0; i < P; i++) {
+      if (cnt[i] > 0) {
+        theta[2 * i] = acc[2 * i] / cnt[i];
+        theta[2 * i + 1] = acc[2 * i + 1] / cnt[i];
+      }
+    }
+    const qEst = Math.sqrt(hm.stepMs / 2);
+    let sg = 0;
+    for (let a = 0; a < model.RA; a++) sg += sigmaR[a];
+    notes.push(`f${it}: ll ${hm.loglik.toFixed(0)} q ${Number.isFinite(qEst) ? qEst.toFixed(2) : '-'} sig ${(sg / model.RA).toFixed(1)}`);
+    snapshot(`fld${it}`);
+    if (cfg.emUpdateQ && Number.isFinite(qEst)) q = clamp(qEst, 0.3 * cfg.hmmQ, 3 * cfg.hmmQ);
+    if (cfg.fieldRefit && it + 1 < cfg.fieldRounds) {
+      cfg.freezeNodes = 1;
+      for (let i = 0; i < model.size; i++) u[i] = theta[i] / scale[i];
+      lbfgs(fg, u, { maxIter: cfg.mIter, deadline, memory: 10 });
+      for (let i = 0; i < model.size; i++) theta[i] = u[i] * scale[i];
+      cfg.freezeNodes = 0;
+    }
+    if (now() > deadline) break;
+  }
+  // O alisamento encolhe um pouco o mapa: devolve o tamanho decidido na etapa geométrica.
+  {
+    const now_ = cloudRadius(theta, P);
+    if (now_.r > 1e-6 && sizeAfterSlam > 1e-6) {
+      const k = sizeAfterSlam / now_.r;
+      const tmp = new Float64Array(model.size);
+      applyScale(model, theta, k, tmp);
+      theta.set(tmp);
+    }
+  }
+  progress(0.9, 'campo');
 
   const solution = finalize(survey, prep, model, cfg, theta);
-  if (options.debug) solution.debug = { stages, cost: res.f, iter: res.iter, ms: now() - t0 };
+  if (options.debug) {
+    const params = [];
+    for (let a = 0; a < model.RA; a++) {
+      const d3 = model.oA + 3 * model.radDev[a];
+      params.push({
+        ids: prep.radios[model.list[a]].ids, freq: prep.radios[model.list[a]].freq, count: prep.radioCount[model.list[a]],
+        x: theta[d3], y: theta[d3 + 1], z: theta[d3 + 2], n: theta[model.oR + 2 * a], alpha: theta[model.oR + 2 * a + 1],
+        p0: Array.from({ length: model.NF }, (_, f) => theta[model.p0Index[a * model.NF + f]]),
+      });
+    }
+    solution.debug = { stages, cost: res.f, iter: res.iter, ms: now() - t0, params, note: notes.join(' '), study };
+  }
   progress(1, 'pronto');
   return solution;
 }
@@ -1054,8 +2065,17 @@ function finalize(survey, prep, model, cfg, theta) {
 
   const points = new Array(survey.scans.length);
   for (let i = 0; i < N; i++) {
-    const x = theta[2 * nodeOf[i]];
-    const y = theta[2 * nodeOf[i] + 1];
+    let x = theta[2 * nodeOf[i]];
+    let y = theta[2 * nodeOf[i] + 1];
+    if (cfg.lagShift > 0 && scans[i].spot == null && i > 0 && i < N - 1) {
+      // As leituras (quase todas em 2,4 GHz) são ouvidas no começo da varredura; a posição que
+      // vale é a do meio dela: adianta o ponto ao longo do caminho.
+      const dt = scans[i + 1].t - scans[i - 1].t;
+      if (dt > 1 && dt < 16) {
+        x += (cfg.lagShift / dt) * (theta[2 * nodeOf[i + 1]] - theta[2 * nodeOf[i - 1]]);
+        y += (cfg.lagShift / dt) * (theta[2 * nodeOf[i + 1] + 1] - theta[2 * nodeOf[i - 1] + 1]);
+      }
+    }
     const floor = Number.isFinite(scans[i].floor) ? Math.round(scans[i].floor) : 0;
     points[i] = { x: tx(x, y), y: ty(x, y), z: floor * FLOOR_HEIGHT, conf: 0.5 };
   }
