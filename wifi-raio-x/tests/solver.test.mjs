@@ -271,7 +271,7 @@ test('varreduras só com leituras repetidas entram por interpolação no tempo',
   assert.ok(mid.conf < Math.min(p.conf, q.conf), 'com confiança menor que a das vizinhas');
 });
 
-test('levantamento enorme (1500 varreduras) é raleado e resolvido dentro do tempo', async () => {
+test('levantamento enorme (1500 varreduras) é resolvido em blocos, dentro do tempo', async () => {
   const base = SMALL.survey;
   const span = base.scans[base.scans.length - 1].t + 3.5;
   const scans = [];

@@ -19,8 +19,14 @@ export { FLOOR_HEIGHT };
 export const PHONE_HEIGHT = 1.2;
 /** Intervalo assumido entre varreduras quando o relógio falta (s): o do modo sem limite do Android. */
 const DEFAULT_GAP_S = 3.5;
-/** Uma varredura completa leva menos que isto (ms): leitura mais velha nunca é da varredura atual. */
+/**
+ * Uma varredura completa leva menos que isto (ms): leitura mais velha nunca é da varredura atual.
+ * Vale 4,5 s para o celular típico (2,5 a 3 s para varrer 2,4 e 5 GHz); para os mais lentos (três
+ * faixas, canais com radar) o teto sobe com a idade das leituras do próprio levantamento, até
+ * MAX_SWEEP_LIMIT_MS — ver sweepLimit().
+ */
 const MAX_SWEEP_MS = 4500;
+const MAX_SWEEP_LIMIT_MS = 10000;
 /** A posição de uma varredura feita andando vale para o meio dela: ~1,35 s antes da entrega da lista. */
 export const SWEEP_MID_S = 1.35;
 
@@ -128,27 +134,43 @@ export function readSurvey(survey) {
   const K = radios.length;
 
   // Segunda passada: média das leituras frescas por (varredura, rádio).
-  const rssi = new Float64Array(n * K).fill(NaN);
-  const count = new Float64Array(n * K);
-  const fresh = new Int32Array(n);
-  const meanAgeS = new Float64Array(n).fill(SWEEP_MID_S);
-  const levels = [];
+  const sweepMs = sweepLimit(lists, time);
+  let rssi;
+  let count;
+  let fresh;
+  let meanAgeS;
+  let levels;
   const sum = new Float64Array(K);
-  for (let i = 0; i < n; i++) {
-    const gapMs = i > 0 ? (time[i] - time[i - 1]) * 1000 : Infinity;
-    const freshMs = gapMs > 200 ? Math.min(MAX_SWEEP_MS, gapMs - 1) : MAX_SWEEP_MS;
-    sum.fill(0);
-    let ageSum = 0;
-    for (const r of lists[i]) {
-      if (r.ageMs > freshMs) continue;
-      sum[r.k] += r.rssi;
-      count[i * K + r.k]++;
-      fresh[i]++;
-      ageSum += r.ageMs / 1000;
-      levels.push(r.rssi);
+  for (const useAges of [true, false]) {
+    rssi = new Float64Array(n * K).fill(NaN);
+    count = new Float64Array(n * K);
+    fresh = new Int32Array(n);
+    meanAgeS = new Float64Array(n).fill(SWEEP_MID_S);
+    levels = [];
+    let heard = 0; // varreduras com alguma leitura
+    let heardFresh = 0; // ...e com alguma leitura fresca
+    for (let i = 0; i < n; i++) {
+      const gapMs = i > 0 ? (time[i] - time[i - 1]) * 1000 : Infinity;
+      const freshMs = gapMs > 200 ? Math.min(sweepMs, gapMs - 1) : sweepMs;
+      sum.fill(0);
+      let ageSum = 0;
+      for (const r of lists[i]) {
+        if (useAges && r.ageMs > freshMs) continue;
+        sum[r.k] += r.rssi;
+        count[i * K + r.k]++;
+        fresh[i]++;
+        ageSum += r.ageMs / 1000;
+        levels.push(r.rssi);
+      }
+      for (let k = 0; k < K; k++) if (count[i * K + k] > 0) rssi[i * K + k] = sum[k] / count[i * K + k];
+      if (fresh[i] > 0 && useAges) meanAgeS[i] = ageSum / fresh[i];
+      if (lists[i].length) heard++;
+      if (fresh[i] > 0) heardFresh++;
     }
-    for (let k = 0; k < K; k++) if (count[i * K + k] > 0) rssi[i * K + k] = sum[k] / count[i * K + k];
-    if (fresh[i] > 0) meanAgeS[i] = ageSum / fresh[i];
+    // Quase nenhuma varredura com leitura fresca: o campo de idade deste aparelho não presta (outra
+    // unidade, relógio errado). Melhor um mapa com as leituras todas do que mapa nenhum: refaz sem
+    // olhar a idade.
+    if (heard < 5 || heardFresh >= 0.2 * heard) break;
   }
   levels.sort((a, b) => a - b);
   const weakest = levels.length ? levels[0] : NaN;
@@ -163,6 +185,27 @@ export function readSurvey(survey) {
   track.sort((p, q) => p.t - q.t);
 
   return { n, time, floor, spot, radios, K, rssi, count, fresh, meanAgeS, weakest, lowLevel, track };
+}
+
+/**
+ * Idade (ms) acima da qual uma leitura não pode ser da varredura que a trouxe, para ESTE celular.
+ * Uma constante só (4,5 s) serve ao celular que varre tudo em 3 s, mas num aparelho que leva 6 s
+ * ela jogava fora, como "repetidas", as leituras do começo de cada varredura — quase todo o
+ * 2,4 GHz no modo de uma varredura a cada 30 s — e o mapa desabava (medido: nota de 49 para 80).
+ * As idades do próprio levantamento dizem quanto dura a varredura: entre as leituras que não são
+ * comprovadamente antigas (mais novas que o intervalo desde a varredura anterior), 70% ficam
+ * abaixo de ~85% da duração. O teto é 1,5 vez esse percentil, nunca menos que MAX_SWEEP_MS.
+ */
+function sweepLimit(lists, time) {
+  const ages = [];
+  for (let i = 0; i < lists.length; i++) {
+    const gapMs = i > 0 ? (time[i] - time[i - 1]) * 1000 : Infinity;
+    const newest = gapMs > 200 ? Math.min(2 * MAX_SWEEP_LIMIT_MS, gapMs - 1) : 2 * MAX_SWEEP_LIMIT_MS;
+    for (const r of lists[i]) if (r.ageMs >= 0 && r.ageMs <= newest) ages.push(r.ageMs);
+  }
+  if (ages.length < 20) return MAX_SWEEP_MS;
+  ages.sort((a, b) => a - b);
+  return clamp(1.5 * ages[Math.floor(0.7 * (ages.length - 1))], MAX_SWEEP_MS, MAX_SWEEP_LIMIT_MS);
 }
 
 /** Visão com só as varreduras de `keep` (índices crescentes). Os rádios e o sinal conectado são os mesmos. */

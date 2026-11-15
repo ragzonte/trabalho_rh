@@ -17,6 +17,8 @@ const PHONE_HEIGHT = 1.2;
 const GOOD_DBM = -67;
 const FAIR_DBM = -75;
 const WEAK_DBM = -82;
+/** Erro esperado (m) em que a confiança de um ponto vale 0,5: a mesma régua do solucionador (CONF_HALF_M em solver.js). */
+const CONF_HALF_M = 1.5;
 
 // Constantes do construtor. `options.tune` troca qualquer uma (só a bancada usa).
 const TUNE = {
@@ -26,7 +28,10 @@ const TUNE = {
   maxSpanM: 150,
   // --- área ---
   areaH: 0.55, // núcleo da densidade do caminho (m)
-  areaR: 1.0, // meia-largura do "corpo" de uma passada isolada (m)
+  areaR: 1.0, // meia-largura do "corpo" de uma passada isolada (m), com a posição exata
+  areaErr: 1.44, // quanto do erro esperado de cada ponto alarga o alcance dele (ver buildArea); 0 = nada
+  areaErrConfMin: 0.3, // confiança abaixo disto conta como esta (erro esperado de 2,3 m): o alcance não cresce sem limite
+  collapsedM: 0.3, // nuvem com raio (rms) menor que isto: o solucionador não achou forma nenhuma
   pointR: 0.6, // quem fez uma varredura num lugar ocupou pelo menos este raio (m)
   pointW: 0.6, // peso de uma varredura, em metros de caminho
   closeR: 1.2, // fecha vãos mais estreitos que o dobro disto (m)
@@ -79,6 +84,15 @@ const TUNE = {
   heatLinear: 1,
   heatConfK: 1.5,
   heatConfS: 0.8,
+  // --- sinal da rede conectada entre as varreduras (survey.track; ver trackSamples) ---
+  trackW: 0.5, // peso de uma amostra perante uma varredura (a posição dela é interpolada, não resolvida)
+  trackLagS: 1.2, // a lista de uma varredura chega ~1,2 s depois do meio da escuta: é esse o instante da posição
+  trackSnapS: 2.5, // sem trecho andado em volta, a amostra vale para a varredura a até isto dela
+  trackBinM: 0.5, // amostras no mesmo quadrado deste lado viram uma só (a média)
+  trackBinW: 1.5, // peso máximo de um quadrado, por mais amostras que tenha
+  trackTopDb: 1.5, // a amostra só entra onde o rádio conectado é o mais forte da rede (com esta folga)
+  trackCalMin: 6, // pares amostra x varredura para medir a diferença entre os dois medidores
+  trackMaxGapS: 8, // só interpola a posição entre duas varreduras separadas por até isto (s)
 };
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -241,12 +255,21 @@ function prepare(survey, solution, opts, tune) {
     radios[r].bssids.push(b.id);
   }
 
+  // Solução que colapsou (todos os pontos no mesmo lugar): não há nuvem cujo tamanho corrigir.
+  let spread = 0;
+  if (P) {
+    const mx = path.reduce((s, p) => s + p.x, 0) / P;
+    const my = path.reduce((s, p) => s + p.y, 0) / P;
+    spread = Math.sqrt(path.reduce((s, p) => s + (p.x - mx) ** 2 + (p.y - my) ** 2, 0) / P);
+  }
+  const collapsed = P >= 4 && spread < tune.collapsedM;
+
   const floorNumbers = [...new Set(path.map((p) => p.floor))].sort((a, b) => a - b);
   const dts = [];
   for (let k = 1; k < P; k++) if (path[k].t > path[k - 1].t) dts.push(path[k].t - path[k - 1].t);
   const cadence = dts.length ? median(dts) : 3.5;
 
-  return { survey, scans, path, P, weight, bssids, bssidIndex, fresh, nets, netDbm, radios, solAps, floorDbm, missDbm, floorNumbers, cadence, ownDevices, tune };
+  return { survey, scans, path, P, weight, bssids, bssidIndex, fresh, nets, netDbm, radios, solAps, floorDbm, missDbm, floorNumbers, cadence, ownDevices, tune, spread, collapsed };
 }
 
 // Impressão digital de cada ponto: o sinal de cada rádio, centrado na média dele (não ouvido =
@@ -343,8 +366,10 @@ function makeGrid(ctx, opts, tune) {
     minY = Math.max(minY, my - tune.maxSpanM / 2);
     maxY = Math.min(maxY, my + tune.maxSpanM / 2);
   }
-  // Margem: cabe a dilatação do fechamento inteira, com folga.
-  const m = Math.max(tune.marginM, tune.areaR + tune.closeR + 0.6);
+  // Margem: cabe o alcance do ponto mais incerto e a dilatação do fechamento inteira, com folga.
+  let reach = 1;
+  for (const p of path) reach = Math.max(reach, reachGain(ctx, p.conf));
+  const m = Math.max(tune.marginM, tune.areaR * reach + tune.closeR + 0.6);
   const w = maxX - minX + 2 * m;
   const h = maxY - minY + 2 * m;
   if ((w / cell) * (h / cell) > tune.maxCells) cell = clamp(Math.ceil(Math.sqrt((w * h) / tune.maxCells) / 0.05) * 0.05, cell, 0.5);
@@ -490,6 +515,14 @@ function components(grid, member, same) {
 // Área de um andar
 // ---------------------------------------------------------------------------
 
+// Quanto o alcance de um ponto cresce (x areaR) por causa do erro esperado dele; ver buildArea.
+function reachGain(ctx, conf) {
+  const { tune } = ctx;
+  if (!(tune.areaErr > 0) || ctx.collapsed) return 1;
+  const e2 = CONF_HALF_M * CONF_HALF_M * (1 / clamp(conf, tune.areaErrConfMin, 1) - 1);
+  return Math.sqrt(1 + (tune.areaErr * e2) / (tune.areaR * tune.areaR));
+}
+
 // Dois pontos seguidos do caminho foram ligados andando? (mesmo andar, sem salto impossível)
 function walked(ctx, a, b) {
   const p = ctx.path[a];
@@ -507,9 +540,37 @@ function buildArea(ctx, grid, members) {
   const conf = new Float32Array(size);
   const h2 = 2 * tune.areaH * tune.areaH;
   const c2 = 2 * tune.confS * tune.confS;
-  const mark = (x, y, wDens, wConf) => {
-    if (wDens > 0) splat(grid, dens, x, y, 3 * tune.areaH, wDens, h2, false);
-    if (wConf > 0) splat(grid, conf, x, y, 2.6 * tune.confS, wConf, c2, true);
+  // TAMANHO. A nuvem de pontos do solucionador é menor do que a casa, e isso não é defeito dele: cada
+  // posição é a melhor aposta para aquela varredura, e a melhor aposta de um ponto incerto fica sempre
+  // mais perto do meio do que o ponto de verdade. Vale a decomposição da variância de quem estima pela
+  // média condicional,
+  //
+  //     espalhamento real² = espalhamento estimado² + erro²
+  //
+  // ou, dito para a área: os lugares onde a pessoa ESTEVE são os lugares estimados borrados pelo erro
+  // de cada um. Por isso o alcance de um ponto não é só o corpo de quem anda (`areaR`): soma, em
+  // quadratura, o erro esperado ali. O erro vem da própria solução — a confiança do ponto é
+  // conf = 1 / (1 + (e / 1,5)²), com e = erro MEDIANO esperado — e um erro gaussiano no plano com essa
+  // mediana tem média quadrática e² x 1,44 (`areaErr` = 1 / ln 2; nada aqui foi ajustado aos cenários):
+  //
+  //     alcance² = areaR² + 1,44 x e²
+  //
+  // O ponto mais incerto alcança mais longe, mas com a mesma "massa" (a densidade dele fica mais
+  // rala): sozinho continua sem garantir área; onde há muitos, a borda avança. Posição exata
+  // (confiança 1) não muda nada. Na bancada, com o solucionador de verdade, a área estimada passou de
+  // 0,65 para 0,95 da real (0,68 -> 0,99 em casas que não serviram de ajuste) e a sobreposição com a
+  // planta (IoU) de 0,55 para 0,64, sem mexer na posição de nenhum ponto nem dos roteadores. O que a
+  // conta não conserta é a escala de um mapa só (±15%) nem lugar grande que todo motor encolhe
+  // (escritório de 20 x 14 m: 0,55). A CONFIANÇA de cada célula continua medindo a distância ao
+  // caminho estimado, então a faixa que entrou só por causa da incerteza aparece como incerta.
+  const reachOf = (k) => reachGain(ctx, path[k].conf);
+  const near = new Float32Array(size); // alcance: como `conf`, com o núcleo de cada ponto alargado pelo erro dele
+  const mark = (x, y, wDens, wConf, g) => {
+    if (wDens > 0) splat(grid, dens, x, y, 3 * tune.areaH * g, wDens / g, h2 * g * g, false);
+    if (wConf > 0) {
+      splat(grid, conf, x, y, 2.6 * tune.confS, wConf, c2, true);
+      splat(grid, near, x, y, 2.6 * tune.confS * g, wConf, c2 * g * g, true);
+    }
   };
 
   // Densidade do caminho: cada varredura e cada metro andado entre duas varreduras seguidas.
@@ -517,7 +578,8 @@ function buildArea(ctx, grid, members) {
   const links = [];
   for (let m = 0; m < members.length; m++) {
     const k = members[m];
-    mark(path[k].x, path[k].y, tune.pointW * weight[k], weight[k]);
+    const g = reachOf(k);
+    mark(path[k].x, path[k].y, tune.pointW * weight[k], weight[k], g);
     const next = members[m + 1];
     if (next === undefined || next !== k + 1 || !walked(ctx, k, next)) continue;
     links.push(k);
@@ -528,9 +590,10 @@ function buildArea(ctx, grid, members) {
     if (steps < 1) continue;
     // Trecho comprido (varredura lenta): a reta é só um palpite do caminho, vale metade.
     const w = Math.min(weight[k], weight[next]) * (len > 4 ? 0.5 : 1);
+    const gLink = 0.5 * (g + reachOf(next));
     for (let s = 0; s < steps; s++) {
       const u = (s + 0.5) / steps;
-      mark(p.x + (q.x - p.x) * u, p.y + (q.y - p.y) * u, (w * len) / steps, s % 2 ? w : 0);
+      mark(p.x + (q.x - p.x) * u, p.y + (q.y - p.y) * u, (w * len) / steps, s % 2 ? w : 0, gLink);
     }
   }
   // Limiar: o que uma passada reta e isolada deixa a `areaR` do eixo.
@@ -539,7 +602,7 @@ function buildArea(ctx, grid, members) {
   // pelo mesmo lugar (ou ficar parado nele) é mais certeza, não mais área.
   const reach = Math.exp(-(tune.areaR * tune.areaR) / c2) - 1e-6;
   let mask = new Uint8Array(size);
-  for (let c = 0; c < size; c++) if (dens[c] >= tau && conf[c] >= reach) mask[c] = 1;
+  for (let c = 0; c < size; c++) if (dens[c] >= tau && near[c] >= reach) mask[c] = 1;
   for (const k of members) {
     if (weight[k] >= tune.lowConf) forCellsNear(grid, path[k].x, path[k].y, tune.pointR, (c) => (mask[c] = 1));
   }
@@ -1039,6 +1102,17 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
     assign[a] = remap.get(g);
   }
   return { assign, groups };
+}
+
+// Quantos nomes distintos o usuário deu aos lugares de um andar (pela mesma regra de clusterRooms).
+function namedPlaces(ctx, members) {
+  const { path, scans } = ctx;
+  const names = new Set();
+  for (const k of members) {
+    const name = normLabel(scans[path[k].i].label);
+    if (name) names.add(name.toLowerCase());
+  }
+  return names.size;
 }
 
 // Dá um ambiente a cada célula de dentro: voto das varreduras próximas e, onde nenhuma
@@ -1604,7 +1678,18 @@ function buildFloor(ctx, grid, floorNumber, opts) {
   for (let c = 0; c < size; c++) cells += area.inside[c];
   const areaM2 = cells * cell * cell;
 
-  const clusters = clusterRooms(ctx, members, areaM2, opts.labels !== false);
+  // AMBIENTES só quando o usuário deu nome a pelo menos dois lugares deste andar. Sem nomes, o
+  // agrupamento pelo sinal existe (clusterRooms), mas com as posições do solucionador ele vale
+  // pouco mais do que cortar a área ao acaso em pedaços contíguos: na bancada (88 levantamentos),
+  // concordância com os cômodos reais (ARI, onde o mapa tem área) de 0,38 contra 0,27 do corte ao
+  // acaso, e 0,61 com nomes; de cada "ambiente" automático, 71% era de um cômodo só (67% ao
+  // acaso, 82% com nomes). Desenhar divisões assim com cara de planta seria fingir uma certeza que
+  // não existe: sem nomes o andar sai como uma área só (sem ambientes e sem divisões internas), e
+  // o sinal, o caminho e os roteadores continuam lá. `autoRooms: true` (só a bancada usa) força o
+  // agrupamento automático, para a medida poder ser refeita.
+  const useLabels = opts.labels !== false;
+  const partition = opts.autoRooms === true || (useLabels && namedPlaces(ctx, members) >= 2);
+  const clusters = partition ? clusterRooms(ctx, members, areaM2, useLabels) : { assign: new Int32Array(members.length), groups: [] };
   const { room, kept } = assignCells(ctx, grid, area.inside, members, clusters.assign, clusters.groups);
 
   // Ambientes: centro, área, nome.
@@ -1790,13 +1875,7 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
   const confs = path.map((p) => p.conf);
   const meanConf = P ? confs.reduce((s, v) => s + v, 0) / P : 0;
   const flat = P > 0 && Math.max(...confs) - Math.min(...confs) < 1e-6;
-  let spread = 0;
-  if (P) {
-    const mx = path.reduce((s, p) => s + p.x, 0) / P;
-    const my = path.reduce((s, p) => s + p.y, 0) / P;
-    spread = Math.sqrt(path.reduce((s, p) => s + (p.x - mx) ** 2 + (p.y - my) ** 2, 0) / P);
-  }
-  const collapsed = P >= 4 && spread < 0.3;
+  const collapsed = ctx.collapsed;
 
   // Erro típico esperado, calibrado na bancada com quatro solucionadores: cresce com o tamanho
   // do lugar (perto da raiz da área de um andar), com varreduras lentas e com mais de um andar;
@@ -1824,9 +1903,13 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     if (cadence > 10) notes.push('Varreduras lentas (o Android limita a uma a cada 30 s): marque mais pontos ou desligue o limite nas opções do desenvolvedor.');
     if (scaleConf < 0.3) notes.push('A escala é incerta: as distâncias em metros podem estar bem fora.');
     else if (scaleConf < 0.6) notes.push('A escala é aproximada: as distâncias podem variar uns 25%.');
-    const labelled = spots.filter((s) => s.label).length;
-    if (!spots.length) notes.push('Marque pontos e dê nome aos cômodos para o mapa separar os ambientes.');
-    else if (!labelled) notes.push('Dê nome aos pontos marcados para o mapa separar os ambientes.');
+    // Sem pelo menos dois lugares com nome num andar, ele sai como uma área só (ver buildFloor).
+    const plain = floors.filter((f) => !f.rooms.length).length;
+    const named = new Set(spots.map((s) => s.label.toLowerCase()).filter(Boolean)).size;
+    if (plain === floors.length) {
+      if (!named) notes.push('O mapa não separa os ambientes porque nenhum lugar tem nome: pare em pelo menos dois cômodos, marque o lugar e diga onde está.');
+      else notes.push('Só um lugar tem nome: marque pelo menos mais um para o mapa separar os ambientes.');
+    } else if (plain > 0) notes.push('Num dos andares há menos de dois lugares com nome: ali o mapa não separa os ambientes.');
     if (!veryStrong && strong >= 3) notes.push('Nenhum roteador chega forte aqui: o sinal fraco deixa o mapa menos nítido.');
   }
   // Nível: o erro esperado comparado com o que se consegue num lugar deste tamanho (num
@@ -1964,6 +2047,7 @@ function build(survey, solution, opts) {
     }
     nets[n.key] = out;
   });
+  const track = trackSamples(ctx);
   const h = clamp(tune.heatH0 + tune.heatHk * quality.expectedErrorM, tune.heatHmin, tune.heatHmax);
 
   return {
@@ -1978,8 +2062,138 @@ function build(survey, solution, opts) {
     path: path.map((p) => ({ i: p.i, t: p.t, x: p.x, y: p.y, z: p.z, floor: p.floor, conf: p.conf, still: p.still })),
     spots,
     quality,
-    _heat: { missDbm: ctx.missDbm, h, wide: tune.heatWide, wideW: tune.heatWideW, ridge: tune.heatRidge, linear: tune.heatLinear, confK: tune.heatConfK, confS: tune.heatConfS, weight: ctx.weight, nets },
+    _heat: { missDbm: ctx.missDbm, h, wide: tune.heatWide, wideW: tune.heatWideW, ridge: tune.heatRidge, linear: tune.heatLinear, confK: tune.heatConfK, confS: tune.heatConfS, weight: ctx.weight, nets, track },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Sinal da rede conectada entre as varreduras
+// ---------------------------------------------------------------------------
+
+/**
+ * Entre uma varredura e outra o celular continua medindo a rede em que está CONECTADO (uma amostra
+ * a cada 1 ou 2 s, `survey.track`). São medições de verdade, e entram no campo de sinal da rede
+ * conectada como medições a mais, com três cuidados para o mapa continuar fiel ao que foi medido
+ * (o ganho medido na bancada é pequeno, ~0,05 dB de erro a menos, e nunca piora):
+ *
+ *  - POSIÇÃO: a amostra não tem posição resolvida; fica na reta entre as duas varreduras que a
+ *    cercam no tempo, e só quando elas estão a poucos segundos uma da outra (`trackMaxGapS`) e o
+ *    trecho foi andado sem salto (`walked`): em 3,5 s ninguém se afasta muito da reta. Por ser um
+ *    palpite, pesa metade de uma varredura. Com as varreduras a cada 30 s a reta entre dois
+ *    lugares NÃO serve — quem anda contorna paredes, e na bancada pôr as amostras nela PIOROU o
+ *    campo (3,6 -> 3,9 dB com as posições reais): ali só entram as amostras feitas junto de uma
+ *    varredura (a pessoa parada no lugar marcado), cuja média tira o ruído daquela leitura única.
+ *  - MESMA GRANDEZA: o campo de uma rede é o rádio MAIS FORTE dela em cada lugar; a amostra é do
+ *    rádio conectado. Ela só entra onde, nas varreduras vizinhas, o conectado é o mais forte da rede.
+ *  - MESMO MEDIDOR: o sinal conectado e o da varredura saem de caminhos diferentes do aparelho e
+ *    podem diferir por alguns dB. A diferença mediana entre os dois (amostras feitas junto de uma
+ *    varredura) é medida no próprio levantamento e descontada; sem pares suficientes, as amostras
+ *    ficam de fora.
+ *
+ * As amostras de um mesmo quadrado de 0,5 m viram uma só (a média), com peso limitado: ficar um
+ * minuto parado não vale mais do que três ou quatro varreduras ali, e o custo do campo não cresce
+ * com a duração do levantamento.
+ *
+ * @returns {Object<string, {x:Float32Array, y:Float32Array, v:Float32Array, w:Float32Array, f:Int16Array}>} por chave de rede
+ */
+function trackSamples(ctx) {
+  const { survey, path, P, weight, bssids, bssidIndex, fresh, nets, netDbm, tune } = ctx;
+  const out = {};
+  const raw = Array.isArray(survey.track) ? survey.track : [];
+  if (!raw.length || P < 2 || !(tune.trackW > 0)) return out;
+  // Instante da POSIÇÃO de cada varredura (a lista chega um pouco depois do meio da escuta).
+  const at = new Float64Array(P);
+  for (let k = 0; k < P; k++) at[k] = path[k].t - tune.trackLagS;
+  const readingOf = (k, b) => {
+    const list = fresh[k];
+    for (let j = 0; j < list.length; j += 2) if (list[j] === b) return list[j + 1];
+    return NaN;
+  };
+  // Por rádio conectado: amostras em ordem de tempo.
+  const byRadio = new Map();
+  for (const q of raw) {
+    if (!q || typeof q.id !== 'string' || !isNum(q.t) || !isNum(q.rssi)) continue;
+    const b = bssidIndex.get(q.id);
+    if (b === undefined) continue; // rádio que nenhuma varredura ouviu: não há rede nem como conferir
+    if (!byRadio.has(b)) byRadio.set(b, []);
+    byRadio.get(b).push(q);
+  }
+  const bins = new Map(); // rede -> Map(quadrado -> somas)
+  for (const [b, list] of byRadio) {
+    list.sort((p, q) => p.t - q.t);
+    const net = bssids[b].net;
+    const single = nets[net].bssids.length === 1;
+    // Diferença entre os dois medidores: amostras a até 2 s do instante de uma varredura que ouviu o rádio.
+    const diffs = [];
+    let j = 0;
+    for (let k = 0; k < P; k++) {
+      const r = readingOf(k, b);
+      if (r !== r) continue;
+      while (j < list.length && list[j].t < at[k] - 2) j++;
+      for (let i = j; i < list.length && list[i].t <= at[k] + 2; i++) diffs.push(clamp(list[i].rssi, -120, 0) - r);
+    }
+    if (diffs.length < tune.trackCalMin) continue;
+    const offset = clamp(median(diffs), -8, 8);
+    // O conectado é o rádio mais forte da rede nesta varredura? (rede não ouvida: nada a objetar)
+    const top = (k) => {
+      if (single) return true;
+      const best = netDbm[net][k];
+      if (best !== best) return true;
+      const r = readingOf(k, b);
+      return r === r && r >= best - tune.trackTopDb;
+    };
+    let k = 0;
+    for (const q of list) {
+      while (k + 1 < P && at[k + 1] <= q.t) k++;
+      let x;
+      let y;
+      let floor;
+      let w;
+      const next = k + 1 < P && q.t >= at[k] ? k + 1 : -1;
+      if (next > 0 && at[next] - at[k] <= tune.trackMaxGapS && walked(ctx, k, next)) {
+        if (!top(k) || !top(next)) continue;
+        const span = at[next] - at[k];
+        const u = span > 1e-6 ? clamp((q.t - at[k]) / span, 0, 1) : 0;
+        x = path[k].x + (path[next].x - path[k].x) * u;
+        y = path[k].y + (path[next].y - path[k].y) * u;
+        floor = path[k].floor;
+        w = 0.25 + 0.75 * Math.min(weight[k], weight[next]);
+      } else {
+        // Sem trecho andado em volta (começo, fim, pausa, troca de andar): vale a varredura ao lado, se for agora.
+        const near = next > 0 && Math.abs(at[next] - q.t) < Math.abs(q.t - at[k]) ? next : k;
+        if (Math.abs(q.t - at[near]) > tune.trackSnapS || !top(near)) continue;
+        x = path[near].x;
+        y = path[near].y;
+        floor = path[near].floor;
+        w = 0.25 + 0.75 * weight[near];
+      }
+      w *= tune.trackW;
+      const key = `${floor}|${Math.floor(x / tune.trackBinM)}|${Math.floor(y / tune.trackBinM)}`;
+      if (!bins.has(net)) bins.set(net, new Map());
+      const cells = bins.get(net);
+      let cell = cells.get(key);
+      if (!cell) cells.set(key, (cell = { x: 0, y: 0, v: 0, w: 0, floor }));
+      cell.x += w * x;
+      cell.y += w * y;
+      cell.v += w * (clamp(q.rssi, -120, 0) - offset);
+      cell.w += w;
+    }
+  }
+  for (const [net, cells] of bins) {
+    const n = cells.size;
+    const pack = { x: new Float32Array(n), y: new Float32Array(n), v: new Float32Array(n), w: new Float32Array(n), f: new Int16Array(n) };
+    let i = 0;
+    for (const cell of cells.values()) {
+      pack.x[i] = cell.x / cell.w;
+      pack.y[i] = cell.y / cell.w;
+      pack.v[i] = cell.v / cell.w;
+      pack.w[i] = Math.min(cell.w, tune.trackBinW);
+      pack.f[i] = cell.floor;
+      i++;
+    }
+    out[nets[net].key] = pack;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1990,7 +2204,8 @@ const heatCache = new WeakMap();
 
 /**
  * Sinal de uma rede sobre a grade de um andar: regressão local das leituras MEDIDAS nas
- * posições resolvidas (o mais forte entre os BSSIDs da rede em cada varredura).
+ * posições resolvidas (o mais forte entre os BSSIDs da rede em cada varredura) e, para a rede
+ * conectada, também das amostras feitas entre uma varredura e outra (trackSamples).
  * O resultado fica guardado por modelo: chamar de novo não refaz a conta (não altere os vetores).
  *
  * @param {import('./types.js').MapModel} model
@@ -2029,6 +2244,19 @@ export function heatField(model, floorIndex, networkKey) {
     if (v < vMin) vMin = v;
     if (v > vMax) vMax = v;
   });
+  // Amostras do sinal conectado entre as varreduras (só a rede conectada as tem).
+  const extra = heat.track && heat.track[networkKey];
+  if (extra && extra.v && extra.f) {
+    for (let s = 0; s < extra.v.length; s++) {
+      if (extra.f[s] !== floor.floor || !(extra.w[s] > 0) || extra.v[s] !== extra.v[s]) continue;
+      xs.push(extra.x[s]);
+      ys.push(extra.y[s]);
+      vs.push(extra.v[s]);
+      ws.push(extra.w[s]);
+      if (extra.v[s] < vMin) vMin = extra.v[s];
+      if (extra.v[s] > vMax) vMax = extra.v[s];
+    }
+  }
   const out = empty();
   const S = xs.length;
   if (!S) {
@@ -2369,10 +2597,10 @@ export function describeMap(model) {
   const single = floors.length === 1;
   out.push(
     `Mapa aproximado, feito só com o sinal do Wi-Fi: área de cerca de ${brNum(q.areaM2)} m² em ${single ? '1 andar' : `${floors.length} andares`}, ` +
-      `com ${roomCount} ${roomCount === 1 ? 'ambiente' : 'ambientes'}, a partir de ${q.scans} varreduras.`,
+      `${roomCount ? `com ${roomCount} ${roomCount === 1 ? 'ambiente' : 'ambientes'}` : 'sem divisão em ambientes'}, a partir de ${q.scans} varreduras.`,
   );
   out.push(
-    `Precisão ${q.level === 'boa' ? 'boa' : q.level === 'razoavel' ? 'razoável' : 'fraca'}: cada posição tem erro típico de uns ${brNum(q.expectedErrorM, 1)} m. Não é uma planta: as divisões entre ambientes são estimativas.`,
+    `Precisão ${q.level === 'boa' ? 'boa' : q.level === 'razoavel' ? 'razoável' : 'fraca'}: cada posição tem erro típico de uns ${brNum(q.expectedErrorM, 1)} m. Não é uma planta${roomCount ? ': as divisões entre ambientes são estimativas' : ''}.`,
   );
   for (const f of floors) {
     if (!f.rooms.length) continue;

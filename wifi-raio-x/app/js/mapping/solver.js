@@ -28,8 +28,19 @@
 // De quebra, a DISCORDÂNCIA entre os motores num ponto é uma medida do erro que não precisa da
 // verdade: é dela que sai a confiança de cada posição.
 //
-// Determinístico (nenhum sorteio; `options.seed` é aceito e não muda nada), nunca lança erro e
-// roda num Web Worker: só importa os módulos solver-* desta pasta e types.js.
+// CONTRA O MUNDO REAL. O simulador da bancada é bem-comportado; um celular na mão de alguém não é.
+// Antes de chegar aos motores o levantamento passa por engineView(): andares demais são juntados,
+// uma parada longa sem "marcar ponto" vira um ponto só, um levantamento enorme é resolvido em
+// blocos (o resto entra pela impressão digital), redes que ligaram ou desligaram no meio do
+// caminho são escondidas e, num prédio com centenas de redes, ficam as mais presentes. Na saída,
+// um motor cuja conta degenerou não entra na média, e o mapa tem um tamanho máximo. Nos
+// levantamentos da bancada nada disso é acionado (o resultado é o mesmo, bit a bit); o que cada
+// cuidado evita está medido em tests/solver-robustness.test.mjs.
+//
+// Determinístico (nenhum sorteio; `options.seed` é aceito e não muda nada; entre máquinas de
+// JavaScript diferentes as posições podem diferir em centímetros, pela aritmética das funções
+// matemáticas), nunca lança erro e roda num Web Worker: só importa os módulos solver-* desta
+// pasta e types.js.
 
 import { FLOOR_HEIGHT } from './types.js';
 import { clamp, cloudStats, finite, fitRigid, floorOf, median, now, pickScans, readSurvey, shareSpots, visitsOf } from './solver-common.js';
@@ -45,7 +56,7 @@ import { solveRange } from './solver-range.js';
  */
 export const SOLVER_INFO = {
   name: 'consenso de quatro motores (isomap + chain + fields + range)',
-  version: '1.0.0',
+  version: '1.1.0',
   /** Erro mediano típico de posição (m): casa ou apartamento; escritório grande (~20 x 14 m). */
   expectedErrorM: { casa: 1.3, escritorio: 2.3 },
   notes: [
@@ -59,7 +70,7 @@ export const SOLVER_INFO = {
 
 /** Tempo padrão de solve() (ms nesta máquina de referência; o celular é 3 a 5 vezes mais lento). */
 const DEFAULT_BUDGET_MS = 6000;
-/** Acima disto as visitas são raleadas antes de resolver (o custo dos motores cresce com o quadrado ou o cubo). */
+/** Visitas que os motores recebem, no máximo (o custo deles cresce com o quadrado ou o cubo); acima disto, só blocos (ver engineView). */
 const MAX_VISITS = 300;
 const QUICK_MAX_VISITS = 240;
 /** Andares distintos que os motores recebem; além disto os menos visitados se juntam ao vizinho (ver limitFloors). */
@@ -106,6 +117,12 @@ const POINT_ERR_PER_SPREAD = 0.8;
 const SURVEY_ERR_FLOOR_M = 0.5;
 const SURVEY_ERR_PER_SPREAD = 1.3;
 const CONF_HALF_M = 1.5; // erro esperado em que a confiança de um ponto cai para 0,5
+// Com duas ou três redes à vista (casa isolada) os motores erram JUNTOS: concordam entre si e a
+// discordância não denuncia nada. Medido com os levantamentos da bancada reduzidos às 2 ou 3 redes
+// mais ouvidas: erro mediano real de 2,0 a 2,3 m contra 1,3 m declarados, e mapa ~38% menor que o
+// real. O erro esperado é multiplicado por até isto quando há menos de FEW_RADIOS rádios úteis.
+const FEW_RADIOS = 6;
+const FEW_RADIOS_PENALTY = 1.65;
 // Distância medida pelo usuário: variância (m²) da distância entre dois pontos do mapa dividida pela
 // variância relativa da escala sem medida nenhuma; ver applyKnownDistances().
 const KNOWN_BASE_M2 = 80;
@@ -126,8 +143,11 @@ const KNOWN_BASE_M2 = 80;
  * @param {{cancelled: boolean}} [options.signal]  conferido entre as etapas: cancelado, devolve logo o que tiver
  * @param {import('./types.js').MapSolution} [options.previous]  solução anterior do mesmo levantamento
  *        (por exemplo a última prévia): o resultado sai no referencial dela, sem girar nem espelhar na tela
- * @returns {Promise<import('./types.js').MapSolution>}  `debug` traz os motores usados, os tempos, a
- *          discordância mediana entre eles (agreementM) e o erro esperado (expectedErrorM)
+ * @returns {Promise<import('./types.js').MapSolution>}  `debug` (pequeno, cabe numa mensagem) traz os
+ *          motores usados e os tempos (members), os que não rodaram (skipped) ou ficaram fora da
+ *          média (outliers), a discordância mediana entre eles (agreementM), o erro esperado
+ *          (expectedErrorM) e o que foi feito com o levantamento: redes instáveis escondidas
+ *          (unstable, BSSIDs), paradas longas reconhecidas (standstills) e blocos (blocks)
  */
 export async function solve(survey, options) {
   const opts = options && typeof options === 'object' ? options : {};
@@ -262,11 +282,12 @@ export function solveQuick(survey, options) {
     const r = solveIsomap(sub, { budgetMs: Number.isFinite(opts.budgetMs) && opts.budgetMs > 0 ? opts.budgetMs : 60000 });
     if (!usable(r, sub.n)) return collapsed(survey, 'prévia sem solução');
     // Um motor só: não há discordância para medir; fica a confiança dele, rebaixada (é só a prévia).
-    const conf = Float64Array.from(r.conf, (c) => 0.8 * c);
+    const poor = fewRadiosFactor(sub);
+    const conf = Float64Array.from(r.conf, (c) => (0.8 * c) / (poor * poor));
     const part = { x: r.x, y: r.y, conf, aps: { ...r.aps } };
     placeHidden(heard, [...hidden, ...spare], part);
     const full = expand(view, prepared, part);
-    const ownScale = capSize(view, full) ? 0.8 * r.scaleConf : 0;
+    const ownScale = capSize(view, full) ? (0.8 * r.scaleConf) / (poor * poor) : 0;
     const trust = applyKnownDistances(view, knownPairs(survey, view), full);
     orient(view, full, opts.previous);
     const solution = toSolution(view, full, trust > 0 ? Math.max(ownScale, 0.95 * trust) : ownScale);
@@ -284,7 +305,15 @@ export function solveQuick(survey, options) {
 /** Resposta de quem não conseguiu nada: tudo no centro, confiança zero (válida pelo contrato). */
 function collapsed(survey, why) {
   const scans = survey && Array.isArray(survey.scans) ? survey.scans : [];
-  const points = scans.map((s) => ({ x: 0, y: 0, z: floorOf(s) * FLOOR_HEIGHT, conf: 0 }));
+  const points = scans.map((s) => {
+    let z = 0;
+    try {
+      z = floorOf(s) * FLOOR_HEIGHT;
+    } catch (_) {
+      // este é o caminho de quem já falhou: nada aqui pode lançar
+    }
+    return { x: 0, y: 0, z, conf: 0 };
+  });
   return { points, aps: {}, scaleConf: 0, debug: { members: [], skipped: [], error: why } };
 }
 
@@ -1025,6 +1054,7 @@ function combine(results, view) {
   for (const s of shapes) logSpread += (Math.log(s.scale) - logSize) ** 2 / C;
   logSpread = Math.sqrt(logSpread);
 
+  const poor = fewRadiosFactor(view);
   const x = new Float64Array(n);
   const y = new Float64Array(n);
   const conf = new Float64Array(n);
@@ -1041,7 +1071,7 @@ function combine(results, view) {
     }
     // Com menos motores a distância à média subestima a discordância: acerta para o equivalente a quatro.
     spreads[i] = C > 1 ? Math.sqrt(s2) * size * Math.sqrt((0.75 * C) / (C - 1)) : NaN;
-    conf[i] = C > 1 ? 1 / (1 + ((POINT_ERR_FLOOR_M + POINT_ERR_PER_SPREAD * spreads[i]) / CONF_HALF_M) ** 2) : own;
+    conf[i] = C > 1 ? 1 / (1 + ((poor * (POINT_ERR_FLOOR_M + POINT_ERR_PER_SPREAD * spreads[i])) / CONF_HALF_M) ** 2) : own / (poor * poor);
   }
   const agreementM = C > 1 ? median(spreads) : NaN;
 
@@ -1085,8 +1115,25 @@ function combine(results, view) {
   for (const c of pool) scaleConf += results[c].scaleConf / C;
   if (C > 1) scaleConf *= clamp(1.15 - 1.5 * logSpread, 0.5, 1);
   scaleConf *= clamp(1 - 0.16 * (cloudStats(x, y).radius - 3.5), 0.6, 1);
-  const expectedErrorM = C > 1 ? SURVEY_ERR_FLOOR_M + SURVEY_ERR_PER_SPREAD * agreementM : NaN;
+  scaleConf /= poor * poor;
+  const expectedErrorM = C > 1 ? poor * (SURVEY_ERR_FLOOR_M + SURVEY_ERR_PER_SPREAD * agreementM) : NaN;
   return { x, y, conf, aps, scaleConf, agreementM, expectedErrorM, pool };
+}
+
+/**
+ * Quanto o erro esperado cresce por haver poucas redes à vista: 1 com FEW_RADIOS rádios úteis ou
+ * mais (ouvidos em pelo menos 10% das varreduras), FEW_RADIOS_PENALTY com três ou menos.
+ */
+function fewRadiosFactor(view) {
+  const { n, K, rssi } = view;
+  const enough = Math.max(3, 0.1 * n);
+  let radios = 0;
+  for (let k = 0; k < K && radios < FEW_RADIOS; k++) {
+    let hits = 0;
+    for (let i = 0; i < n && hits < enough; i++) if (rssi[i * K + k] === rssi[i * K + k]) hits++;
+    if (hits >= enough) radios++;
+  }
+  return 1 + (FEW_RADIOS_PENALTY - 1) * clamp((FEW_RADIOS - radios) / 3, 0, 1);
 }
 
 /**

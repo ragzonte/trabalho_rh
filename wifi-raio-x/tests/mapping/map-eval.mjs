@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Bancada do construtor do mapa (app/js/mapping/mapmodel.js).
 //
-//   node tests/mapping/map-eval.mjs [--truth | --solver <módulo>] [--export nome] [--only <trecho>]
+//   node tests/mapping/map-eval.mjs [--truth | --solver <módulo>] [--export nome] [--set dev|val] [--only <trecho>]
 //        [--json] [--svg <pasta>] [--jobs N] [--budget-ms N] [--cache <pasta>] [--noise <m>]
-//        [--no-labels] [--own track|all] [--describe] [--param chave=valor ...]
+//        [--no-labels] [--auto-rooms] [--own track|all] [--describe] [--param chave=valor ...]
 //
 // Para cada cenário de desenvolvimento (os mesmos de harness.mjs) monta o levantamento, obtém
 // uma solução, chama buildMap e compara o mapa com a planta de verdade, depois do MESMO
@@ -15,13 +15,19 @@
 //
 // Medidas (por cenário):
 //   IoU / razão  área estimada x contorno real, por andar (média dos andares);
+//   esc          tamanho da nuvem de pontos desenhada / real (raio quadrático médio em torno do centro);
 //   ARI          índice de Rand ajustado entre os ambientes estimados e os cômodos reais nas células
 //                realmente de dentro (célula que o mapa deixou de fora = um grupo à parte);
 //                ARIin = o mesmo só onde o mapa tem área;
 //   amb          quantos ambientes o mapa tem / quantos cômodos existem;
-//   calor        RMSE (dB) entre heatField e o sinal médio real da rede da casa (o rádio mais forte
-//                do roteador; rede com vários BSSIDs = o maior entre eles), nas células de dentro;
-//                c>.5 = só onde a confiança do campo passa de 0,5; viés = média (estimado - real);
+//                (no JSON: roomPurity = de cada ambiente desenhado, a parte que é de um cômodo só;
+//                roomComplete = de cada cômodo, a parte que ficou num ambiente só; nameAcc = das células
+//                de um ambiente com nome dado pelo usuário, quantas são mesmo do cômodo com esse nome);
+//   calor        RMSE (dB) entre heatField e o sinal real da rede da casa COM O CELULAR NA MÃO (o campo
+//                médio menos a perda média do corpo de quem segura o aparelho: é o que o app mede e o
+//                que o usuário terá naquele lugar; rede com vários BSSIDs = o maior entre eles), nas
+//                células de dentro; c>.5 = só onde a confiança do campo passa de 0,5; viés = média
+//                (estimado - real). No JSON, heatRmseFree / heatBiasFree comparam com o campo sem corpo;
 //   rot          erro de posição do roteador da casa (mediana entre os aparelhos), em metros;
 //   parP / parR  divisões internas: fração do comprimento estimado que tem parede real a até 0,6 m
 //                (parPc = a mesma fração pesada pela confiança de cada divisão: maior que parP quando a
@@ -29,7 +35,8 @@
 //                com divisão estimada a até 0,75 m;
 //   errE / errR  erro de posição esperado (quality.expectedErrorM) x erro mediano real dos pontos.
 //
-// Só o conjunto de desenvolvimento: o holdout é para julgar solucionadores, não para ajustar o mapa.
+// Conjuntos: dev (padrão) e val (--set val: outras sementes e casas sorteadas, daqui mesmo). O
+// holdout de harness.mjs é para julgar solucionadores, não para ajustar o mapa: não entra aqui.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -37,7 +44,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
-import { createRng } from '../../app/js/sim/prng.js';
+import { createRng, hashSeed } from '../../app/js/sim/prng.js';
 import { distToSegment, pointInPolygon } from '../../app/js/sim/world.js';
 import { FLOOR_HEIGHT } from '../../app/js/mapping/types.js';
 import { buildMap, heatField, coverage, suggestRouterSpot, describeMap } from '../../app/js/mapping/mapmodel.js';
@@ -53,6 +60,71 @@ const ROUTER_MISSING_M = 50;
 export function defaultSolver() {
   const official = path.join(APP_MAPPING, 'solver.js');
   return fs.existsSync(official) ? official : path.join(APP_MAPPING, 'candidates', 'geo.js');
+}
+
+// ---------------------------------------------------------------------------
+// Cenários
+// ---------------------------------------------------------------------------
+
+const VAL_SEEDS = [5, 6];
+const VAL_SIZES = ['pequena', 'media', 'grande'];
+
+/**
+ * Cenários desta bancada.
+ *   dev  os 32 de desenvolvimento de harness.mjs (onde as constantes do construtor foram ajustadas);
+ *   val  conferência de que um ajuste não é decoreba do dev: os mesmos quatro mundos com outras
+ *        sementes (outra vizinhança, outro usuário, outra caminhada) e 24 casas sorteadas com a
+ *        propagação variando ±20%. As sementes são daqui (prefixo próprio): nada a ver com o
+ *        holdout de harness.mjs, que continua reservado para julgar solucionadores.
+ * @param {'dev'|'val'} set
+ */
+export function listMapScenarios(set = 'dev') {
+  const dev = listScenarios('dev');
+  if (set === 'dev') return dev;
+  if (set !== 'val') throw new Error(`conjunto desconhecido: ${set} (use dev ou val)`);
+  const out = [];
+  const modes = [...new Set(dev.map((d) => d.mode))];
+  for (const base of dev.filter((d) => d.name.endsWith('-s1'))) {
+    const m = modes.indexOf(base.mode);
+    for (const seed of VAL_SEEDS) {
+      out.push({
+        ...base,
+        name: base.name.replace(/-s1$/, `-v${seed}`),
+        set: 'val',
+        world: { ...base.world, seed },
+        walk: { ...base.walk, seed: 10 * seed + m },
+        survey: { ...base.survey, seed: 10 * seed + m },
+      });
+    }
+  }
+  const kinds = Object.fromEntries(dev.map((d) => [d.mode, d]));
+  for (let i = 0; i < 24; i++) {
+    const mode = modes[i % modes.length];
+    const size = VAL_SIZES[Math.floor(i / modes.length) % VAL_SIZES.length];
+    const name = `casa-v${String(i + 1).padStart(2, '0')}-${size}-${mode}`;
+    const seed = (what) => hashSeed('wrx-map-val', name, what);
+    const rng = createRng('wrx-map-val-rf', name);
+    const vary = (v) => Math.round(v * rng.float(0.8, 1.2) * 1000) / 1000;
+    out.push({
+      name,
+      set: 'val',
+      group: 'casa-sorteada',
+      mode,
+      world: { type: 'random', seed: seed('world'), size },
+      rf: {
+        n: Math.round(2.1 * rng.float(0.88, 1.2) * 1000) / 1000,
+        wallScale: vary(1),
+        shadowSigmaDb: vary(3),
+        fadeSigmaDb: vary(1.4),
+        noiseSigmaDb: vary(1.4),
+        bodyLossDb: [vary(5), vary(6), vary(6)],
+        staleCarry: rng.chance(0.5),
+      },
+      walk: { kind: kinds[mode].walk.kind, seed: seed('walk'), auto: true },
+      survey: { scanIntervalS: kinds[mode].survey.scanIntervalS, stillScans: kinds[mode].survey.stillScans, seed: seed('survey') },
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -103,7 +175,14 @@ const num = (v) => (typeof v === 'number' ? v : NaN);
     const aps = {};
     for (const [id, a] of Object.entries(s.aps || {})) if (a) aps[id] = { x: num(a.x), y: num(a.y), z: num(a.z), p0: num(a.p0), n: num(a.n), conf: num(a.conf) };
     const points = s.points.map((p) => (p ? { x: num(p.x), y: num(p.y), z: num(p.z), conf: num(p.conf) } : null));
-    parentPort.postMessage({ ok: true, ms, solution: { points, aps, scaleConf: num(s.scaleConf) } });
+    // O resumo que o solucionador declara (motores, discordância, erro esperado) vai junto se for pequeno,
+    // como no app (worker.js): o construtor pode usá-lo.
+    let debug;
+    try {
+      const text = JSON.stringify(s.debug);
+      if (typeof text === 'string' && text.length <= 4000) debug = JSON.parse(text);
+    } catch (_) {}
+    parentPort.postMessage({ ok: true, ms, solution: { points, aps, scaleConf: num(s.scaleConf), debug } });
   } catch (err) {
     parentPort.postMessage({ ok: false, error: String((err && err.stack) || err) });
   }
@@ -204,15 +283,22 @@ function strongestOwnRadio(world, survey) {
  */
 export function evaluateMap(scenario, solution, options = {}) {
   const { survey, truth, world } = scenario;
-  const own =
-    options.own === 'all' || !survey.track || !survey.track.length
+  // (options.own pode ser a própria lista de BSSIDs "da casa", como o app a monta: tests/e2e/quality.mjs)
+  const own = Array.isArray(options.own)
+    ? options.own
+    : options.own === 'all' || !survey.track || !survey.track.length
       ? world.aps.filter((a) => a.own && survey.aps[a.bssid]).map((a) => a.bssid)
       : [...new Set(survey.track.map((s) => s.id))];
   const t0 = performance.now();
-  const model = buildMap(survey, solution, { own, labels: options.labels, tune: options.tune, debug: true });
+  const model = buildMap(survey, solution, { own, labels: options.labels, autoRooms: options.autoRooms, tune: options.tune, debug: true });
   const buildMs = performance.now() - t0;
+  if (typeof options.alter === 'function') options.alter(model); // (estudos: troca algo do modelo antes de medir)
 
-  const fit = procrustes(solution.points, truth.points, { scale: false });
+  // O alinhamento é o das posições que o MAPA desenha (model.path): o construtor pode corrigir o
+  // tamanho da nuvem do solucionador, e tudo o que ele desenha está nesse referencial.
+  const drawn = solution.points.map((p) => p);
+  for (const p of model.path) drawn[p.i] = p;
+  const fit = procrustes(drawn, truth.points, { scale: false });
   const M = fit.matrix;
   const T = fit.translation;
   // Planta real -> coordenadas do mapa: inverso do alinhamento (a matriz é ortogonal).
@@ -245,6 +331,20 @@ export function evaluateMap(scenario, solution, options = {}) {
   let hSq = 0;
   let cN = 0;
   let cSq = 0;
+  let fSum = 0;
+  let fSq = 0;
+  let namedN = 0;
+  let namedHit = 0;
+  // Sinal "na mão": o celular é segurado por uma pessoa, e o corpo dela tira alguns dB dos
+  // roteadores que ficam às costas. É isso que o app mede e é isso que o usuário vai ter naquele
+  // lugar; a referência é portanto o campo médio MENOS a perda média do corpo (média sobre a
+  // direção para onde a pessoa está virada: E[((1 - cos θ) / 2)²] = 3/8).
+  const bodyDb = (world.rf && world.rf.bodyLossDb) || [0, 0, 0];
+  const inHand = (ap, pos) => {
+    const horiz = Math.hypot(ap.x - pos.x, ap.y - pos.y);
+    const d = Math.hypot(horiz, ap.z - pos.z);
+    return world.meanRssi(ap, pos) - (d > 1e-6 ? 0.375 * (bodyDb[ap.band] || 0) * (horiz / d) : 0);
+  };
   for (let k = 0; k < world.floors; k++) {
     const fi = floorIndex(k);
     const floor = fi >= 0 ? model.floors[fi] : null;
@@ -275,15 +375,27 @@ export function evaluateMap(scenario, solution, options = {}) {
           const guess = estIn ? `${fi}:${floor.room[c]}` : 'fora';
           bump(tableAll, `${room.index}|${guess}`);
           if (estIn) bump(tableIn, `${room.index}|${guess}`);
+          // Ambiente com nome dado pelo usuário: a célula é mesmo do cômodo com esse nome?
+          const drawnRoom = estIn ? floor.rooms[floor.room[c]] : null;
+          if (drawnRoom && !drawnRoom.auto) {
+            namedN++;
+            if (drawnRoom.label.trim().toLowerCase() === String(room.name).trim().toLowerCase()) namedHit++;
+          }
         }
         if (estIn && field && field.dbm[c] === field.dbm[c]) {
           let real = -Infinity;
+          let free = -Infinity;
           const pos = { x, y, z: world.phoneZ(k) };
-          for (const ap of netAps) real = Math.max(real, world.meanRssi(ap, pos));
+          for (const ap of netAps) {
+            real = Math.max(real, inHand(ap, pos));
+            free = Math.max(free, world.meanRssi(ap, pos));
+          }
           const d = field.dbm[c] - real;
           hN++;
           hSum += d;
           hSq += d * d;
+          fSum += field.dbm[c] - free;
+          fSq += (field.dbm[c] - free) ** 2;
           if (field.conf[c] > 0.5) {
             cN++;
             cSq += d * d;
@@ -373,8 +485,31 @@ export function evaluateMap(scenario, solution, options = {}) {
     }
   }
 
+  // Pureza: de cada ambiente desenhado, a parte que é de um cômodo só (o dominante); completude: de
+  // cada cômodo real, a parte que ficou num ambiente só. Médias pesadas pela área, só onde o mapa
+  // tem área. Um ambiente único por andar tem completude 1 e pureza = fatia do maior cômodo.
+  const byEst = new Map();
+  const byReal = new Map();
+  let cellsIn = 0;
+  for (const [key, count] of tableIn) {
+    const [a, g] = key.split('|');
+    if (!byEst.has(g)) byEst.set(g, []);
+    if (!byReal.has(a)) byReal.set(a, []);
+    byEst.get(g).push(count);
+    byReal.get(a).push(count);
+    cellsIn += count;
+  }
+  const dominant = (groups) => [...groups.values()].reduce((s, list) => s + Math.max(...list), 0);
   const errs = fit.aligned.map((p, i) => Math.hypot(p.x - truth.points[i].x, p.y - truth.points[i].y));
   const roomsEst = model.floors.reduce((s, f) => s + f.rooms.length, 0);
+  // Tamanho da nuvem (raio quadrático médio em torno do centro): desenhada / real, e a do solucionador / real.
+  const radius = (pts) => {
+    const n = pts.length || 1;
+    const cx = pts.reduce((s, p) => s + p.x, 0) / n;
+    const cy = pts.reduce((s, p) => s + p.y, 0) / n;
+    return Math.sqrt(pts.reduce((s, p) => s + (p.x - cx) ** 2 + (p.y - cy) ** 2, 0) / n);
+  };
+  const realRadius = radius(truth.points);
   const metrics = {
     iou: mean(ious),
     ratio: mean(ratios),
@@ -383,10 +518,18 @@ export function evaluateMap(scenario, solution, options = {}) {
     ariIn: adjustedRand(tableIn),
     rooms: roomsEst,
     roomsTrue: world.rooms.length,
+    roomPurity: cellsIn ? dominant(byEst) / cellsIn : null,
+    roomComplete: cellsIn ? dominant(byReal) / cellsIn : null,
+    nameAcc: namedN ? namedHit / namedN : null,
+    namedShare: cellsIn ? namedN / cellsIn : null,
     heatRmse: hN ? Math.sqrt(hSq / hN) : null,
     heatRmseConf: cN ? Math.sqrt(cSq / cN) : null,
     heatBias: hN ? hSum / hN : null,
+    heatRmseFree: hN ? Math.sqrt(fSq / hN) : null,
+    heatBiasFree: hN ? fSum / hN : null,
     heatConfShare: hN ? cN / hN : null,
+    scale: realRadius > 1e-9 ? radius(drawn) / realRadius : null,
+    scaleRaw: realRadius > 1e-9 ? radius(solution.points) / realRadius : null,
     routerErr: routerErr.length ? quantile(routerErr, 0.5) : null,
     routerFloorOk: routerErr.length ? floorOk / routerErr.length : null,
     wallP: wallLen ? wallHit / wallLen : null,
@@ -630,9 +773,9 @@ export function renderMapSvg(scenario, evaluated, result) {
  * @param {Object} run  truth, solverPath, exportName, only, jobs, budgetMs, cacheDir, svgDir, noise, labels, own, tune, onResult
  */
 export async function runMapBench(run) {
-  let scenarios = listScenarios('dev');
+  let scenarios = listMapScenarios(run.set || 'dev');
   if (run.only) scenarios = scenarios.filter((s) => s.name.includes(run.only));
-  if (!scenarios.length) throw new Error(`nenhum cenário de desenvolvimento tem "${run.only}" no nome`);
+  if (!scenarios.length) throw new Error(`nenhum cenário tem "${run.only}" no nome`);
   const source = run.truth ? (run.noise > 0 ? `posições reais + ruído de ${run.noise} m` : 'posições reais') : `solucionador ${path.basename(run.solverPath)}`;
   const results = new Array(scenarios.length);
   let next = 0;
@@ -656,7 +799,10 @@ export async function runMapBench(run) {
       solveMs = reply.ms;
     }
     try {
-      const evaluated = evaluateMap(scenario, solution, { labels: run.labels, own: run.own, tune: run.tune });
+      // Posições reais + ruído NÃO são uma estimativa encolhida (o ruído soma espalhamento em vez de
+      // tirar): a correção de tamanho do construtor não se aplica a elas.
+      const tune = run.truth && run.noise > 0 ? { sizeGain: 0, ...run.tune } : run.tune;
+      const evaluated = evaluateMap(scenario, solution, { labels: run.labels, autoRooms: run.autoRooms, own: run.own, tune });
       const result = { ...base, ok: true, solveMs, ...evaluated.metrics };
       if (run.svgDir) {
         fs.mkdirSync(run.svgDir, { recursive: true });
@@ -692,7 +838,7 @@ export async function runMapBench(run) {
   return { source, results, groups: by('group'), modes: by('mode'), total: summarise(results) };
 }
 
-const SUMMARY_KEYS = ['iou', 'ratio', 'ari', 'ariIn', 'rooms', 'roomsTrue', 'heatRmse', 'heatRmseConf', 'heatBias', 'heatConfShare', 'routerErr', 'wallP', 'wallPConf', 'wallR', 'expErr', 'realErr', 'buildMs', 'heatMs'];
+const SUMMARY_KEYS = ['iou', 'ratio', 'scale', 'scaleRaw', 'ari', 'ariIn', 'rooms', 'roomsTrue', 'roomPurity', 'roomComplete', 'nameAcc', 'namedShare', 'heatRmse', 'heatRmseConf', 'heatBias', 'heatRmseFree', 'heatBiasFree', 'heatConfShare', 'routerErr', 'wallP', 'wallPConf', 'wallR', 'expErr', 'realErr', 'buildMs', 'heatMs'];
 
 /** Médias das medidas de uma lista de resultados (as falhas ficam de fora e são contadas). */
 export function summarise(list) {
@@ -723,6 +869,7 @@ function parseArgs(argv) {
     else if (a === '--solver') args.solverPath = value();
     else if (a === '--export') args.exportName = value();
     else if (a === '--only') args.only = value();
+    else if (a === '--set') args.set = value();
     else if (a === '--json') args.json = true;
     else if (a === '--svg') args.svgDir = value();
     else if (a === '--jobs') args.jobs = Number(value());
@@ -730,6 +877,7 @@ function parseArgs(argv) {
     else if (a === '--cache') args.cacheDir = value();
     else if (a === '--noise') args.noise = Number(value());
     else if (a === '--no-labels') args.labels = false;
+    else if (a === '--auto-rooms') args.autoRooms = true;
     else if (a === '--own') args.own = value();
     else if (a === '--describe') args.describe = true;
     else if (a === '--param') {
@@ -743,6 +891,7 @@ function parseArgs(argv) {
   if (!Number.isFinite(args.budgetMs) || args.budgetMs <= 0) throw new Error('--budget-ms precisa ser um número positivo');
   if (args.noise !== undefined && !(args.noise >= 0)) throw new Error('--noise precisa ser um número de metros');
   if (!['track', 'all'].includes(args.own)) throw new Error('--own aceita track ou all');
+  if (args.set !== undefined && !['dev', 'val'].includes(args.set)) throw new Error('--set aceita dev ou val (o holdout é só para julgar solucionadores)');
   return args;
 }
 
@@ -765,13 +914,17 @@ const HELP = `Bancada do construtor do mapa (mapmodel.js)
   --noise <m>          com --truth: soma um erro suave de <m> metros às posições reais
   --solver <caminho>   módulo que exporta solve(survey, options) (padrão: solver.js ou candidates/geo.js)
   --export <nome>      nome da função exportada (padrão: solve)
+  --set dev|val        dev (padrão): os 32 cenários de desenvolvimento; val: outras sementes e casas
+                       sorteadas, para conferir que um ajuste do construtor não é decoreba do dev
   --only <trecho>      só os cenários cujo nome contém o trecho
   --jobs <n>           solucionadores em paralelo (padrão: 2; a máquina é compartilhada)
   --budget-ms <n>      tempo máximo do solucionador por cenário (padrão: ${DEFAULT_BUDGET_MS})
   --cache <pasta>      guarda/reaproveita a solução de cada cenário (fora do repositório)
   --svg <pasta>        grava um desenho por cenário (fora do repositório)
   --json               imprime tudo em JSON
-  --no-labels          ignora os nomes dos pontos marcados (ambientes só automáticos)
+  --no-labels          ignora os nomes dos pontos marcados (o mapa sai sem divisão em ambientes)
+  --auto-rooms         força o agrupamento automático em ambientes mesmo sem nomes (o app não faz isso:
+                       serve para medir de novo por que não faz)
   --own track|all      quais BSSIDs entram como "da casa": a rede conectada (padrão) ou todos os do roteador
   --describe           inclui describeMap() de cada cenário no JSON
   --param chave=valor  troca uma constante do construtor (experimentos)
@@ -785,7 +938,7 @@ function f(v, width, digits = 2) {
 }
 
 const HEADER =
-  'cenário'.padEnd(32) + ' var' + '   IoU' + ' razão' + '   ARI' + ' ARIin' + '   amb' + ' calor' + '  c>.5' + '  viés' + '   rot' + '  parP' + ' parPc' + '  parR' + '  errE' + '  errR' + '  mapa ms' + ' calor ms';
+  'cenário'.padEnd(32) + ' var' + '   IoU' + ' razão' + '   esc' + '   ARI' + ' ARIin' + '   amb' + ' calor' + '  c>.5' + '  viés' + '   rot' + '  parP' + ' parPc' + '  parR' + '  errE' + '  errR' + '  mapa ms' + ' calor ms';
 
 function row(r) {
   if (!r.ok) return `${r.name.padEnd(32)}${String(r.scans).padStart(4)}  FALHOU: ${String(r.error).split('\n')[0].slice(0, 100)}`;
@@ -794,6 +947,7 @@ function row(r) {
     String(r.scans).padStart(4) +
     f(r.iou, 6) +
     f(r.ratio, 6) +
+    f(r.scale, 6) +
     f(r.ari, 6) +
     f(r.ariIn, 6) +
     `${r.rooms}/${r.roomsTrue}`.padStart(6) +
@@ -812,7 +966,7 @@ function row(r) {
 }
 
 const SUMMARY_HEADER =
-  'grupo'.padEnd(18) + '  n' + ' falhas' + '   IoU' + ' razão' + '   ARI' + ' ARIin' + '      amb' + ' calor' + '  c>.5' + '  viés' + '   rot' + '  parP' + ' parPc' + '  parR' + '  errE' + '  errR' + '  mapa ms' + ' calor ms';
+  'grupo'.padEnd(18) + '  n' + ' falhas' + '   IoU' + ' razão' + '   esc' + '   ARI' + ' ARIin' + '      amb' + ' calor' + '  c>.5' + '  viés' + '   rot' + '  parP' + ' parPc' + '  parR' + '  errE' + '  errR' + '  mapa ms' + ' calor ms';
 
 function summaryRow(name, a) {
   return (
@@ -821,6 +975,7 @@ function summaryRow(name, a) {
     String(a.failures).padStart(7) +
     f(a.iou, 6) +
     f(a.ratio, 6) +
+    f(a.scale, 6) +
     f(a.ari, 6) +
     f(a.ariIn, 6) +
     `${f(a.rooms, 4, 1)}/${f(a.roomsTrue, 4, 1).trim()}`.padStart(9) +

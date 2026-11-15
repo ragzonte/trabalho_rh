@@ -18,7 +18,9 @@ const HOSTILE = '<img src=x onerror=alert(1)>';
 // Um mapa de verdade (levantamento simulado + posições verdadeiras como "solução")
 // ---------------------------------------------------------------------------
 
-function makeMap(worldId = 'apartamento', { labelRate = 1, kind = 'spots' } = {}) {
+// `autoRooms`: força o agrupamento automático em ambientes (o app só divide o andar quando há pelo
+// menos dois lugares com nome; "Ambiente N" aparece nele como sobra entre os ambientes com nome).
+function makeMap(worldId = 'apartamento', { labelRate = 1, kind = 'spots', autoRooms = false } = {}) {
   const world = presetWorld(worldId, 1);
   const { survey, truth } = simulateSurvey(world, planWalk(world, { kind }), { labelRate });
   // a verdade serve de solução: o que interessa aqui é a lógica da tela, não o solucionador
@@ -27,7 +29,7 @@ function makeMap(worldId = 'apartamento', { labelRate = 1, kind = 'spots' } = {}
   for (const ap of world.aps) aps[ap.bssid] = { x: ap.x, y: ap.y, z: ap.z, p0: -40, n: 2.2, conf: 0.7 };
   const solution = { points, aps, scaleConf: 0.6 };
   const own = world.aps.filter((a) => a.own).map((a) => a.bssid);
-  const model = buildMap(survey, solution, { own });
+  const model = buildMap(survey, solution, { own, autoRooms });
   return { world, survey, solution, own, model };
 }
 
@@ -400,9 +402,14 @@ test('renameRoom: ambiente com nome -> os pontos marcados com aquele nome mudam;
 });
 
 test('renameRoom: ambiente automático -> uma varredura central vira ponto marcado com o nome (ou o ponto sem nome que já estava lá)', () => {
-  const { survey, solution, own, model } = makeMap('apartamento', { labelRate: 0, kind: 'tour' });
+  // sem nenhum lugar com nome o mapa não tem ambientes: não há o que renomear
+  const plain = makeMap('apartamento', { labelRate: 0, kind: 'tour' });
+  assert.equal(plain.model.floors[0].rooms.length, 0);
+  assert.equal(L.renameRoom(plain.survey, plain.model, 0, 0, 'Sala'), null);
+
+  const { survey, solution, own, model } = makeMap('apartamento', { labelRate: 0, kind: 'tour', autoRooms: true });
   const room = model.floors[0].rooms.find((r) => r.auto);
-  assert.ok(room, 'sem nomes, os ambientes são automáticos');
+  assert.ok(room, 'com o agrupamento forçado e sem nomes, os ambientes são automáticos');
   const next = L.renameRoom(survey, model, 0, room.id, 'Sala de TV');
   assert.ok(next);
   const named = next.scans.filter((s) => s.label === 'Sala de TV');
@@ -410,7 +417,7 @@ test('renameRoom: ambiente automático -> uma varredura central vira ponto marca
   assert.equal(named.every((s) => s.still === true && Number.isInteger(s.spot)), true);
   assert.deepEqual(validateSurvey(next), []);
   assert.equal(sanitizeSurvey(next).scans.filter((s) => s.label === 'Sala de TV').length, named.length);
-  const again = buildMap(next, solution, { own });
+  const again = buildMap(next, solution, { own, autoRooms: true });
   assert.ok(again.floors[0].rooms.some((r) => r.label === 'Sala de TV'), 'o ambiente aparece com o nome novo');
   assert.equal(L.renameRoom(survey, model, 0, room.id, ''), null, 'automático sem nome: nada a fazer');
   assert.equal(L.renameRoom(survey, model, 0, 9999, 'x'), null);
@@ -418,7 +425,7 @@ test('renameRoom: ambiente automático -> uma varredura central vira ponto marca
   assert.equal(L.renameRoom(null, model, 0, room.id, 'x'), null);
 
   // com um ponto marcado sem nome dentro do ambiente, é ele que ganha o nome
-  const spots = makeMap('apartamento', { labelRate: 0, kind: 'spots' });
+  const spots = makeMap('apartamento', { labelRate: 0, kind: 'spots', autoRooms: true });
   const auto = spots.model.floors[0].rooms.find((r) => r.auto && r.scans > 0);
   const labelled = L.renameRoom(spots.survey, spots.model, 0, auto.id, 'Copa');
   assert.ok(labelled);

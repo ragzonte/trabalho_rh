@@ -175,13 +175,19 @@ function assertShape(model, scanCount) {
     assert.ok(f.conf instanceof Float32Array && f.conf.length === size);
     assert.ok(f.room instanceof Int16Array && f.room.length === size);
     const cellsOf = new Array(f.rooms.length).fill(0);
+    let floorCells = 0;
     for (let c = 0; c < size; c++) {
       assert.ok(f.inside[c] === 0 || f.inside[c] === 1);
       assert.ok(f.conf[c] >= 0 && f.conf[c] <= 1);
       if (f.inside[c]) {
         areaCells++;
-        assert.ok(f.room[c] >= 0 && f.room[c] < f.rooms.length, `célula de dentro sem ambiente válido (${f.room[c]})`);
-        cellsOf[f.room[c]]++;
+        floorCells++;
+        // Andar sem divisão em ambientes (menos de dois lugares com nome): rooms vazio e -1 em todas as células.
+        if (!f.rooms.length) assert.equal(f.room[c], -1, 'andar sem ambientes: nenhuma célula tem ambiente');
+        else {
+          assert.ok(f.room[c] >= 0 && f.room[c] < f.rooms.length, `célula de dentro sem ambiente válido (${f.room[c]})`);
+          cellsOf[f.room[c]]++;
+        }
       } else {
         assert.equal(f.room[c], -1);
         assert.equal(f.conf[c], 0);
@@ -207,7 +213,7 @@ function assertShape(model, scanCount) {
     });
 
     assert.ok(Array.isArray(f.outline));
-    if (cellsOf.length) assert.ok(f.outline.length >= 1, 'área sem contorno');
+    if (floorCells) assert.ok(f.outline.length >= 1, 'área sem contorno');
     for (const ring of f.outline) {
       assert.ok(ring.length >= 4, 'anel com pelo menos 3 vértices + fechamento');
       assert.deepEqual(ring[0], ring[ring.length - 1], 'anel fechado (primeiro ponto repetido no fim)');
@@ -222,7 +228,7 @@ function assertShape(model, scanCount) {
       assert.ok(w.conf >= 0 && w.conf <= 1);
       assert.ok(Math.hypot(w.x2 - w.x1, w.y2 - w.y1) > 1e-6, 'parede de comprimento zero');
     }
-    if (cellsOf.length) assert.ok(f.walls.some((w) => w.kind === 'outer'));
+    if (floorCells) assert.ok(f.walls.some((w) => w.kind === 'outer'));
     if (f.rooms.length < 2) assert.ok(!f.walls.some((w) => w.kind === 'inner'));
   });
 
@@ -314,10 +320,22 @@ test('formato do MapModel num levantamento de um andar', () => {
   assert.equal(model.floors.length, 1);
   assert.equal(model.path.length, survey.scans.length);
   assert.ok(model.quality.areaM2 > 30 && model.quality.areaM2 < 80, `área ${model.quality.areaM2} m² num apartamento de 63 m²`);
-  const rooms = model.floors[0].rooms.length;
-  assert.ok(rooms >= 3 && rooms <= 8, `${rooms} ambientes automáticos num apartamento de 6 cômodos`);
-  assert.ok(model.floors[0].rooms.every((r) => r.auto));
+  // Caminhada sem nenhum lugar com nome: o mapa NÃO inventa ambientes (uma área só, sem divisões
+  // internas), e diz o que fazer para tê-los.
+  assert.equal(model.floors[0].rooms.length, 0);
+  assert.ok(!model.floors[0].walls.some((w) => w.kind === 'inner'));
+  assert.match(model.quality.notes.join(' | '), /não separa os ambientes porque nenhum lugar tem nome/);
+  assert.match(describeMap(model)[0], /sem divisão em ambientes/);
   assertAnalyses(model);
+
+  // O agrupamento automático pelo sinal continua existindo para a bancada medir (autoRooms).
+  const auto = buildMap(survey, solution, { own, autoRooms: true });
+  assertShape(auto, survey.scans.length);
+  const rooms = auto.floors[0].rooms.length;
+  assert.ok(rooms >= 3 && rooms <= 9, `${rooms} ambientes automáticos num apartamento de 6 cômodos`);
+  assert.ok(auto.floors[0].rooms.every((r) => r.auto));
+  assert.equal(auto.quality.areaM2, model.quality.areaM2, 'a área não depende de haver ambientes');
+  assertAnalyses(auto);
 });
 
 test('formato do MapModel com dois andares e pontos marcados', () => {
@@ -415,10 +433,12 @@ test('de 1 a 3 varreduras, um ponto só e pontos em linha', () => {
     const model = buildMap(survey, solution, { own: ['aa:00'] });
     assertShape(model, points.length);
     assert.equal(model.path.length, points.length, name);
-    // Onde houve varredura há área, e pouca: nada de inflar.
+    // Onde houve varredura há área, e pouca: nada de inflar. (As soluções de synth() têm confiança
+    // 0,9 = erro esperado de 0,5 m, e o alcance de cada ponto soma esse erro em quadratura:
+    // raiz(1 + 1,44 x 0,25) = 1,17 m em vez de 1 m, ou 1,36 vez a área.)
     assert.ok(model.quality.areaM2 > 0.5, `${name}: área ${model.quality.areaM2}`);
-    assert.ok(model.quality.areaM2 < 4 + 2.2 * points.length, `${name}: área ${model.quality.areaM2}`);
-    assert.equal(model.floors[0].rooms.length, 1, name);
+    assert.ok(model.quality.areaM2 < 1.36 * (4 + 2.2 * points.length), `${name}: área ${model.quality.areaM2}`);
+    assert.equal(model.floors[0].rooms.length, 0, `${name}: menos de dois lugares com nome, nenhum ambiente`);
     for (const p of model.path) {
       const c = Math.floor((p.y - model.bounds.minY) / model.cell) * model.nx + Math.floor((p.x - model.bounds.minX) / model.cell);
       assert.equal(model.floors[0].inside[c], 1, `${name}: varredura fora da área`);
@@ -486,6 +506,56 @@ test('ponto de pouca confiança, longe de tudo, não incha a área', () => {
   const trusted = buildMap(survey, bad, {});
   assertShape(trusted, points.length);
   assert.ok(trusted.quality.areaM2 > base.quality.areaM2 + 2, `área ${trusted.quality.areaM2} x ${base.quality.areaM2}`);
+});
+
+test('tamanho: o alcance de cada ponto soma o erro esperado dele; posição exata não muda nada', () => {
+  const points = serpentine(0.5, 0.5, 6.5, 5.5, 5, 0.8);
+  const aps = [{ id: 'aa:00', ssid: 'Casa', x: 2, y: 2 }, ...NEIGHBOURS];
+  const { survey, solution } = synth({ points, aps, conf: 1 });
+  const exact = buildMap(survey, solution, {});
+  assertShape(exact, points.length);
+  // Confiança 1 = erro esperado zero: igual a desligar a correção.
+  assert.equal(exact.quality.areaM2, buildMap(survey, solution, { tune: { areaErr: 0 } }).quality.areaM2);
+
+  // Confiança 0,5 = erro mediano esperado de 1,5 m: alcance raiz(1 + 1,44 x 1,5²) = 2,06 m em vez de 1 m.
+  const withConf = (conf) => ({ ...solution, points: solution.points.map((p) => ({ ...p, conf })) });
+  const wide = buildMap(survey, withConf(0.5), {});
+  assertShape(wide, points.length);
+  const ratio = wide.quality.areaM2 / exact.quality.areaM2;
+  assert.ok(ratio > 1.3 && ratio < 2.1, `área ${exact.quality.areaM2} -> ${wide.quality.areaM2} m²`);
+  // O que era área continua sendo, e a faixa que entrou só pela incerteza aparece como incerta.
+  let core = 0;
+  let fringe = 0;
+  let fringeConf = 0;
+  for (let c = 0; c < wide.nx * wide.ny; c++) {
+    const x = wide.bounds.minX + ((c % wide.nx) + 0.5) * wide.cell;
+    const y = wide.bounds.minY + (Math.floor(c / wide.nx) + 0.5) * wide.cell;
+    const ix = Math.floor((x - exact.bounds.minX) / exact.cell);
+    const iy = Math.floor((y - exact.bounds.minY) / exact.cell);
+    const was = ix >= 0 && iy >= 0 && ix < exact.nx && iy < exact.ny && exact.floors[0].inside[iy * exact.nx + ix] === 1;
+    if (was) {
+      core++;
+      assert.equal(wide.floors[0].inside[c], 1, 'a área de antes continua dentro');
+    } else if (wide.floors[0].inside[c]) {
+      fringe++;
+      fringeConf += wide.floors[0].conf[c];
+    }
+  }
+  assert.ok(core > 0 && fringe > 0);
+  assert.ok(fringeConf / fringe < 0.45, `confiança média da faixa de incerteza: ${fringeConf / fringe}`);
+  // As posições não saem do lugar: o que cresce é a área em volta delas.
+  assert.deepEqual(
+    wide.path.map((p) => [p.x, p.y]),
+    exact.path.map((p) => [p.x, p.y]),
+  );
+
+  // O alcance tem teto: confiança quase nula não vale mais do que 0,3 (erro esperado de 2,3 m).
+  assert.equal(buildMap(survey, withConf(0.02), {}).quality.areaM2, buildMap(survey, withConf(0.3), {}).quality.areaM2);
+  assert.ok(buildMap(survey, withConf(0.02), {}).quality.areaM2 < 3.2 * exact.quality.areaM2);
+
+  // Solução que colapsou (todos os pontos no mesmo lugar): não há nuvem para crescer.
+  const zero = { points: survey.scans.map(() => ({ x: 0, y: 0, z: 0, conf: 0.2 })), aps: {}, scaleConf: 0 };
+  assert.ok(buildMap(survey, zero, {}).quality.areaM2 < 8);
 });
 
 test('o que foi andado de A a B continua ligado, mesmo com varreduras espaçadas', () => {
@@ -585,10 +655,23 @@ test('duas salas com nome viram dois ambientes, com uma abertura onde o caminho 
   const length = inner.reduce((s, w) => s + Math.hypot(w.x2 - w.x1, w.y2 - w.y1), 0);
   assert.ok(length > 1 && length < 4, `comprimento da divisão: ${length} m`);
 
-  // Sem os nomes (labels: false) os ambientes são automáticos; com eles, nunca.
-  const auto = buildMap(survey, solution, { labels: false });
+  // Sem os nomes (labels: false) não há ambientes; forçando o agrupamento (bancada), são todos automáticos.
+  const plain = buildMap(survey, solution, { labels: false });
+  assertShape(plain, survey.scans.length);
+  assert.equal(plain.floors[0].rooms.length, 0);
+  assert.equal(plain.quality.areaM2, model.quality.areaM2);
+  const auto = buildMap(survey, solution, { labels: false, autoRooms: true });
   assertShape(auto, survey.scans.length);
-  assert.ok(auto.floors[0].rooms.every((r) => r.auto));
+  assert.ok(auto.floors[0].rooms.length >= 1 && auto.floors[0].rooms.every((r) => r.auto));
+
+  // Um nome só não divide nada: o andar fica como uma área só (e o lugar marcado continua no mapa).
+  const one = structuredClone(survey);
+  for (const sc of one.scans) if (sc.label === 'Quarto') delete sc.label;
+  const single = buildMap(one, solution, { own: ['aa:00'] });
+  assertShape(single, survey.scans.length);
+  assert.equal(single.floors[0].rooms.length, 0);
+  assert.ok(single.spots.some((sp) => sp.label === 'Sala'));
+  assert.match(single.quality.notes.join(' | '), /Só um lugar tem nome/);
 });
 
 test('mesmo nome = mesmo ambiente; nomes diferentes nunca se juntam, mesmo com sinal igual', () => {
@@ -612,13 +695,16 @@ test('mesmo nome = mesmo ambiente; nomes diferentes nunca se juntam, mesmo com s
   assert.ok(estar.scans >= 6, 'os dois pontos "Estar" contam para o mesmo ambiente');
 });
 
-test('sem nomes, uma casa de um cômodo não vira uma colcha de retalhos', () => {
+test('sem nomes não há ambientes; e o agrupamento automático de um cômodo só não vira uma colcha de retalhos', () => {
   const points = serpentine(0.5, 0.5, 4.5, 3.5, 4, 0.7);
   const { survey, solution } = synth({ points, aps: [{ id: 'aa:00', ssid: 'Casa', x: 1, y: 1 }, ...NEIGHBOURS] });
   const model = buildMap(survey, solution, {});
   assertShape(model, points.length);
   assert.ok(model.quality.areaM2 > 12 && model.quality.areaM2 < 30, `área ${model.quality.areaM2}`);
-  assert.ok(model.floors[0].rooms.length <= 2, `${model.floors[0].rooms.length} ambientes em 20 m²`);
+  assert.equal(model.floors[0].rooms.length, 0);
+  const auto = buildMap(survey, solution, { autoRooms: true });
+  assertShape(auto, points.length);
+  assert.ok(auto.floors[0].rooms.length >= 1 && auto.floors[0].rooms.length <= 2, `${auto.floors[0].rooms.length} ambientes em 20 m²`);
 });
 
 // ---------------------------------------------------------------------------
@@ -766,7 +852,7 @@ test('cobertura: frações somam 1, zonas mortas e extremos coerentes', () => {
   assert.ok(cov.dead > 0.1, `morto: ${cov.dead}`);
   assert.ok(cov.best.x < 4 && cov.worst.x > 11, 'melhor ponto perto do roteador, pior na outra ponta');
   assert.ok(cov.deadZones.length >= 1 && cov.deadZones[0].x > 10);
-  assert.equal(typeof cov.best.room, 'string');
+  assert.equal(cov.best.room, null, 'levantamento sem lugares com nome: os extremos não têm ambiente');
   // Rede desconhecida: nada de cobertura.
   assert.deepEqual(coverage(model, 'nao-existe').dead, 1);
 });
@@ -783,7 +869,8 @@ test('sugestão de lugar: roteador na ponta sugere o meio; no meio, fica onde es
   assert.ok(tip.x > 4.5 && tip.x < 12, `lugar sugerido em x = ${tip.x}`);
   assert.match(tip.gainText, /^Sugestão: /);
   assert.match(tip.gainText, /estimativa/);
-  assert.equal(typeof tip.room, 'string');
+  assert.equal(tip.room, null, 'levantamento sem lugares com nome: a sugestão não cita ambiente');
+  assert.match(tip.gainText, /mais perto do meio da área/);
   // O lugar sugerido é um lugar por onde se andou.
   const c = Math.floor((tip.y - model.bounds.minY) / model.cell) * model.nx + Math.floor((tip.x - model.bounds.minX) / model.cell);
   assert.equal(model.floors[0].inside[c], 1);
@@ -837,7 +924,7 @@ test('qualidade: notas concretas sobre o que limita o mapa', () => {
   assert.match(notes, /Só um roteador forte por perto: as posições ficam menos precisas/);
   assert.match(notes, /Varreduras lentas/);
   assert.match(notes, /escala é incerta/);
-  assert.match(notes, /Marque pontos/);
+  assert.match(notes, /nenhum lugar tem nome: pare em pelo menos dois cômodos/);
   assert.equal(weak.quality.level, 'fraca');
 
   // Levantamento farto: nível bom, sem aviso de falta de dados.

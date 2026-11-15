@@ -107,9 +107,11 @@ export const FLOOR_HEIGHT = 2.8;
  * @property {number} z                      altura do piso (m) = floor * FLOOR_HEIGHT
  * @property {Uint8Array} inside             por célula: 1 = dentro da área estimada da casa
  * @property {Float32Array} conf             por célula, 0..1: quão perto de onde se andou (1 = em cima do caminho)
- * @property {Int16Array} room               por célula: índice em `rooms`, ou -1 fora da área
+ * @property {Int16Array} room               por célula: índice em `rooms`, ou -1 fora da área (e em todas as
+ *                                           células quando o andar não foi dividido: `rooms` vazio)
  * @property {number[][][]} outline          contorno(s) da área: lista de anéis [[x, y], ...] fechados, em metros
- * @property {MapRoom[]} rooms
+ * @property {MapRoom[]} rooms               VAZIO quando o usuário deu nome a menos de dois lugares do andar:
+ *                                           sem nomes o mapa não inventa ambientes (ver buildFloor em mapmodel.js)
  * @property {MapWall[]} walls               divisões estimadas: contorno externo e fronteiras entre ambientes
  */
 
