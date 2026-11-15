@@ -145,7 +145,7 @@ function toBytes(hex) {
   if (/[^0-9a-fA-F]/.test(s)) s = s.replace(/[\s:-]/g, '');
   if (s.length % 2 !== 0 || /[^0-9a-fA-F]/.test(s)) return null;
   const out = new Uint8Array(s.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.substr(i * 2, 2), 16);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
   return out;
 }
 
@@ -170,6 +170,8 @@ function macAt(b, o) {
 
 const utf8Decoder = typeof TextDecoder === 'function' ? new TextDecoder('utf-8') : null;
 const utf8Encoder = typeof TextEncoder === 'function' ? new TextEncoder() : null;
+// O que o decodificador põe no lugar de bytes que não formam UTF-8.
+const REPLACEMENT = String.fromCharCode(0xfffd);
 
 /** Texto de um campo: corta no primeiro NUL, tira caracteres de controle. */
 function textAt(b, start, end) {
@@ -181,7 +183,7 @@ function textAt(b, start, end) {
   let s = '';
   if (utf8Decoder) s = utf8Decoder.decode(part);
   else for (const v of part) s += String.fromCharCode(v);
-  return s.replace(/[\u0000-\u001f\u007f�]/g, '').trim();
+  return s.split(REPLACEMENT).join('').replace(/[\u0000-\u001f\u007f]/g, '').trim();
 }
 
 /** Só aceita como nome o que for ASCII imprimível (protege contra leiaute errado). */
@@ -309,15 +311,15 @@ const CHIPSET_OUIS = [
 ];
 
 // Fabricantes que anunciam o nome do AP num elemento próprio, no formato
-// OUI + tipo + [bytes a pular] + nome em ASCII até o fim (conforme o Wireshark).
+// OUI + tipo + nome em ASCII até o fim (conforme o dissecador do Wireshark): [OUI, tipo].
 const AP_NAME_ELEMENTS = [
-  { oui: 0x004096, type: 47, skip: 0 }, // Cisco/Meraki "AP name v2"
-  { oui: 0x00156d, type: 1, skip: 0 }, // Ubiquiti
-  { oui: 0x5c5b35, type: 1, skip: 0 }, // Mist
-  { oui: 0x001392, type: 3, skip: 0 }, // Ruckus
-  { oui: 0xdc0856, type: 1, skip: 0 }, // Alcatel-Lucent
-  { oui: 0x848094, type: 0, skip: 0 }, // Meter
-  { oui: 0x48d017, type: 2, skip: 0 }, // Telecom Infra Project (OpenWiFi)
+  [0x004096, 47], // Cisco/Meraki "AP name v2"
+  [0x00156d, 1], // Ubiquiti
+  [0x5c5b35, 1], // Mist
+  [0x001392, 3], // Ruckus
+  [0xdc0856, 1], // Alcatel-Lucent
+  [0x848094, 0], // Meter
+  [0x48d017, 2], // Telecom Infra Project (OpenWiFi)
 ];
 
 // ---------------------------------------------------------------------------
@@ -821,7 +823,7 @@ function mikrotikName(b) {
 
 function vendorApName(oui, b) {
   const type = b.length > 3 ? b[3] : -1;
-  for (const e of AP_NAME_ELEMENTS) if (e.oui === oui && e.type === type) return asciiName(b, 4 + e.skip, b.length);
+  for (const [o, t] of AP_NAME_ELEMENTS) if (o === oui && t === type) return asciiName(b, 4, b.length);
   // Aruba e Huawei: tipo, subtipo (3 e 1), um byte e o nome
   if (oui === 0x000b86 && type === 1 && b.length > 6 && b[4] === 3) return asciiName(b, 6, b.length);
   if (oui === 0x00e0fc && b.length > 6 && b[4] === 1) return asciiName(b, 6, b.length);

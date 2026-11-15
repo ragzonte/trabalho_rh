@@ -203,6 +203,10 @@ test('FT (802.11r), SHA-256, WAPI, SAE-EXT-KEY e DPP', () => {
   check('[RSN-SAE_EXT_KEY-GCMP-256]', { protocols: ['WPA3'], akms: ['SAE-EXT-KEY'], ciphers: ['GCMP-256'], personal: true, label: 'WPA3', level: 4 });
   check('[RSN-FT/SAE_EXT_KEY+SAE_EXT_KEY-GCMP-256][ESS][MFPR][MFPC]', { akms: ['FT-SAE-EXT-KEY', 'SAE-EXT-KEY'], fastRoaming: true, pmf: 'required' });
   check('[RSN-DPP-CCMP]', { protocols: [], akms: ['DPP'], personal: false, enterprise: false, open: false, encrypted: true, label: 'Easy Connect (DPP)', level: 4 });
+  // Hotspot 2.0 (cadastro on-line) e AKMs que não dizem a geração da rede
+  check('[OSEN-OSEN-CCMP][ESS]', { protocols: [], akms: ['OSEN'], enterprise: true, open: false, label: 'OSEN', pmf: 'none' });
+  check('[WPA2-OSEN-CCMP][ESS]', { protocols: [], akms: ['OSEN'], label: 'OSEN' });
+  check('[RSN-PASN-CCMP][ESS]', { protocols: ['WPA2'], akms: ['PASN'], open: false, label: 'WPA2' });
 });
 
 test('flags soltas: WPS, MFPC, MFPR, P2P, ESS, IBSS, MESH', () => {
@@ -428,7 +432,7 @@ test('fuzz: textos aleatórios nunca lançam e o resultado é coerente', () => {
   const pick = (list) => list[Math.floor(rnd() * list.length)];
   const words = ['WPA', 'WPA2', 'RSN', 'RSNO', 'OSEN', 'WAPI', 'WEP', 'PSK', 'SAE', 'EAP', 'EAP/SHA1', 'EAP/SHA256', 'FT/PSK', 'FT/SAE', 'FT/EAP',
     'OWE', 'OWE_TRANSITION', 'EAP_SUITE_B_192', 'SAE_EXT_KEY', 'PSK-SHA256', 'DPP', 'CCMP', 'CCMP-128', 'TKIP', 'GCMP-256', 'SMS4', 'None', '?',
-    'ESS', 'IBSS', 'WPS', 'MFPC', 'MFPR', 'P2P', 'MESH', 'preauth', '', 'ÇÃO', '💥', '256', '-', '+', '/', '[', ']', ' ', '_'];
+    'ESS', 'IBSS', 'WPS', 'MFPC', 'MFPR', 'P2P', 'MESH', 'preauth', '', 'ÇÃO', String.fromCodePoint(0x1f4a5), '256', '-', '+', '/', '[', ']', ' ', '_'];
   const seps = ['-', '+', '', '][', '[', ']', '/', '_', ' '];
   const levels = new Set();
   for (let round = 0; round < 6000; round++) {

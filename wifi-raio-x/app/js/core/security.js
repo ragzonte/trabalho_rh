@@ -307,8 +307,9 @@ function rsnGenerations(rsn, pmf) {
     else if (akms.has('EAP') && pmf === 'capable' && !tkip) wpa3 = true;
     else wpa2 = true;
   }
-  // RSN sem AKM reconhecido ("[WPA2--CCMP]", "[RSN-?-CCMP]"): é no mínimo uma rede WPA2
-  if (akms.size === 0) wpa2 = true;
+  // RSN sem AKM que diga a geração ("[WPA2--CCMP]", "[RSN-?-CCMP]"): é no mínimo uma rede WPA2.
+  // OWE, DPP e OSEN têm rótulo próprio.
+  if (!wpa2 && !wpa3 && !['OWE', 'DPP', 'OSEN'].some((a) => akms.has(a))) wpa2 = true;
   return { wpa2, wpa3, owe: akms.has('OWE') };
 }
 
@@ -324,8 +325,8 @@ function buildLabel(s, onlySuiteB192) {
   if (s.protocols.includes('OWE')) return s.oweTransition ? 'Aberta/OWE' : 'Aberta (OWE)';
   if (s.protocols.includes('WAPI')) return 'WAPI';
   if (s.akms.includes('DPP')) return 'Easy Connect (DPP)';
-  if (s.akms.includes('OSEN')) return 'OSEN';
-  return 'Aberta';
+  if (s.akms.includes('OSEN') || s.sections.osen) return 'OSEN';
+  return s.open ? 'Aberta' : 'Protegida';
 }
 
 function buildLevel(s) {
