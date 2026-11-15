@@ -67,3 +67,27 @@ test('botão voltar: sem tratador devolve false; com tratador devolve o que ele 
   });
   assert.equal(globalThis.__wrx.back(), false);
 });
+
+test('com o simulador respondendo, o que o celular manda por conta própria é descartado', async () => {
+  const bridge = await freshBridge({ call: () => '{}', callAsync() {} });
+  const seen = [];
+  bridge.on('scan', (ev) => seen.push(`scan:${ev.source}`));
+  bridge.on('rssi', (s) => seen.push(`rssi:${s.rssi}`));
+  bridge.on('connection', (c) => seen.push(`conn:${c.ssid}`));
+  globalThis.__wrx.emit('rssi', { rssi: -60 });
+  assert.deepEqual(seen, ['rssi:-60'], 'no modo normal os eventos do celular chegam');
+
+  // modo demonstração ligado: o Android continua emitindo (busca do sistema, sinal a cada segundo)
+  await bridge.connect('sim', { world: 'kitnet', seed: 1 });
+  try {
+    assert.equal(bridge.kind(), 'sim');
+    globalThis.__wrx.emit('scan', JSON.stringify({ ts: 1, fresh: true, source: 'system', aps: [{ bssid: 'd8:c6:78:11:22:30', ssid: 'CasaDeVerdade', level: -50, frequency: 2437 }] }));
+    globalThis.__wrx.emit('rssi', { rssi: -61 });
+    globalThis.__wrx.emit('connection', { connected: true, ssid: 'CasaDeVerdade' });
+    assert.deepEqual(seen, ['rssi:-60'], 'nada do celular entra na casa virtual');
+  } finally {
+    await bridge.connect('native'); // encerra o simulador (e os temporizadores dele)
+  }
+  globalThis.__wrx.emit('rssi', { rssi: -62 });
+  assert.deepEqual(seen, ['rssi:-60', 'rssi:-62'], 'de volta ao celular, os eventos voltam a chegar');
+});

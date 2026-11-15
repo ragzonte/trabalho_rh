@@ -139,3 +139,12 @@ js/stats.js             cálculos dos totais e gráficos
 js/charts.js            gráficos em SVG (sem bibliotecas)
 js/fake-sheets.js       emulador do Google Sheets (demonstração e testes)
 ```
+
+---
+
+## Outro app neste repositório: 📶 WiFi Raio-X
+
+Na pasta [`wifi-raio-x/`](wifi-raio-x/) mora um segundo app Android, independente deste:
+um **analisador de Wi-Fi** (melhor rede, melhor canal, diagnóstico, medidor de sinal, teste
+de velocidade, aparelhos na rede) que também desenha um **mapa 3D do lugar usando só o sinal
+do Wi-Fi**. Tudo sobre ele está em [`wifi-raio-x/README.md`](wifi-raio-x/README.md).

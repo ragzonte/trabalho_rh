@@ -596,9 +596,10 @@ function buildArea(ctx, grid, members) {
       mark(p.x + (q.x - p.x) * u, p.y + (q.y - p.y) * u, (w * len) / steps, s % 2 ? w : 0, gLink);
     }
   }
-  // Limiar: o que uma passada reta e isolada deixa a `areaR` do eixo.
+  // Limiar: o que uma passada reta e isolada deixa a `areaR` do eixo (com o núcleo alargado de um
+  // ponto incerto e o peso dividido pelo mesmo fator, o limiar é cruzado no alcance dele).
   const tau = Math.sqrt(2 * Math.PI) * tune.areaH * Math.exp(-(tune.areaR * tune.areaR) / h2);
-  // Além da densidade, a célula precisa estar a `areaR` de onde se passou: passar três vezes
+  // Além da densidade, a célula precisa estar ao alcance de onde se passou: passar três vezes
   // pelo mesmo lugar (ou ficar parado nele) é mais certeza, não mais área.
   const reach = Math.exp(-(tune.areaR * tune.areaR) / c2) - 1e-6;
   let mask = new Uint8Array(size);
@@ -1989,6 +1990,7 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     } else if (plain > 0) notes.push('Num dos andares há menos de dois lugares com nome: ali o mapa não separa os ambientes.');
     if (usable && !veryStrong && strong >= 3) notes.push('Nenhum roteador chega forte aqui: o sinal fraco deixa o mapa menos nítido.');
     if (usable && floors.length > 1) notes.push('Mais de um andar é o caso mais difícil só com o Wi-Fi: espere mais lugares fora do cômodo certo do que numa casa térrea.');
+    if (usable && perFloor > BIG_PLACE_M2) notes.push('Lugar grande: só com o Wi-Fi o mapa costuma sair bem menor que o real (em simulação, um escritório de 280 m² sai com 60 a 70% do tamanho). Vale medir uma distância em “Ajustar a escala”.');
   }
   // Nível: o erro esperado comparado com o que se consegue num lugar deste tamanho (num
   // escritório grande, 2,5 m de erro é um bom levantamento; numa kitnet, não).
@@ -1996,8 +1998,12 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
   let level = 'fraca';
   if (usable && often > 2) {
     // Mais de um andar nunca passa de 'razoavel': é o caso mais difícil (na bancada, 3 em cada 5
-    // leituras caem no cômodo certo num sobrado, contra 4 em 5 ou mais nas casas de um andar).
-    if (P >= 40 && excess <= LEVEL_GOOD && err <= 3.5 && floors.length === 1) level = 'boa';
+    // leituras caem no cômodo certo num sobrado, contra 4 em 5 ou mais nas casas de um andar). E
+    // tamanho incerto também não: com confiança de escala abaixo de 0,5 metade dos mapas da bancada
+    // erra o tamanho em mais de 25% (é o caso dos lugares grandes, que saem encolhidos).
+    // Lugar grande idem: todos os motores do solucionador o encolhem (o escritório de 280 m² da
+    // bancada sai com 0,72 do tamanho; conduzido pelo app, com 0,6) e a área desenhada fica pela metade.
+    if (P >= 40 && excess <= LEVEL_GOOD && err <= 3.5 && floors.length === 1 && scaleConf >= 0.5 && perFloor <= BIG_PLACE_M2) level = 'boa';
     else if (P >= 15 && excess <= LEVEL_FAIR && err <= 5) level = 'razoavel';
   }
   return {
@@ -2016,6 +2022,8 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
 /** Erro esperado / erro típico do tamanho do lugar: até aqui o levantamento é 'boa'; até o segundo, 'razoavel'. */
 const LEVEL_GOOD = 1.25;
 const LEVEL_FAIR = 1.9;
+/** Área desenhada por andar (m²) acima da qual o lugar é "grande": o mapa sai encolhido e nunca é 'boa'. */
+const BIG_PLACE_M2 = 100;
 
 // ---------------------------------------------------------------------------
 // buildMap

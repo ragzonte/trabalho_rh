@@ -150,6 +150,9 @@ function reconnect() {
   if (reconnecting) return reconnecting;
   reconnecting = (async () => {
     scanLoop.stop();
+    // saindo do celular de verdade: ele para de mandar o sinal a cada segundo (a ponte já descarta
+    // os eventos dele enquanto o simulador responde; isto só poupa o trabalho)
+    if (bridge.kind() === 'native') bridge.unwatchRssi().catch(() => {});
     store.resetScanData();
     try {
       await connect();

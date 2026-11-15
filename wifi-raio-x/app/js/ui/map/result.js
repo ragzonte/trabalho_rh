@@ -62,6 +62,8 @@ import {
   makeRecord,
   readRecord,
   approxMetersText,
+  isDemoOrigin,
+  matchesMode,
 } from './map-ui-logic.js';
 
 const LAYERS = [
@@ -664,6 +666,19 @@ export async function mountResult(root, env, { id }) {
   }
 
   async function continueSurvey() {
+    // um mapa da casa virtual não continua com o Wi-Fi de verdade (nem o contrário): as leituras
+    // dos dois se misturariam num mapa só
+    if (!matchesMode(S, env.isDemo())) {
+      const locked = !!(ctx.app && ctx.app.demoLocked);
+      toast(
+        isDemoOrigin(S)
+          ? 'Este mapa é da demonstração. Para continuar o mapeamento dele, ligue o modo demonstração nos Ajustes.'
+          : locked
+            ? 'Este mapa foi feito com o Wi-Fi de verdade. Só dá para continuar o mapeamento dele no celular, fora da demonstração.'
+            : 'Este mapa foi feito com o Wi-Fi de verdade. Para continuar o mapeamento dele, saia da demonstração.',
+      );
+      return;
+    }
     if (S.saved) {
       const draft = await storage.draft.load();
       if (dead) return;

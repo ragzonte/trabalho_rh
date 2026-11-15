@@ -147,6 +147,7 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
         settings.setMediaPlaybackRequiresUserGesture(true);
         // WebViews antigos só contam à página que o celular está no modo escuro se o app pedir.
         WebDarkMode.apply(settings, getResources().getConfiguration());
+        WebTextZoom.apply(settings, getResources().getConfiguration());
 
         view.setBackgroundColor(getColor(R.color.page)); // sem clarão branco antes da página pintar
         view.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -178,7 +179,9 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
         WebView view = web;
         if (view == null) return;
         try {
-            WebDarkMode.apply(view.getSettings(), newConfig);
+            WebSettings settings = view.getSettings();
+            WebDarkMode.apply(settings, newConfig);
+            WebTextZoom.apply(settings, newConfig); // o WebView só lê o tamanho da fonte ao nascer
         } catch (RuntimeException ignored) {
             // WebView em encerramento
         }

@@ -800,6 +800,65 @@ test('o campo de sinal respeita as medições', () => {
   }
 });
 
+test('sinal da rede conectada entre as varreduras (survey.track): entra no campo com posição, medidor e rede conferidos', () => {
+  // Uma ida reta de 12 m, uma varredura a cada 3,5 s (1,5 m); o roteador da casa tem dois rádios com o mesmo nome.
+  const points = Array.from({ length: 9 }, (_, i) => ({ x: 1 + 1.5 * i, y: 2 }));
+  const aps = [
+    { id: 'aa:24', ssid: 'Casa', device: 'r1', x: 1, y: 2.5, p0: -38 },
+    { id: 'aa:50', ssid: 'Casa', device: 'r1', x: 1, y: 2.5, p0: -48, freq: 5180 },
+    ...NEIGHBOURS,
+  ];
+  const { survey, solution } = synth({ points, aps, noise: 0.5, conf: 1 });
+  const key = 's:Casa';
+  const real = (x) => -38 - 26 * Math.log10(Math.max(0.5, Math.hypot(x - 1, 0.5, 1)));
+  // Amostras do rádio de 2,4 GHz (o mais forte da rede) a cada segundo; o medidor do sinal conectado lê 4 dB a mais.
+  const lag = _dev.TUNE.trackLagS;
+  const track = [];
+  for (let t = 2; t <= 3 + 8 * 3.5; t += 1) {
+    const x = 1 + (1.5 * (t - (3 - lag))) / 3.5; // onde a pessoa estava (a posição da varredura é a de `lag` s antes da lista)
+    track.push({ t, id: 'aa:24', rssi: Math.round(real(Math.min(13, Math.max(1, x))) + 4) });
+  }
+  const plain = buildMap(survey, solution, { own: ['aa:24'] });
+  const withTrack = buildMap({ ...survey, track }, solution, { own: ['aa:24'] });
+  assertShape(withTrack, points.length);
+  assert.deepEqual(Object.keys(plain._heat.track), [], 'sem amostras, nada a mais');
+  const pack = withTrack._heat.track[key];
+  assert.ok(pack && pack.v.length >= 12, `amostras agrupadas: ${pack && pack.v.length}`);
+  assert.ok(pack.x instanceof Float32Array && pack.f instanceof Int16Array, 'vetores tipados: atravessam o postMessage');
+  // posições na reta andada, entre a primeira e a última varredura
+  for (let i = 0; i < pack.v.length; i++) {
+    assert.ok(Math.abs(pack.y[i] - 2) < 1e-6 && pack.x[i] >= 1 - 1e-6 && pack.x[i] <= 13 + 1e-6, `amostra em (${pack.x[i]}, ${pack.y[i]})`);
+    assert.ok(pack.w[i] > 0 && pack.w[i] <= _dev.TUNE.trackBinW + 1e-6);
+    // o desvio do medidor (4 dB) foi descontado: o valor bate com o campo de verdade ali
+    assert.ok(Math.abs(pack.v[i] - real(pack.x[i])) < 2.5, `amostra em x=${pack.x[i].toFixed(1)}: ${pack.v[i].toFixed(1)} x real ${real(pack.x[i]).toFixed(1)}`);
+  }
+  // o campo com as amostras continua fiel ao que as varreduras mediram, e ganha confiança entre elas
+  const a = heatField(plain, 0, key);
+  const b = heatField(withTrack, 0, key);
+  const cellAt = (m, x, y) => Math.floor((y - m.bounds.minY) / m.cell) * m.nx + Math.floor((x - m.bounds.minX) / m.cell);
+  for (const x of [2, 5, 8, 11]) {
+    assert.ok(Math.abs(b.dbm[cellAt(withTrack, x, 2)] - a.dbm[cellAt(plain, x, 2)]) < 2.5, `campo em x=${x}`);
+    assert.ok(b.conf[cellAt(withTrack, x, 2)] >= a.conf[cellAt(plain, x, 2)] - 1e-6);
+  }
+  assert.deepEqual(heatField(structuredClone(withTrack), 0, key), b, 'o modelo com as amostras sobrevive a um structuredClone');
+
+  // Amostras do rádio que NÃO é o mais forte da rede (5 GHz, 10 dB abaixo) ficam de fora: não são a mesma grandeza.
+  const weakRadio = track.map((q) => ({ ...q, id: 'aa:50', rssi: q.rssi - 10 }));
+  assert.equal(buildMap({ ...survey, track: weakRadio }, solution, {})._heat.track[key], undefined);
+  // Rádio que nenhuma varredura ouviu, amostras tortas e poucas demais para medir o desvio: nada entra.
+  for (const bad of [[{ t: 5, id: 'zz:99', rssi: -50 }], [null, { t: 'x', id: 'aa:24', rssi: -50 }, { t: 4, id: 'aa:24' }], track.slice(0, 2)]) {
+    assert.deepEqual(Object.keys(buildMap({ ...survey, track: bad }, solution, {})._heat.track), []);
+  }
+  // Varreduras a cada 30 s: a reta entre duas não serve de posição; só valem as amostras feitas junto de uma varredura.
+  const slow = structuredClone(survey);
+  slow.scans.forEach((sc, i) => (sc.t = 3 + 30 * i));
+  const slowTrack = [];
+  for (let t = 1; t <= 3 + 8 * 30; t += 2) slowTrack.push({ t, id: 'aa:24', rssi: -60 });
+  const sparse = buildMap({ ...slow, track: slowTrack }, solution, {})._heat.track[key];
+  assert.ok(sparse && sparse.v.length <= points.length, `no máximo um grupo por varredura: ${sparse && sparse.v.length}`);
+  for (let i = 0; i < sparse.v.length; i++) assert.ok(points.some((p) => Math.abs(p.x - sparse.x[i]) < 1e-3), 'amostra em cima de uma varredura');
+});
+
 test('varredura que não ouviu a rede conta como sinal no piso; beacon perdido e leitura velha não', () => {
   const { survey, solution } = longHouse(1);
   // Na ponta de lá a rede some de vez (parede a mais): as varreduras de lá não a ouvem.

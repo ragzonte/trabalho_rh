@@ -18,7 +18,7 @@
 import { h, patch, sheet, toast, confirmDialog, fmtDateTime, fmtAgo, plural } from '../dom.js';
 import { icon } from '../icons.js';
 import { button, iconButton, badge, banner, sectionHeader, ssidLabel, signalBars, openThrottleHelp, spinner } from '../components.js';
-import { candidateNetworks, metaLine, readRecord, cleanMapName, qualityInfo } from './map-ui-logic.js';
+import { candidateNetworks, metaLine, readRecord, cleanMapName, qualityInfo, isDemoOrigin, matchesMode, foreignDraftText } from './map-ui-logic.js';
 
 // ---------------------------------------------------------------------------
 // Peças compartilhadas
@@ -301,7 +301,7 @@ export function mountLibrary(root, env) {
     if (!draft) return true;
     const ok = await confirmDialog({
       title: 'Começar um mapa novo?',
-      text: `O mapeamento em andamento (${draftSummaryText(draft)}) será descartado.`,
+      text: `${matchesMode(draft, demo()) ? 'O mapeamento em andamento' : isDemoOrigin(draft) ? 'O rascunho da demonstração' : 'O rascunho do Wi-Fi de verdade'} (${draftSummaryText(draft)}) será descartado.`,
       confirmLabel: 'Descartar e começar',
       cancelLabel: 'Voltar',
       danger: true,
@@ -330,6 +330,8 @@ export function mountLibrary(root, env) {
   }
 
   function resumeDraft() {
+    // (o levantamento confere de novo: rascunho de um modo não continua no outro)
+    if (!draft || !matchesMode(draft, demo())) return;
     env.session.start = null;
     env.go('/mapa/novo');
   }
@@ -450,15 +452,29 @@ export function mountLibrary(root, env) {
     if (dead) return;
     const isDemo = demo();
     const saved = maps || [];
+    // Rascunho feito no outro modo (casa virtual x Wi-Fi de verdade): aparece com o nome certo e
+    // sem "Continuar". As leituras de um modo nunca se misturam com as do outro.
+    const foreign = draft && !matchesMode(draft, isDemo) ? foreignDraftText(draft, { locked: !!(ctx.app && ctx.app.demoLocked) }) : null;
     patch(
       body,
       // um mapeamento pela metade é o que mais importa: fica no topo
       draft
         ? h(
             'section.card.card--accent.mlib-draft',
-            { key: 'draft' },
-            h('div.mlib-draft__head', null, h('span.mlib-draft__icon', null, icon('route')), h('div', null, h('h3.card__title', null, 'Mapeamento em andamento'), h('p.card__text', null, draftSummaryText(draft), draft.savedAt ? ` · guardado ${fmtAgo(Date.now() - draft.savedAt)}` : ''))),
-            h('div.mlib-draft__actions', null, button('Descartar', { variant: 'quiet', onClick: discardDraft }), button('Continuar', { variant: 'primary', icon: 'play', onClick: resumeDraft })),
+            { key: 'draft', dataset: { origin: foreign ? 'other' : 'same' } },
+            h(
+              'div.mlib-draft__head',
+              null,
+              h('span.mlib-draft__icon', null, icon(isDemoOrigin(draft) && foreign ? 'flask' : 'route')),
+              h(
+                'div',
+                null,
+                h('h3.card__title', null, foreign ? foreign.title : 'Mapeamento em andamento'),
+                h('p.card__text', null, draftSummaryText(draft), draft.savedAt ? ` · guardado ${fmtAgo(Date.now() - draft.savedAt)}` : ''),
+                foreign ? h('p.card__text.mlib-draft__how', null, foreign.how) : null,
+              ),
+            ),
+            h('div.mlib-draft__actions', null, button('Descartar', { variant: 'quiet', onClick: discardDraft }), foreign ? null : button('Continuar', { variant: 'primary', icon: 'play', onClick: resumeDraft })),
           )
         : null,
       h(

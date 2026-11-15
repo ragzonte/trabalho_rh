@@ -27,7 +27,7 @@ import { createRecorder, recorderFromJSON, SURVEY_THRESHOLDS } from '../../mappi
 import { createViewer } from './viewer3d.js';
 import { createMiniPlan } from './mini-plan.js';
 import { actionSheet, defaultOwnSsids } from './library.js';
-import { roomChips, cleanLabel, floorName, clampFloor, FLOOR_MIN, FLOOR_MAX, levelInfo, fmtTimer, pulseInfo, previewDue, ownBssidsFor, rttTargets, finishBlocker } from './map-ui-logic.js';
+import { roomChips, cleanLabel, floorName, clampFloor, FLOOR_MIN, FLOOR_MAX, levelInfo, fmtTimer, pulseInfo, previewDue, ownBssidsFor, rttTargets, finishBlocker, isDemoOrigin, matchesMode } from './map-ui-logic.js';
 
 const TICK_MS = 500;
 const AUTOSAVE_MS = 10_000;
@@ -169,7 +169,17 @@ export async function mountSurvey(root, env) {
   env.session.start = null;
   env.session.result = null;
   const draft = start ? null : await storage.draft.load();
+  // Um levantamento pertence ao modo em que começou (casa virtual ou Wi-Fi de verdade). Rascunho
+  // do outro modo não é retomado aqui: fica como está e a biblioteca explica como continuar.
+  if (draft && draft.recorder && !matchesMode(draft, env.isDemo())) {
+    toast(isDemoOrigin(draft) ? 'O mapeamento guardado é da demonstração. Ligue a demonstração para continuar.' : 'O mapeamento guardado é do Wi-Fi de verdade. Saia da demonstração para continuar.');
+    env.go('/mapa', { replace: true });
+    return { unmount() {} };
+  }
   const sim = await env.sim();
+  // quem estava respondendo quando o levantamento abriu ('sim' | 'native'): leitura de outro lado não entra
+  const originKind = typeof bridge.kind === 'function' ? bridge.kind() : null;
+  const sameSource = () => typeof bridge.kind !== 'function' || bridge.kind() === originKind;
   const speedNow = () => (sim && Number.isFinite(sim.speed) && sim.speed > 0 ? sim.speed : 1);
 
   // --- gravador ------------------------------------------------------------
@@ -184,12 +194,14 @@ export async function mountSurvey(root, env) {
     name: resumed ? draft.name || null : null,
     createdAt: resumed ? draft.createdAt || null : null,
     startedAt: (resumed && draft.startedAt) || Date.now(),
-    demo: env.isDemo(),
+    // retomado: vale a origem guardada no rascunho, não o modo de agora
+    demo: resumed ? isDemoOrigin(draft) : env.isDemo(),
   };
   const wantPilot = !!(start && start.pilot && sim);
 
   // --- estado da tela ------------------------------------------------------
   let dead = false;
+  let switched = false; // o app trocou de modo (demonstração <-> Wi-Fi de verdade) com o levantamento aberto
   let mode = 'survey'; // 'survey' | 'processing' | 'error'
   let viewer = null;
   let miniPlan = null;
@@ -273,7 +285,7 @@ export async function mountSurvey(root, env) {
   }
 
   function onScan(ev) {
-    if (dead || mode !== 'survey') return;
+    if (dead || mode !== 'survey' || switched || !sameSource()) return;
     let accepted = false;
     try {
       // o gravador fica sabendo do limite de buscas pelo laço (relógio de verdade), não pelo ritmo em tempo de caminhada
@@ -298,7 +310,7 @@ export async function mountSurvey(root, env) {
   }
 
   function onRssi(sample) {
-    if (dead || mode !== 'survey') return;
+    if (dead || mode !== 'survey' || switched || !sameSource()) return;
     try {
       rec.onRssi(sample);
     } catch {
@@ -316,7 +328,7 @@ export async function mountSurvey(root, env) {
     lastRttAt = Date.now();
     try {
       const res = await bridge.rtt(targets);
-      if (!dead && res && Array.isArray(res.results)) rec.onRtt(res.results);
+      if (!dead && !switched && sameSource() && res && Array.isArray(res.results)) rec.onRtt(res.results);
     } catch {
       // sem RTT o mapa sai do mesmo jeito
     } finally {
@@ -600,6 +612,11 @@ export async function mountSurvey(root, env) {
       if (err && err.name === 'AbortError') {
         // de volta ao levantamento, em pausa: nada se perdeu
         mode = 'survey';
+        if (switched) {
+          // o app trocou de modo durante o cálculo: este levantamento não continua com o outro lado
+          env.go('/mapa', { replace: true });
+          return;
+        }
         showStage(null);
         setTopActions();
         draw();
@@ -818,7 +835,7 @@ export async function mountSurvey(root, env) {
   // --- laço de 0,5 s -------------------------------------------------------
 
   function tick() {
-    if (dead || mode !== 'survey') return;
+    if (dead || mode !== 'survey' || switched) return;
     if (sim && Math.abs(rec.timeScale - speedNow()) > 1e-6) rec.setTimeScale(speedNow());
     draw();
     void maybePreview();
@@ -872,6 +889,28 @@ export async function mountSurvey(root, env) {
     ),
   );
   rec.setThrottled(!!store.get().loop.throttled);
+  // O modo mudou com o levantamento aberto (pílula "Demonstração" ou Ajustes): ele para aqui. O que
+  // foi lido até agora fica guardado como rascunho do modo em que começou (unmount grava com
+  // info.demo); as leituras do outro lado nunca entram neste levantamento.
+  offs.push(
+    store.subscribe(
+      (st) => st.backend,
+      () => {
+        if (dead || switched) return;
+        switched = true;
+        if (mode !== 'survey') return; // o cálculo final segue com as leituras que já tinha
+        if (pilot && pilot.running) {
+          try {
+            pilot.stop();
+          } catch {
+            // o simulador já foi trocado
+          }
+        }
+        if (rec.state === 'recording') rec.pause();
+        env.go('/mapa', { replace: true });
+      },
+    ),
+  );
   const onHide = () => {
     if (document.hidden && rec.stats().scans) void saveDraft();
   };
@@ -942,7 +981,8 @@ export async function mountSurvey(root, env) {
         if (count > 0) {
           // quem abrir a biblioteca em seguida espera esta gravação antes de procurar o rascunho
           env.session.saving = storage.draft.save(draftPayload());
-          toast('Mapeamento em pausa. O rascunho ficou guardado.');
+          if (switched) toast(info.demo ? 'O mapeamento da demonstração ficou guardado como rascunho.' : 'O mapeamento do Wi-Fi de verdade ficou guardado como rascunho.');
+          else toast('Mapeamento em pausa. O rascunho ficou guardado.');
         } else if (!resumed) {
           void storage.draft.clear();
         }

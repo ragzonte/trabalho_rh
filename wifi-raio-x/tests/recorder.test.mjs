@@ -793,6 +793,52 @@ test('limite informado pela tela: setThrottled (ou o contexto de onScan) vale na
   assert.equal(rec.stats().throttled, true);
 });
 
+test('um roteador só ao alcance: não há mapa a tirar, e o gravador diz logo; com dois, o nível não passa do mínimo', () => {
+  const T = SURVEY_THRESHOLDS;
+  // Um aparelho só (dois rádios do mesmo roteador contam como um), com o sinal variando: a pessoa anda.
+  const one = started();
+  const single = (i) => [ap(mac(1), -45 - Math.abs((i % 16) - 8) * 3, { frequency: 2412 })];
+  for (let i = 0; i < T.fewDevicesAfter - 1; i++) {
+    one.clock.advance(3000);
+    one.rec.onScan(scanEvent(one.clock, single(i)));
+  }
+  assert.doesNotMatch(one.rec.stats().hint, /Só um roteador/, 'no começo ainda pode aparecer um vizinho');
+  for (let i = 0; i < 40; i++) {
+    one.clock.advance(3000);
+    one.rec.onScan(scanEvent(one.clock, single(i + 7)));
+  }
+  let s = one.rec.stats();
+  assert.equal(s.devices, 1);
+  assert.equal(s.devicesOften, 1);
+  assert.equal(s.level, 'insuficiente', '47 leituras andando, mas um roteador só: não dá mapa');
+  assert.match(s.hint, /Só um roteador ao alcance.*pelo menos três/);
+  // um vizinho ouvido uma vez ou outra não muda a conta: precisa aparecer em pelo menos um quinto das leituras
+  one.clock.advance(3000);
+  one.rec.onScan(scanEvent(one.clock, [...single(3), ap(mac(9), -88, { frequency: 2462 })]));
+  s = one.rec.stats();
+  assert.equal(s.devices, 2);
+  assert.equal(s.devicesOften, 1);
+  assert.equal(s.level, 'insuficiente');
+
+  // Dois aparelhos: dá para concluir, mas o nível fica no mínimo e a dica avisa.
+  const two = started();
+  const pair = (i) => [ap(mac(1), -45 - Math.abs((i % 16) - 8) * 3, { frequency: 2412 }), ap(mac(2), -70 + Math.abs((i % 12) - 6) * 3, { frequency: 2462 })];
+  for (let i = 0; i < 130; i++) {
+    two.clock.advance(3000);
+    two.rec.onScan(scanEvent(two.clock, pair(i)));
+  }
+  s = two.rec.stats();
+  assert.equal(s.devicesOften, 2);
+  assert.equal(s.level, 'minimo', '130 leituras, mas só dois roteadores');
+  assert.match(s.hint, /Só dois roteadores ao alcance/);
+
+  // Cinco aparelhos (o caso normal dos outros testes): nada disso aparece.
+  const many = started();
+  for (let i = 0; i < 30; i++) feed(many.rec, many.clock, i);
+  assert.equal(many.rec.stats().devicesOften, 5);
+  assert.doesNotMatch(many.rec.stats().hint, /roteador(es)? ao alcance/);
+});
+
 test('níveis: ficar parado num ponto só conta até a terceira varredura', () => {
   const { rec, clock } = started();
   rec.beginSpot('Sofá');

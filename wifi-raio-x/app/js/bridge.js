@@ -6,7 +6,8 @@
 //        void   callAsync(int id, String method, String argsJson)  -> responde depois
 //      e fala de volta com:
 //        window.__wrx.resolve(id, resultado)   // resposta de um callAsync ({error:"..."} em caso de falha)
-//        window.__wrx.emit(nome, dados)        // eventos (scan, rssi, status, ...)
+//        window.__wrx.emit(nome, dados)        // eventos (scan, rssi, status, ...); ignorados enquanto
+//                                              // quem responde é o simulador (modo demonstração)
 //        window.__wrx.back()                   // botão "voltar": devolve true se a interface tratou
 //                                              // (fechou um painel, voltou de tela); false = pode sair do app
 //   2. O simulador (js/sim/backend.js) atende os mesmos métodos no navegador, nos
@@ -253,7 +254,12 @@ function nativeBackend(native) {
 
 // O Android chama estas duas funções (veja o cabeçalho).
 const hook = (globalThis.__wrx = globalThis.__wrx || {});
-hook.emit = (name, data) => emit(name, parse(data));
+// O celular continua mandando eventos por conta própria (buscas do sistema, sinal a cada segundo,
+// mudanças de conexão) mesmo com o modo demonstração ligado. Enquanto quem responde é o simulador
+// eles são descartados aqui: dado de verdade nunca se mistura com o da casa virtual.
+hook.emit = (name, data) => {
+  if (backendKind === 'native') emit(name, parse(data));
+};
 hook.back = () => {
   try {
     return backHandler ? !!backHandler() : false;
@@ -294,7 +300,16 @@ export async function connect(which, options) {
     if (!hasNative()) throw new Error('ponte nativa indisponível');
     backend = nativeBackend(globalThis.WrxNative);
   } else {
-    const mod = await import('./sim/backend.js');
+    // enquanto o simulador carrega, o que o celular mandar já não vale (veja hook.emit)
+    const before = backendKind;
+    backendKind = null;
+    let mod;
+    try {
+      mod = await import('./sim/backend.js');
+    } catch (err) {
+      backendKind = before;
+      throw err;
+    }
     backend = mod.createSimBackend({ emit, ...(options || {}) });
   }
   backendKind = want;

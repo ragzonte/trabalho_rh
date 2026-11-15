@@ -83,18 +83,28 @@ export async function pilotSession(env, { world = 'apartamento', seed, throttle 
  * leituras, toca em "Segui andando" e, no fim, dá mais uma volta pela casa e toca em "Concluir".
  * O ritmo das leituras é o do app (laço de buscas), não o do piloto.
  * @param {object} o  world, seed, throttle; labels: false = marca os lugares sem dar nome;
- *                    spots: false = só anda, sem marcar nada; tourS: segundos de volta livre no fim
+ *                    spots: false = só anda, sem marcar nada; extraSpots: lugares a mais, em outros
+ *                    cantos dos mesmos cômodos (no modo ponto a ponto o app pede 12 ou mais);
+ *                    tourS: segundos de volta livre no fim
  */
-export async function manualSession(env, { world = 'apartamento', seed, throttle = false, labels = true, spots = true, tourS = 150, still = false, maxS = 0 } = {}) {
+export async function manualSession(env, { world = 'apartamento', seed, throttle = false, labels = true, spots = true, extraSpots = 0, tourS = 150, still = false, maxS = 0 } = {}) {
   const params = { world, seed, throttle: throttle ? 1 : undefined, speed: 1 };
   const app = await openApp(env, { params, route: '/mapa', before: (page) => page.clock.install() });
   const { page } = app;
   let failed = true;
-  const run = (ms) => page.clock.runFor(ms);
+  // adianta o relógio e, se a tela avisar que a pessoa virtual trocou de andar, toca no aviso
+  // (numa casa de verdade é o usuário quem ajusta o controle "Andar" ao subir ou descer)
+  const run = async (ms) => {
+    for (let left = ms; left > 0; left -= 2000) {
+      await page.clock.runFor(Math.min(2000, left));
+      const nudge = page.locator('.msv__body .banner button', { hasText: /^Marcar / });
+      if ((await nudge.count()) > 0) await nudge.first().click();
+    }
+  };
   const stats = () => page.$$eval('.msv-count__value', (els) => els.slice(0, 3).map((el) => Number(el.textContent)));
   try {
     await page.waitForSelector('.mlib-hero');
-    await installProbe(page);
+    await installProbe(page, { everyMs: 100 });
     // "Novo mapa" -> painel "Antes de começar" -> começar
     await page.locator('.mlib-hero .btn', { hasText: 'Novo mapa' }).click();
     await page.waitForSelector('.sheet .map-start');
@@ -109,19 +119,44 @@ export async function manualSession(env, { world = 'apartamento', seed, throttle
       // do cômodo mais perto para o mais longe, um andar de cada vez
       const here = await simEval(page, (sim) => sim.truth());
       rooms.sort((a, b) => Math.abs(a.floor - here.floor) - Math.abs(b.floor - here.floor) || Math.hypot(a.x - here.x, a.y - here.y) - Math.hypot(b.x - here.x, b.y - here.y));
-      for (const room of rooms) {
+      // lugares a mais: outros cantos dos mesmos cômodos (pontos livres sorteados com semente fixa)
+      const more = extraSpots > 0 ? await simEval(page, (sim, n) => {
+        const w = sim.world;
+        let state = 12345;
+        const rnd = () => ((state = (state * 1103515245 + 12345) % 2147483648) / 2147483648);
+        const out = [];
+        for (let guard = 0; guard < 4000 && out.length < n; guard++) {
+          const room = w.rooms[Math.floor(rnd() * w.rooms.length)];
+          const xs = room.polygon.map((p) => p[0]);
+          const ys = room.polygon.map((p) => p[1]);
+          const x = Math.min(...xs) + rnd() * (Math.max(...xs) - Math.min(...xs));
+          const y = Math.min(...ys) + rnd() * (Math.max(...ys) - Math.min(...ys));
+          if (w.roomAt(x, y, room.floor) !== room || !w.isFree(x, y, room.floor, 0.5)) continue;
+          if (Math.hypot(x - room.centroid.x, y - room.centroid.y) < 1.2 || out.some((q) => q.floor === room.floor && Math.hypot(q.x - x, q.y - y) < 1.5)) continue;
+          out.push({ name: room.name, x, y, floor: room.floor });
+        }
+        return out;
+      }, extraSpots) : [];
+      for (const room of [...rooms, ...more]) {
         const ok = await simEval(page, (sim, r) => sim.walker.goTo(r.x, r.y, r.floor), room);
         if (!ok) continue;
         // anda até chegar (parou de se mexer)
         await run(1500);
-        await advanceUntil(page, async () => !(await simEval(page, (sim) => sim.truth().moving)), { stepMs: 500, limitS: 240, what: `chegar em ${room.name}` });
+        await advanceUntil(
+          page,
+          async () => {
+            // trocou de andar no caminho: avisa na hora, pelo controle "Andar", como o usuário faria
+            const now = await simEval(page, (sim) => sim.truth());
+            if (now.floor !== floorNow) {
+              const up = now.floor > floorNow;
+              for (let k = 0; k < Math.abs(now.floor - floorNow); k++) await page.click(up ? '[aria-label="Subi um andar"]' : '[aria-label="Desci um andar"]');
+              floorNow = now.floor;
+            }
+            return !now.moving;
+          },
+          { stepMs: 500, limitS: 240, what: `chegar em ${room.name}` },
+        );
         const at = await simEval(page, (sim) => sim.truth());
-        if (at.floor !== floorNow) {
-          // avisa o andar, como o usuário faria
-          const up = at.floor > floorNow;
-          for (let k = 0; k < Math.abs(at.floor - floorNow); k++) await page.click(up ? '[aria-label="Subi um andar"]' : '[aria-label="Desci um andar"]');
-          floorNow = at.floor;
-        }
         if (at.room !== room.name) continue; // parou fora do cômodo: não marca com o nome errado
         await page.click('.msv__bar .btn--primary'); // "Marcar este lugar"
         await page.waitForSelector('.msv-mark');
@@ -182,7 +217,7 @@ export async function hardSession(env, { place = null, still = false, walkS = 24
       await loadHardPlace(page, recipe);
       await page.clock.runFor(4000); // a lista do lugar novo chega e a tela de redes se atualiza
     }
-    await installProbe(page);
+    await installProbe(page, { everyMs: 100 });
     await page.locator('.mlib-hero .btn', { hasText: 'Novo mapa' }).click();
     await page.waitForSelector('.sheet .map-start');
     await page.click('.sheet__footer .btn--primary');

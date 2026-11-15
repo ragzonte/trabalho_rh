@@ -169,6 +169,29 @@ test('o CSS do app só usa o que o WebView 80 entende', () => {
       }
     }
   }
+  // CSS embutido em JavaScript (componentes que injetam a própria folha, como o medidor)
+  for (const file of listJs(ROOT)) {
+    const source = readFileSync(file, 'utf8');
+    let ast;
+    try {
+      ast = acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'module', allowHashBang: true });
+    } catch {
+      continue; // o teste de JavaScript já acusa
+    }
+    const check = (node, text) => {
+      if (typeof text !== 'string' || !/[{][^{}]*:[^{}]*[}]/.test(text)) return; // não tem cara de regra de CSS
+      for (const [re, what] of NEW_CSS) {
+        if (re.test(text)) problems.push(`${relative(ROOT, file)}:${acorn.getLineInfo(source, node.start).line} (CSS dentro do JS) ${what}`);
+      }
+      if (/display:\s*(inline-)?flex[^}]*[;{\s]gap:\s*[1-9]/.test(text) && !/no-flex-gap/.test(text)) {
+        problems.push(`${relative(ROOT, file)}:${acorn.getLineInfo(source, node.start).line} (CSS dentro do JS) gap em flex sem regra de reserva \`.no-flex-gap\` (Chrome 84)`);
+      }
+    };
+    walk.full(ast, (node) => {
+      if (node.type === 'TemplateElement') check(node, node.value.cooked);
+      else if (node.type === 'Literal') check(node, node.value);
+    });
+  }
   assert.deepEqual(problems, [], `CSS novo demais para o WebView:\n${problems.join('\n')}`);
 });
 

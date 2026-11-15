@@ -840,3 +840,34 @@ export function readRecord(raw) {
 export function approxMetersText(m) {
   return fmtMeters(m, { approx: true });
 }
+
+// ---------------------------------------------------------------------------
+// De onde é um levantamento: da casa virtual (demonstração) ou do Wi-Fi de verdade
+// ---------------------------------------------------------------------------
+//
+// Um levantamento pertence ao modo em que começou. Leituras da casa virtual nunca continuam com
+// o Wi-Fi de verdade (nem o contrário): o mapa sairia sem sentido e guardado com o rótulo errado.
+
+/** O rascunho (ou o mapa) é da demonstração? Só quando diz isso com todas as letras: sem o campo, conta como do Wi-Fi de verdade. */
+export function isDemoOrigin(item) {
+  return !!item && typeof item === 'object' && item.demo === true;
+}
+
+/** Dá para continuar este rascunho (ou mapa) no modo em que o app está agora? */
+export function matchesMode(item, demoNow) {
+  return isDemoOrigin(item) === !!demoNow;
+}
+
+/**
+ * Os textos do cartão de um rascunho que é do outro modo.
+ * @param {object} draft
+ * @param {{locked?:boolean}} [o]  locked = aqui só existe a demonstração (navegador): não há como trocar de modo
+ * @returns {{title:string, how:string}}
+ */
+export function foreignDraftText(draft, { locked = false } = {}) {
+  if (isDemoOrigin(draft)) return { title: 'Rascunho da demonstração', how: 'Feito na casa virtual. Para continuar, ligue o modo demonstração nos Ajustes.' };
+  return {
+    title: 'Rascunho do Wi-Fi de verdade',
+    how: locked ? 'Feito com o Wi-Fi de verdade. Só dá para continuar no celular, fora da demonstração.' : 'Feito com o Wi-Fi de verdade. Para continuar, saia da demonstração.',
+  };
+}

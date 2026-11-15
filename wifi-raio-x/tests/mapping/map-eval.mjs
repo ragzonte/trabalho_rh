@@ -800,8 +800,8 @@ export async function runMapBench(run) {
     }
     try {
       // Posições reais + ruído NÃO são uma estimativa encolhida (o ruído soma espalhamento em vez de
-      // tirar): a correção de tamanho do construtor não se aplica a elas.
-      const tune = run.truth && run.noise > 0 ? { sizeGain: 0, ...run.tune } : run.tune;
+      // tirar): a correção de tamanho do construtor (alcance alargado pelo erro) não se aplica a elas.
+      const tune = run.truth && run.noise > 0 ? { areaErr: 0, ...run.tune } : run.tune;
       const evaluated = evaluateMap(scenario, solution, { labels: run.labels, autoRooms: run.autoRooms, own: run.own, tune });
       const result = { ...base, ok: true, solveMs, ...evaluated.metrics };
       if (run.svgDir) {
