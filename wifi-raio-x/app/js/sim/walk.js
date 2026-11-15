@@ -515,10 +515,13 @@ export function planWalk(world, options = {}) {
   }
 
   const minLength = options.minLengthM ?? 0;
+  // A primeira volta passa por todos os cômodos; as seguintes param assim que a meta é atingida.
+  const enough = (lap) => lap > 0 && plan.lengthM >= minLength;
 
   if (kind === 'tour') {
     for (let lap = 0; lap < 40; lap++) {
       forEachRoom((room) => {
+        if (enough(lap)) return;
         const extra = Math.max(1, Math.min(6, Math.round(room.area / 10) + (rng.chance(0.5) ? 1 : 0)));
         const pts = spread(room, extra);
         if (lap === 0) pts.unshift([...cellXY(centerCell(room)), centerCell(room)]);
@@ -533,6 +536,7 @@ export function planWalk(world, options = {}) {
       // Cada volta contorna um pouco mais para dentro: cobre melhor o miolo dos cômodos.
       const inset = 0.5 + 0.45 * (lap % 3);
       forEachRoom((room) => {
+        if (enough(lap)) return;
         const ring = insetPolygon(room.polygon, inset);
         const cells = [];
         for (const [x, y] of ring) {
@@ -781,11 +785,12 @@ export function simulateSurvey(world, plan, options = {}) {
     if (still && still.label) scan.label = still.label;
     scans.push(scan);
 
-    for (const a of aps) {
-      if (meta[a.bssid]) continue;
-      const device = world.ap(a.bssid).device;
-      if (!deviceIds.has(device)) deviceIds.set(device, `d${deviceIds.size + 1}`);
-      meta[a.bssid] = { ssid: a.ssid, freq: a.frequency, device: deviceIds.get(device) };
+    // Dados de cada rede, na ordem em que foram aparecendo; o aparelho ganha um id neutro.
+    for (const r of scan.readings) {
+      if (meta[r.id]) continue;
+      const ap = world.ap(r.id);
+      if (!deviceIds.has(ap.device)) deviceIds.set(ap.device, `d${deviceIds.size + 1}`);
+      meta[r.id] = { ssid: ap.ssid, freq: ap.freq, device: deviceIds.get(ap.device) };
     }
 
     points.push({ x: mid.x, y: mid.y, z: mid.z });

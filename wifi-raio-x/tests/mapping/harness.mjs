@@ -52,7 +52,7 @@ const EFFORT = {
   kitnet: { length: 155, spots: 14, spots30: 25 },
   apartamento: { length: 225, spots: 22, spots30: 30 },
   sobrado: { length: 310, spots: 32, spots30: 40 },
-  escritorio: { length: 380, spots: 40, spots30: 45 },
+  escritorio: { length: 340, spots: 34, spots30: 45 },
 };
 
 function effortForArea(area) {
@@ -204,7 +204,7 @@ async function workerMain() {
   }
 }
 
-function solveInWorker(job, budgetMs) {
+function solveInWorker(job, budgetMs, graceMs) {
   return new Promise((resolve) => {
     const worker = new Worker(new URL(import.meta.url), { workerData: job });
     let done = false;
@@ -216,7 +216,7 @@ function solveInWorker(job, budgetMs) {
       resolve(value);
     };
     // Folga para a thread subir e importar o módulo; o tempo de solve é medido lá dentro.
-    const timer = setTimeout(() => finish({ ok: false, timeout: true, error: `passou do tempo (${budgetMs} ms)` }), budgetMs + 5000);
+    const timer = setTimeout(() => finish({ ok: false, timeout: true, error: `passou do tempo (${budgetMs} ms)` }), budgetMs + graceMs);
     worker.once('message', finish);
     worker.once('error', (err) => finish({ ok: false, error: String((err && err.stack) || err) }));
     worker.once('exit', (code) => finish({ ok: false, error: `a thread terminou sem resposta (código ${code})` }));
@@ -230,6 +230,7 @@ function solveInWorker(job, budgetMs) {
  * @param {string} run.solverPath  caminho do módulo do solucionador
  * @param {string} [run.exportName]
  * @param {number} [run.budgetMs]
+ * @param {number} [run.graceMs]   folga para a thread subir antes do corte forçado (padrão 5000)
  * @param {boolean} [run.inline]   roda na thread principal (depuração): sem corte de tempo forçado
  * @param {string} [run.svgDir]
  */
@@ -258,6 +259,7 @@ export async function runScenario(desc, run) {
     reply = await solveInWorker(
       { solverUrl: pathToFileURL(solverPath).href, exportName, survey, options, oracle: isBaseline ? desc : null },
       budgetMs,
+      run.graceMs ?? 5000,
     );
   }
 

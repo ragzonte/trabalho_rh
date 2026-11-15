@@ -5,11 +5,12 @@
 //   solveOracle       teto "de trapaça": conhece a posição REAL dos roteadores e ajusta a curva de
 //                     cada um com a posição real das varreduras; depois localiza cada varredura por
 //                     trilateração. Mostra o que o modelo "sinal cai com a distância" consegue no melhor caso.
+//   solveOracleTrack  o mesmo, mais o fato de que ninguém anda mais que ~1 m/s (segue a caminhada inteira).
 //   solveOracleField  teto mais alto ainda: conhece o mapa de rádio REAL (paredes e sombra incluídas)
-//                     e ainda usa o fato de que ninguém anda mais que ~1 m/s. É o limite físico.
+//                     e também usa o limite de velocidade. É o limite físico.
 //   solveCollapse     todos os pontos na origem: a resposta de quem não sabe nada (nota 100).
 //
-// Os dois oráculos recebem a verdade em `options.truth`, que a bancada só entrega a este arquivo.
+// Os oráculos recebem a verdade em `options.truth`, que a bancada só entrega a este arquivo.
 
 import { FLOOR_HEIGHT } from '../../app/js/mapping/types.js';
 
@@ -148,7 +149,7 @@ export function solveCollapse(survey) {
 }
 
 // ---------------------------------------------------------------------------
-// Oráculo 1: posição real dos roteadores + curva ajustada por roteador
+// Oráculos de distância: posição real dos roteadores + curva ajustada por roteador
 // ---------------------------------------------------------------------------
 
 function needTruth(options) {
@@ -159,31 +160,32 @@ function needTruth(options) {
   return truth;
 }
 
-/** @type {(survey: import('../../app/js/mapping/types.js').Survey, options: {truth: Object}) => import('../../app/js/mapping/types.js').MapSolution} */
-export function solveOracle(survey, options) {
-  const truth = needTruth(options);
+// Curva de cada roteador, rssi = p0 - 10 n log10(d), ajustada com as distâncias REAIS.
+// Com mais de um andar, cada (roteador, andar) ganha a sua curva: a laje entra no p0.
+function fitModels(survey, truth) {
   const scans = survey.scans;
-  const startFloor = truth.startFloor ?? 0;
-  // Altura real do celular em cada varredura (o andar marcado é relativo ao andar de partida).
-  const phoneZ = (s) => (s.floor + startFloor) * FLOOR_HEIGHT + 1.2;
-
-  // Curva de cada roteador: rssi = p0 - 10 n log10(d), ajustada com as distâncias REAIS.
-  const model = {};
-  for (const id of Object.keys(survey.aps)) {
-    const ap = truth.aps[id];
-    if (!ap) continue;
-    const xs = [];
-    const ys = [];
-    scans.forEach((s, i) => {
-      const r = s.readings.find((q) => q.id === id);
-      if (!r || (r.ageMs ?? 0) > FRESH_MS) return;
-      const p = truth.points[i];
-      xs.push(Math.log10(Math.max(0.5, Math.hypot(p.x - ap.x, p.y - ap.y, p.z - ap.z))));
-      ys.push(r.rssi);
-    });
+  const groups = new Map(); // "bssid|andar" e "bssid|*" -> {xs, ys}
+  const push = (key, x, y) => {
+    let g = groups.get(key);
+    if (!g) groups.set(key, (g = { xs: [], ys: [] }));
+    g.xs.push(x);
+    g.ys.push(y);
+  };
+  scans.forEach((s, i) => {
+    const p = truth.points[i];
+    for (const r of s.readings) {
+      const ap = truth.aps[r.id];
+      if (!ap || (r.ageMs ?? 0) > FRESH_MS) continue;
+      const x = Math.log10(Math.max(0.5, Math.hypot(p.x - ap.x, p.y - ap.y, p.z - ap.z)));
+      push(`${r.id}|${s.floor}`, x, r.rssi);
+      push(`${r.id}|*`, x, r.rssi);
+    }
+  });
+  const models = new Map();
+  for (const [key, { xs, ys }] of groups) {
     if (xs.length < 3) continue;
-    const mx = xs.reduce((s, v) => s + v, 0) / xs.length;
-    const my = ys.reduce((s, v) => s + v, 0) / ys.length;
+    const mx = xs.reduce((t, v) => t + v, 0) / xs.length;
+    const my = ys.reduce((t, v) => t + v, 0) / ys.length;
     let sxx = 0;
     let sxy = 0;
     for (let i = 0; i < xs.length; i++) {
@@ -197,10 +199,18 @@ export function solveOracle(survey, options) {
     let res = 0;
     for (let i = 0; i < xs.length; i++) res += (ys[i] - (p0 - 10 * n * xs[i])) ** 2;
     const sigma = Math.max(2, Math.min(8, Math.sqrt(res / Math.max(1, xs.length - 2))));
-    model[id] = { ...ap, p0, n, sigma };
+    models.set(key, { p0, n, sigma, count: xs.length });
   }
+  /** Modelo de um roteador visto de um andar (cai no modelo geral quando há poucos dados). */
+  const modelFor = (id, floor) => {
+    const own = models.get(`${id}|${floor}`);
+    const m = own && own.count >= 8 ? own : models.get(`${id}|*`);
+    return m ? { ...truth.aps[id], ...m } : null;
+  };
+  return { modelFor, ids: Object.keys(survey.aps).filter((id) => models.has(`${id}|*`)) };
+}
 
-  // Área de busca: onde o usuário andou, com folga.
+function trueBounds(truth, pad) {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -211,27 +221,55 @@ export function solveOracle(survey, options) {
     maxX = Math.max(maxX, p.x);
     maxY = Math.max(maxY, p.y);
   }
-  const pad = 1.5;
+  return [minX - pad, maxX + pad, minY - pad, maxY + pad];
+}
 
-  const points = scans.map((s) => {
-    const z = phoneZ(s);
-    const obs = s.readings.filter((r) => model[r.id] && (r.ageMs ?? 0) <= FRESH_MS).map((r) => ({ r: r.rssi, m: model[r.id] }));
-    const cost = (x, y) => {
-      let c = 0;
-      for (const o of obs) {
-        const d = Math.max(0.5, Math.hypot(x - o.m.x, y - o.m.y, z - o.m.z));
-        const e = (o.r - (o.m.p0 - 10 * o.m.n * Math.log10(d))) / o.m.sigma;
-        c += e * e;
-      }
-      return c;
-    };
+// Custo (soma dos erros ao quadrado, em desvios-padrão) de uma varredura estar em (x, y).
+function rangeCost(obs, x, y, z) {
+  let c = 0;
+  for (const o of obs) {
+    const d = Math.max(0.5, Math.hypot(x - o.m.x, y - o.m.y, z - o.m.z));
+    const e = (o.r - (o.m.p0 - 10 * o.m.n * Math.log10(d))) / o.m.sigma;
+    c += e * e;
+  }
+  return c;
+}
+
+function oracleAps(survey, truth, fit) {
+  const startFloor = truth.startFloor ?? 0;
+  const aps = {};
+  for (const id of fit.ids) {
+    const m = fit.modelFor(id, '*');
+    aps[id] = { x: m.x, y: m.y, z: m.z - startFloor * FLOOR_HEIGHT, p0: m.p0, n: m.n, conf: 1 };
+  }
+  return aps;
+}
+
+/**
+ * Trilateração de cada varredura, uma a uma, com a posição REAL dos roteadores.
+ * @type {(survey: import('../../app/js/mapping/types.js').Survey, options: {truth: Object}) => import('../../app/js/mapping/types.js').MapSolution}
+ */
+export function solveOracle(survey, options) {
+  const truth = needTruth(options);
+  const startFloor = truth.startFloor ?? 0;
+  const fit = fitModels(survey, truth);
+  const area = trueBounds(truth, 1.5); // onde o usuário andou, com folga
+
+  const points = survey.scans.map((s) => {
+    // Altura real do celular (o andar marcado é relativo ao andar de partida).
+    const z = (s.floor + startFloor) * FLOOR_HEIGHT + 1.2;
+    const obs = [];
+    for (const r of s.readings) {
+      const m = (r.ageMs ?? 0) <= FRESH_MS ? fit.modelFor(r.id, s.floor) : null;
+      if (m) obs.push({ r: r.rssi, m });
+    }
     // Busca em grade, do grosso para o fino.
-    let best = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, c: Infinity };
-    let span = [minX - pad, maxX + pad, minY - pad, maxY + pad];
+    let best = { x: (area[0] + area[1]) / 2, y: (area[2] + area[3]) / 2, c: Infinity };
+    let span = area;
     for (const step of [0.5, 0.1, 0.02]) {
       for (let x = span[0]; x <= span[1] + 1e-9; x += step) {
         for (let y = span[2]; y <= span[3] + 1e-9; y += step) {
-          const c = cost(x, y);
+          const c = rangeCost(obs, x, y, z);
           if (c < best.c) best = { x, y, c };
         }
       }
@@ -239,84 +277,24 @@ export function solveOracle(survey, options) {
     }
     return { x: best.x, y: best.y, z: s.floor * FLOOR_HEIGHT, conf: obs.length >= 3 ? 1 : 0.3 };
   });
-
-  const aps = {};
-  for (const [id, m] of Object.entries(model)) {
-    aps[id] = { x: m.x, y: m.y, z: m.z - startFloor * FLOOR_HEIGHT, p0: m.p0, n: m.n, conf: 1 };
-  }
-  return { points, aps, scaleConf: 1 };
+  return { points, aps: oracleAps(survey, truth, fit), scaleConf: 1 };
 }
 
 // ---------------------------------------------------------------------------
-// Oráculo 2: mapa de rádio real + limite de velocidade (o teto físico)
+// Filtro de trajetória numa grade (forward-backward), usado pelos dois oráculos seguintes
 // ---------------------------------------------------------------------------
 
-/**
- * Conhece o sinal médio REAL de cada roteador em cada canto da casa e sabe que o usuário
- * não anda mais que ~1 m/s. Estima cada posição pela média da distribuição a posteriori
- * (algoritmo forward-backward numa grade de 0,5 m). Nenhum solucionador honesto chega aqui:
- * serve para saber quanto do erro é ruído de medição e quanto é falta de método.
- */
-export function solveOracleField(survey, options) {
-  const truth = needTruth(options);
-  const world = truth.world;
-  if (!world) throw new Error('solveOracleField precisa do mundo simulado (truth.world)');
-  const scans = survey.scans;
-  const startFloor = truth.startFloor ?? 0;
-  const CELL = 0.5;
-  const SIGMA = 3.2; // desvanecimento + ruído + corpo, em dB
-  const BODY_BIAS = 1.2; // em média o corpo tira um pouco de sinal
-  const V_MAX = 1.0;
+const TRACK_CELL = 0.5;
+const V_MAX = 1.0; // ninguém anda mais que isto fazendo o levantamento
 
-  // Células pisáveis de cada andar e o sinal médio de cada roteador em cada uma.
-  const ids = Object.keys(survey.aps).filter((id) => world.ap(id));
-  const cellsByFloor = [];
-  for (let f = 0; f < world.floors; f++) {
-    const cells = [];
-    for (let x = world.bounds.minX + CELL / 2; x < world.bounds.maxX; x += CELL) {
-      for (let y = world.bounds.minY + CELL / 2; y < world.bounds.maxY; y += CELL) {
-        if (!world.isFree(x, y, f, 0.1)) continue;
-        const pos = { x, y, z: world.phoneZ(f) };
-        cells.push({ x, y, mean: Float64Array.from(ids, (id) => world.meanRssi(world.ap(id), pos) - BODY_BIAS) });
-      }
-    }
-    cellsByFloor.push(cells);
-  }
-  const col = new Map(ids.map((id, k) => [id, k]));
-
-  // Verossimilhança de cada varredura em cada célula do seu andar.
-  const steps = scans.map((s) => {
-    const floor = Math.max(0, Math.min(world.floors - 1, s.floor + startFloor));
-    const cells = cellsByFloor[floor];
-    const seen = new Float64Array(ids.length).fill(NaN);
-    for (const r of s.readings) if (col.has(r.id) && (r.ageMs ?? 0) <= FRESH_MS) seen[col.get(r.id)] = r.rssi;
-    const logp = new Float64Array(cells.length);
-    for (let c = 0; c < cells.length; c++) {
-      let lp = 0;
-      for (let k = 0; k < ids.length; k++) {
-        const m = cells[c].mean[k];
-        if (Number.isNaN(seen[k])) {
-          // Não apareceu: improvável onde o sinal dele é forte.
-          const z = (m + 89) / 4;
-          lp += Math.log(Math.max(0.03, 1 - 1 / (1 + Math.exp(-1.7 * z))));
-        } else {
-          const e = (seen[k] - m) / SIGMA;
-          lp -= 0.5 * e * e;
-        }
-      }
-      logp[c] = lp;
-    }
-    let top = -Infinity;
-    for (const v of logp) if (v > top) top = v;
-    const like = Float64Array.from(logp, (v) => Math.exp(v - top));
-    return { floor, cells, like };
-  });
-
-  // Transição: de uma varredura à seguinte só se chega até onde as pernas alcançam.
+// steps[i] = {key, cells:[{x,y}], like:Float64Array}: células possíveis da varredura i e a
+// verossimilhança de cada uma. Devolve a média a posteriori de cada varredura.
+function smoothOnGrid(scans, steps) {
   const propagate = (from, to, weights, dt) => {
     const out = new Float64Array(to.cells.length);
-    const reach = V_MAX * Math.abs(dt) + CELL;
-    if (from.floor !== to.floor) return out.fill(1); // mudou de andar: sem restrição
+    if (from.key !== to.key) return out.fill(1); // mudou de andar: sem restrição
+    const reach = V_MAX * Math.abs(dt) + TRACK_CELL;
+    const reach2 = reach * reach;
     for (let i = 0; i < from.cells.length; i++) {
       const w = weights[i];
       if (w < 1e-12) continue;
@@ -325,7 +303,7 @@ export function solveOracleField(survey, options) {
         const b = to.cells[j];
         const dx = a.x - b.x;
         const dy = a.y - b.y;
-        if (dx * dx + dy * dy <= reach * reach) out[j] += w;
+        if (dx * dx + dy * dy <= reach2) out[j] += w;
       }
     }
     return out;
@@ -333,11 +311,10 @@ export function solveOracleField(survey, options) {
   const normalise = (v) => {
     let s = 0;
     for (const x of v) s += x;
-    if (s <= 0) return v.fill(1 / v.length);
+    if (!(s > 0)) return v.fill(1 / v.length);
     for (let i = 0; i < v.length; i++) v[i] /= s;
     return v;
   };
-
   const n = scans.length;
   const alpha = new Array(n);
   const beta = new Array(n);
@@ -351,8 +328,7 @@ export function solveOracleField(survey, options) {
     const msg = Float64Array.from(beta[i + 1], (v, j) => v * steps[i + 1].like[j]);
     beta[i] = normalise(propagate(steps[i + 1], steps[i], msg, scans[i + 1].t - scans[i].t));
   }
-
-  const points = scans.map((s, i) => {
+  return scans.map((s, i) => {
     const post = normalise(alpha[i].map((v, j) => v * beta[i][j]));
     let x = 0;
     let y = 0;
@@ -364,12 +340,100 @@ export function solveOracleField(survey, options) {
     }
     return { x, y, z: s.floor * FLOOR_HEIGHT, conf: Math.min(1, peak * 4) };
   });
+}
+
+// Transforma log-verossimilhanças em pesos sem estourar a exponencial.
+function toLikelihood(logp) {
+  let top = -Infinity;
+  for (const v of logp) if (v > top) top = v;
+  return Float64Array.from(logp, (v) => Math.exp(v - top));
+}
+
+/**
+ * Como solveOracle (posição real dos roteadores, curva ajustada), mais o limite de velocidade:
+ * o melhor que um método "sinal cai com a distância" consegue seguindo a caminhada inteira.
+ */
+export function solveOracleTrack(survey, options) {
+  const truth = needTruth(options);
+  const startFloor = truth.startFloor ?? 0;
+  const fit = fitModels(survey, truth);
+  const area = trueBounds(truth, 1.5);
+  const cells = [];
+  for (let x = area[0]; x <= area[1]; x += TRACK_CELL) for (let y = area[2]; y <= area[3]; y += TRACK_CELL) cells.push({ x, y });
+  const steps = survey.scans.map((s) => {
+    const z = (s.floor + startFloor) * FLOOR_HEIGHT + 1.2;
+    const obs = [];
+    for (const r of s.readings) {
+      const m = (r.ageMs ?? 0) <= FRESH_MS ? fit.modelFor(r.id, s.floor) : null;
+      if (m) obs.push({ r: r.rssi, m });
+    }
+    return { key: s.floor, cells, like: toLikelihood(cells.map((c) => -0.5 * rangeCost(obs, c.x, c.y, z))) };
+  });
+  return { points: smoothOnGrid(survey.scans, steps), aps: oracleAps(survey, truth, fit), scaleConf: 1 };
+}
+
+// ---------------------------------------------------------------------------
+// Oráculo do mapa de rádio real (o teto físico)
+// ---------------------------------------------------------------------------
+
+/**
+ * Conhece o sinal médio REAL de cada roteador em cada canto da casa (paredes e sombra
+ * incluídas) e sabe que o usuário não anda mais que ~1 m/s. Estima cada posição pela média
+ * da distribuição a posteriori numa grade de 0,5 m. Nenhum solucionador honesto chega aqui:
+ * serve para separar o que é ruído de medição do que é falta de método.
+ */
+export function solveOracleField(survey, options) {
+  const truth = needTruth(options);
+  const world = truth.world;
+  if (!world) throw new Error('solveOracleField precisa do mundo simulado (truth.world)');
+  const startFloor = truth.startFloor ?? 0;
+  const SIGMA = 3.2; // desvanecimento + ruído + corpo, em dB
+  const BODY_BIAS = 1.2; // em média o corpo tira um pouco de sinal
+
+  // Células pisáveis de cada andar e o sinal médio de cada roteador em cada uma.
+  const ids = Object.keys(survey.aps).filter((id) => world.ap(id));
+  const col = new Map(ids.map((id, k) => [id, k]));
+  const cellsByFloor = [];
+  for (let f = 0; f < world.floors; f++) {
+    const cells = [];
+    for (let x = world.bounds.minX + TRACK_CELL / 2; x < world.bounds.maxX; x += TRACK_CELL) {
+      for (let y = world.bounds.minY + TRACK_CELL / 2; y < world.bounds.maxY; y += TRACK_CELL) {
+        if (!world.isFree(x, y, f, 0.1)) continue;
+        const pos = { x, y, z: world.phoneZ(f) };
+        cells.push({ x, y, mean: Float64Array.from(ids, (id) => world.meanRssi(world.ap(id), pos) - BODY_BIAS) });
+      }
+    }
+    cellsByFloor.push(cells);
+  }
+
+  const steps = survey.scans.map((s) => {
+    const floor = Math.max(0, Math.min(world.floors - 1, s.floor + startFloor));
+    const cells = cellsByFloor[floor];
+    const seen = new Float64Array(ids.length).fill(NaN);
+    for (const r of s.readings) if (col.has(r.id) && (r.ageMs ?? 0) <= FRESH_MS) seen[col.get(r.id)] = r.rssi;
+    const logp = cells.map((cell) => {
+      let lp = 0;
+      for (let k = 0; k < ids.length; k++) {
+        const m = cell.mean[k];
+        if (Number.isNaN(seen[k])) {
+          // Não apareceu: improvável onde o sinal dele é forte.
+          lp += Math.log(Math.max(0.03, 1 - 1 / (1 + Math.exp(-1.7 * ((m + 89) / 4)))));
+        } else {
+          const e = (seen[k] - m) / SIGMA;
+          lp -= 0.5 * e * e;
+        }
+      }
+      return lp;
+    });
+    return { key: floor, cells, like: toLikelihood(logp) };
+  });
+
   const aps = {};
   for (const id of ids) {
     const a = world.ap(id);
     aps[id] = { x: a.x, y: a.y, z: a.z - startFloor * FLOOR_HEIGHT, p0: a.p0, n: a.n, conf: 1 };
   }
-  return { points, aps, scaleConf: 1 };
+  return { points: smoothOnGrid(survey.scans, steps), aps, scaleConf: 1 };
 }
 
 /** Padrão quando a bancada recebe este arquivo sem --export: a base ingênua. */

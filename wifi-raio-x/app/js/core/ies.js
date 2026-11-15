@@ -177,7 +177,7 @@ function textAt(b, start, end) {
   if (start >= stop) return '';
   let cut = start;
   while (cut < stop && b[cut] !== 0) cut += 1;
-  const part = b.subarray(start, cut);
+  const part = b.slice(start, cut);
   let s = '';
   if (utf8Decoder) s = utf8Decoder.decode(part);
   else for (const v of part) s += String.fromCharCode(v);

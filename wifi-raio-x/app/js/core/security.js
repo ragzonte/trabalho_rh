@@ -382,6 +382,8 @@ function build(parts) {
     osen: cloneSection(parts.sections.osen),
   };
   const { wpa, rsn, wapi, osen } = sections;
+  // "WEP" quer dizer: o beacon pede privacidade e não traz RSN nem WPA. Com um deles, não é WEP.
+  const wep = !!parts.wep && !wpa && !rsn && !wapi && !osen;
 
   // PMF só existe com RSN. Sem as flags não dá para afirmar nada sobre uma rede RSN: o
   // Android só passou a escrevê-las sempre a partir do 14 (veja parseCapabilities).
@@ -391,7 +393,7 @@ function build(parts) {
 
   const protocols = [];
   const gen = rsn ? rsnGenerations(rsn, pmf) : { wpa2: false, wpa3: false, owe: false };
-  if (parts.wep) protocols.push('WEP');
+  if (wep) protocols.push('WEP');
   if (wpa) protocols.push('WPA');
   if (gen.wpa2) protocols.push('WPA2');
   if (gen.wpa3) protocols.push('WPA3');
@@ -408,7 +410,7 @@ function build(parts) {
 
   const oweTransition = !!parts.oweTransition && !!rsn;
   const noCredential = !!rsn && rsn.akms.length > 0 && rsn.akms.every((a) => a === 'OWE');
-  const plain = !parts.wep && !wpa && !rsn && !wapi && !osen;
+  const plain = !wep && !wpa && !rsn && !wapi && !osen;
 
   const s = {
     known: !!parts.known,
@@ -416,9 +418,9 @@ function build(parts) {
     akms,
     ciphers,
     groupCipher: typeof parts.groupCipher === 'string' ? parts.groupCipher : null,
-    personal: akms.some((a) => PERSONAL_AKMS.has(a)) || (!!parts.wep && !wpa && !rsn),
+    personal: akms.some((a) => PERSONAL_AKMS.has(a)) || wep,
     enterprise: akms.some((a) => ENTERPRISE_AKMS.has(a)),
-    open: !!parts.known && !parts.wep && !wpa && !wapi && !osen && (plain || noCredential),
+    open: !!parts.known && !wep && !wpa && !wapi && !osen && (plain || noCredential),
     encrypted: !!parts.known && !plain && !oweTransition,
     transition: (gen.wpa2 && gen.wpa3) || oweTransition,
     oweTransition,
