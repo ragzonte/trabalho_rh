@@ -5,7 +5,7 @@
 //   ROOM_PRESETS · cleanLabel(texto) · sameLabel(a, b) · roomChips(usados) · wherePhrase(nome)
 //   floorName(n) · floorShort(n) · clampFloor(n)
 // Levantamento
-//   levelInfo(nível) · fmtTimer(segundos) · pulseInfo({...}) · previewDue({...})
+//   levelInfo(nível) · finishBlocker(stats, limites) · fmtTimer(segundos) · pulseInfo({...}) · previewDue({...})
 //   candidateNetworks({networks, favorites, connection}) · ownBssidsFor(survey, ssids, extras)
 //   rttTargets(aps, limite)
 // Resultado
@@ -231,6 +231,29 @@ export function pulseInfo({ now, lastScanAt, gaps = [], loop = {}, state = 'reco
 }
 
 /**
+ * Por que ainda não dá para concluir, em uma frase (vai embaixo do botão "Concluir").
+ * @param {object} stats        stats() do gravador
+ * @param {{minUseful?:number, minSpots?:number, scansPerSpot?:number}} [limits]  SURVEY_THRESHOLDS do gravador
+ */
+export function finishBlocker(stats, limits = {}) {
+  const st = stats && typeof stats === 'object' ? stats : {};
+  const minUseful = isNum(limits.minUseful) ? limits.minUseful : 25;
+  const minSpots = isNum(limits.minSpots) ? limits.minSpots : 12;
+  const scans = isNum(st.scans) ? st.scans : 0;
+  if (scans === 0) return 'Para concluir, o mapa precisa de leituras: ande pela casa com o app aberto.';
+  const useful = isNum(st.useful) ? st.useful : scans;
+  const spots = isNum(st.spots) ? st.spots : 0;
+  const needUseful = Math.max(0, minUseful - useful);
+  const needSpots = Math.max(0, minSpots - spots);
+  // leituras de sobra e mesmo assim insuficiente: o sinal não variou (a pessoa não saiu do lugar)
+  if (needUseful === 0 || needSpots === 0) return 'Para concluir, ande por mais cômodos: até aqui o sinal quase não mudou.';
+  const lugares = needSpots === 1 ? 'falta 1 lugar marcado' : `faltam ${needSpots} lugares marcados`;
+  if (st.throttled) return `Para concluir, ${lugares} (uma leitura em cada).`;
+  const leituras = needUseful === 1 ? 'falta 1 leitura' : `faltam ${needUseful} leituras`;
+  return `Para concluir, ${leituras} andando pela casa (ou ${needSpots === 1 ? '1 lugar marcado' : `${needSpots} lugares marcados`}).`;
+}
+
+/**
  * Hora de refazer a prévia do mapa? A prévia roda a cada poucas leituras novas, nunca com outra
  * em andamento, e espaçada no tempo para não gastar bateria à toa.
  */
@@ -247,11 +270,12 @@ export function previewDue({ scans = 0, lastScans = 0, running = false, now = 0,
 /**
  * Redes candidatas a "minhas redes" antes de começar: a conectada primeiro, depois as
  * favoritas, depois as mais fortes. Já vêm marcadas a conectada e as favoritas.
- * @param {{networks?:object[], favorites?:Iterable<string>, connection?:object|null}} state  pedaços do store
- * @returns {{ssid:string, selected:boolean, connected:boolean, favorite:boolean, rssi:number|null, count:number}[]}
+ * @param {{networks?:object[], favorites?:Iterable<string>, connection?:object|null, own?:Set<string>|string[]}} state  pedaços do store
+ * @returns {{ssid:string, selected:boolean, connected:boolean, favorite:boolean, sameDevice:boolean, rssi:number|null, count:number}[]}
  */
-export function candidateNetworks({ networks = [], favorites = [], connection = null } = {}, limit = 8) {
+export function candidateNetworks({ networks = [], favorites = [], connection = null, own = null } = {}, limit = 8) {
   const fav = new Set(favorites || []);
+  const ownIds = own && typeof own.has === 'function' ? own : new Set(Array.isArray(own) ? own : []);
   const connectedSsid = connection && connection.connected && typeof connection.ssid === 'string' ? connection.ssid : null;
   const bySsid = new Map();
   for (const net of networks || []) {
@@ -259,20 +283,23 @@ export function candidateNetworks({ networks = [], favorites = [], connection = 
     if (!ssid) continue; // rede oculta não tem nome para escolher
     const best = net.best && isNum(net.best.rssi) ? net.best.rssi : isNum(net.bestRssi) ? net.bestRssi : null;
     const count = Array.isArray(net.aps) ? net.aps.length : 1;
+    // outro nome saindo do mesmo roteador da rede conectada (a de 2,4 GHz e a de 5 GHz, por exemplo)
+    const sameDevice = Array.isArray(net.aps) && net.aps.some((ap) => ap && (ap.own === true || ownIds.has(ap.bssid)));
     const prev = bySsid.get(ssid);
     if (prev) {
       prev.count += count;
+      prev.sameDevice = prev.sameDevice || sameDevice;
       if (isNum(best) && (!isNum(prev.rssi) || best > prev.rssi)) prev.rssi = best;
     } else {
-      bySsid.set(ssid, { ssid, selected: false, connected: ssid === connectedSsid, favorite: fav.has(ssid), rssi: best, count });
+      bySsid.set(ssid, { ssid, selected: false, connected: ssid === connectedSsid, favorite: fav.has(ssid), sameDevice, rssi: best, count });
     }
   }
   // conectada ou favorita que não apareceu na última busca continua na lista
-  if (connectedSsid && !bySsid.has(connectedSsid)) bySsid.set(connectedSsid, { ssid: connectedSsid, selected: false, connected: true, favorite: fav.has(connectedSsid), rssi: isNum(connection.rssi) ? connection.rssi : null, count: 1 });
-  for (const ssid of fav) if (ssid && !bySsid.has(ssid)) bySsid.set(ssid, { ssid, selected: false, connected: false, favorite: true, rssi: null, count: 0 });
+  if (connectedSsid && !bySsid.has(connectedSsid)) bySsid.set(connectedSsid, { ssid: connectedSsid, selected: false, connected: true, favorite: fav.has(connectedSsid), sameDevice: false, rssi: isNum(connection.rssi) ? connection.rssi : null, count: 1 });
+  for (const ssid of fav) if (ssid && !bySsid.has(ssid)) bySsid.set(ssid, { ssid, selected: false, connected: false, favorite: true, sameDevice: false, rssi: null, count: 0 });
   const list = [...bySsid.values()];
-  for (const item of list) item.selected = item.connected || item.favorite;
-  const rank = (n) => (n.connected ? 0 : n.favorite ? 1 : 2);
+  for (const item of list) item.selected = item.connected || item.favorite || item.sameDevice;
+  const rank = (n) => (n.connected ? 0 : n.favorite ? 1 : n.sameDevice ? 2 : 3);
   list.sort((a, b) => rank(a) - rank(b) || (b.rssi ?? -200) - (a.rssi ?? -200) || (a.ssid < b.ssid ? -1 : 1));
   const keep = list.filter((n) => n.selected);
   for (const n of list) if (!n.selected && keep.length < limit) keep.push(n);
@@ -527,54 +554,82 @@ export function withKnownDistance(survey, spotA, spotB, meters) {
 }
 
 /**
- * Troca o nome de um ambiente do mapa. Os nomes moram no levantamento (rótulo das varreduras):
- *   - ambiente que já tinha nome: todas as varreduras com aquele nome ganham o novo;
- *   - ambiente automático ("Ambiente 2"): as varreduras que caíram nele ganham o nome.
- * Devolve um levantamento NOVO, ou null quando não há o que renomear.
+ * Troca o nome de um ambiente do mapa. Os nomes moram no levantamento, nas varreduras dos pontos
+ * marcados (uma varredura "andando" não guarda nome):
+ *   - ambiente que já tinha nome: os pontos marcados com aquele nome, neste andar, ganham o novo
+ *     (nome vazio = tira o nome; o ambiente volta a ser "Ambiente N");
+ *   - ambiente automático ("Ambiente 2"): se há nele um ponto marcado sem nome, é ele que ganha o
+ *     nome; senão a varredura mais próxima do centro do ambiente vira um ponto marcado com o nome.
+ * Devolve um levantamento NOVO (o original não muda), ou null quando não há o que renomear.
  */
 export function renameRoom(survey, model, floorIndex, roomId, name) {
   const floor = model && Array.isArray(model.floors) ? model.floors[floorIndex] : null;
   const scans = survey && Array.isArray(survey.scans) ? survey.scans : null;
-  if (!floor || !scans) return null;
+  if (!floor || !scans || !Array.isArray(floor.rooms)) return null;
   const roomIndex = floor.rooms.findIndex((r) => r.id === roomId);
   const room = floor.rooms[roomIndex];
   if (!room) return null;
   const label = cleanLabel(String(name ?? ''));
-  const targets = new Set();
+  const floorOf = (scan) => (isNum(scan.floor) ? Math.round(scan.floor) : 0);
+  const patchScans = (targets, change) => ({ ...survey, scans: scans.map((scan, i) => (targets.has(i) ? change({ ...scan }) : scan)) });
+  const setLabel = (scan) => {
+    if (label) scan.label = label;
+    else delete scan.label;
+    return scan;
+  };
+
   if (!room.auto) {
+    const targets = new Set();
     for (let i = 0; i < scans.length; i++) {
-      const s = scans[i];
-      if (s && (isNum(s.floor) ? Math.round(s.floor) : 0) === floor.floor && sameLabel(s.label, room.label)) targets.add(i);
+      const scan = scans[i];
+      if (scan && scan.spot !== null && scan.spot !== undefined && floorOf(scan) === floor.floor && sameLabel(scan.label, room.label)) targets.add(i);
     }
-  } else {
-    if (!label) return null;
-    const { nx, ny, cell, bounds } = model;
-    for (const p of model.path || []) {
-      if (p.floor !== floor.floor) continue;
-      const ix = Math.floor((p.x - bounds.minX) / cell);
-      const iy = Math.floor((p.y - bounds.minY) / cell);
-      if (ix < 0 || iy < 0 || ix >= nx || iy >= ny) continue;
-      if (floor.room[iy * nx + ix] === roomIndex && scans[p.i]) targets.add(p.i);
-    }
+    return targets.size ? patchScans(targets, setLabel) : null;
   }
-  if (!targets.size) return null;
-  const next = scans.map((s, i) => {
-    if (!targets.has(i)) return s;
-    const copy = { ...s };
-    if (label) copy.label = label;
-    else delete copy.label;
-    return copy;
+
+  if (!label) return null;
+  // varreduras deste andar que caíram dentro do ambiente
+  const { nx, ny, cell, bounds } = model;
+  const inside = [];
+  for (const p of model.path || []) {
+    if (p.floor !== floor.floor || !scans[p.i]) continue;
+    const ix = Math.floor((p.x - bounds.minX) / cell);
+    const iy = Math.floor((p.y - bounds.minY) / cell);
+    if (ix < 0 || iy < 0 || ix >= nx || iy >= ny) continue;
+    if (floor.room[iy * nx + ix] === roomIndex) inside.push(p);
+  }
+  if (!inside.length) return null;
+  const near = (p) => Math.hypot(p.x - room.cx, p.y - room.cy);
+  inside.sort((a, b) => near(a) - near(b));
+
+  // um ponto marcado sem nome dentro do ambiente: o nome vai para ele (todas as varreduras do ponto)
+  const unnamed = inside.find((p) => {
+    const scan = scans[p.i];
+    return scan.spot !== null && scan.spot !== undefined && !cleanLabel(String(scan.label ?? ''));
   });
-  return { ...survey, scans: next };
+  if (unnamed) {
+    const id = scans[unnamed.i].spot;
+    const targets = new Set();
+    scans.forEach((scan, i) => scan && scan.spot === id && targets.add(i));
+    return patchScans(targets, setLabel);
+  }
+  // senão, a varredura mais central (que ainda não é de nenhum ponto) vira um ponto com o nome
+  const free = inside.find((p) => scans[p.i].spot === null || scans[p.i].spot === undefined);
+  if (!free) return null;
+  let nextId = 0;
+  for (const scan of scans) if (scan && Number.isInteger(scan.spot) && scan.spot >= nextId) nextId = scan.spot + 1;
+  return patchScans(new Set([free.i]), (scan) => ({ ...scan, still: true, spot: nextId, label }));
 }
 
 // ---------------------------------------------------------------------------
 // Biblioteca e arquivos
 // ---------------------------------------------------------------------------
 
+const LEVELS_Q = ['boa', 'razoavel', 'fraca'];
+
 /**
- * Resumo de um mapa para o cartão da biblioteca (guardado junto, para a lista não precisar
- * refazer o mapa de cada um).
+ * Resumo de um mapa a partir do modelo (o que a tela de resultado mostra e o que vai em
+ * `stats` / `meta` do registro guardado).
  */
 export function mapMeta(model, survey) {
   const q = (model && model.quality) || {};
@@ -587,19 +642,20 @@ export function mapMeta(model, survey) {
     floors: floors.length,
     scans: isNum(q.scans) ? q.scans : scans.length,
     spots: isNum(q.spots) ? q.spots : 0,
-    level: q.level === 'boa' || q.level === 'razoavel' ? q.level : 'fraca',
+    level: LEVELS_Q.includes(q.level) ? q.level : 'fraca',
     errorM: isNum(q.expectedErrorM) ? Math.round(q.expectedErrorM * 10) / 10 : null,
     durationS: last && isNum(last.t) ? Math.round(last.t) : 0,
   };
 }
 
-/** "≈ 62 m² · 5 ambientes · 2 andares" */
+/** "≈ 62 m² · 2 andares · 5 lugares marcados" (cartão da biblioteca). */
 export function metaLine(meta) {
   if (!meta || typeof meta !== 'object') return '';
   const parts = [];
-  if (isNum(meta.areaM2) && meta.areaM2 > 0) parts.push(`≈${THIN}${fmtNum(meta.areaM2)}${THIN}m²`);
-  if (isNum(meta.rooms) && meta.rooms > 0) parts.push(`${meta.rooms} ${meta.rooms === 1 ? 'ambiente' : 'ambientes'}`);
+  if (isNum(meta.areaM2) && meta.areaM2 > 0) parts.push(`≈${THIN}${fmtNum(Math.round(meta.areaM2))}${THIN}m²`);
   if (isNum(meta.floors) && meta.floors > 1) parts.push(`${meta.floors} andares`);
+  if (isNum(meta.spots) && meta.spots > 0) parts.push(`${meta.spots} ${meta.spots === 1 ? 'lugar marcado' : 'lugares marcados'}`);
+  else if (isNum(meta.scans) && meta.scans > 0) parts.push(`${meta.scans} ${meta.scans === 1 ? 'leitura' : 'leituras'}`);
   return parts.join(' · ');
 }
 
@@ -633,60 +689,62 @@ export function cleanMapName(text) {
 }
 
 /**
- * Monta o registro de um mapa para guardar. O modelo nunca é guardado: ele é refeito a partir
- * do levantamento e da solução.
+ * Monta o registro de um mapa no formato de mapping/storage.js (put). O modelo nunca é
+ * guardado: ele é refeito a partir do levantamento e da solução.
+ *   { id?, name, survey, solution, own, meta: {ownSsids, rooms, errorM, durationS}, stats: {areaM2, level}, thumb, demo }
  */
-export function makeRecord({ id, name, createdAt, survey, solution, own = [], ownSsids = [], recorder = null, model = null, thumb = null, demo = false, now = Date.now() } = {}) {
+export function makeRecord({ id, name, survey, solution, own = [], ownSsids = [], model = null, thumb = null, demo = false, now = Date.now() } = {}) {
+  const meta = mapMeta(model, survey);
   const record = {
     name: cleanMapName(String(name ?? '')) || defaultMapName(now),
-    createdAt: isNum(createdAt) ? createdAt : now,
-    updatedAt: now,
     survey,
     solution,
     own: Array.isArray(own) ? own.slice() : [],
-    ownSsids: Array.isArray(ownSsids) ? ownSsids.slice() : [],
-    meta: { ...mapMeta(model, survey), demo: !!demo },
+    meta: { ownSsids: Array.isArray(ownSsids) ? ownSsids.filter((x) => typeof x === 'string').slice(0, 32) : [], rooms: meta.rooms, errorM: meta.errorM, durationS: meta.durationS },
+    stats: { areaM2: meta.areaM2, level: meta.level },
+    demo: !!demo,
   };
-  if (id !== undefined && id !== null) record.id = id;
-  if (recorder) record.recorder = recorder;
+  if (typeof id === 'string' && id) record.id = id;
   if (typeof thumb === 'string' && thumb.startsWith('data:image/')) record.thumb = thumb;
   return record;
 }
 
 /**
- * Lê um registro vindo do armazenamento (ou de um arquivo importado) sem confiar nele.
- * @returns {{id:any, name:string, createdAt:number|null, updatedAt:number|null, survey:object|null, solution:object|null,
- *            own:string[], ownSsids:string[], recorder:any, meta:object, thumb:string|null}|null}
+ * Lê uma linha da lista (storage.list()) ou um registro completo (storage.get()) sem confiar
+ * nele, e devolve um formato só para as telas.
+ * @returns {{id:string|null, name:string, createdAt:number|null, updatedAt:number|null, survey:object|null, solution:object|null,
+ *            own:string[], ownSsids:string[], demo:boolean, thumb:string|null,
+ *            meta:{areaM2:number, floors:number, scans:number, spots:number, level:string|null, rooms:number, errorM:number|null, demo:boolean}}|null}
  */
 export function readRecord(raw) {
   if (!raw || typeof raw !== 'object') return null;
-  const strings = (list) => (Array.isArray(list) ? list.filter((s) => typeof s === 'string') : []);
+  const strings = (list) => (Array.isArray(list) ? list.filter((x) => typeof x === 'string') : []);
+  const stats = raw.stats && typeof raw.stats === 'object' ? raw.stats : {};
   const meta = raw.meta && typeof raw.meta === 'object' ? raw.meta : {};
   const survey = raw.survey && typeof raw.survey === 'object' && Array.isArray(raw.survey.scans) ? raw.survey : null;
   const solution = raw.solution && typeof raw.solution === 'object' && Array.isArray(raw.solution.points) ? raw.solution : null;
   return {
-    id: raw.id ?? null,
+    id: typeof raw.id === 'string' && raw.id ? raw.id : null,
     name: cleanMapName(String(raw.name ?? '')) || 'Mapa sem nome',
     createdAt: isNum(raw.createdAt) ? raw.createdAt : null,
     updatedAt: isNum(raw.updatedAt) ? raw.updatedAt : isNum(raw.createdAt) ? raw.createdAt : null,
     survey,
     solution,
     own: strings(raw.own),
-    ownSsids: strings(raw.ownSsids),
-    recorder: raw.recorder ?? null,
-    meta: {
-      areaM2: isNum(meta.areaM2) ? meta.areaM2 : 0,
-      rooms: isNum(meta.rooms) ? meta.rooms : 0,
-      floors: isNum(meta.floors) ? meta.floors : 0,
-      scans: isNum(meta.scans) ? meta.scans : survey ? survey.scans.length : 0,
-      spots: isNum(meta.spots) ? meta.spots : 0,
-      level: meta.level === 'boa' || meta.level === 'razoavel' || meta.level === 'fraca' ? meta.level : null,
-      errorM: isNum(meta.errorM) ? meta.errorM : null,
-      durationS: isNum(meta.durationS) ? meta.durationS : 0,
-      demo: !!meta.demo,
-    },
+    ownSsids: strings(meta.ownSsids),
+    demo: raw.demo === true,
     // só imagens embutidas: um endereço de fora nunca vira <img src>
-    thumb: typeof raw.thumb === 'string' && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(raw.thumb) ? raw.thumb : null,
+    thumb: typeof raw.thumb === 'string' && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+=*$/.test(raw.thumb) ? raw.thumb : null,
+    meta: {
+      areaM2: isNum(stats.areaM2) && stats.areaM2 > 0 ? stats.areaM2 : 0,
+      floors: isNum(stats.floors) ? stats.floors : 0,
+      scans: isNum(stats.scans) ? stats.scans : survey ? survey.scans.length : 0,
+      spots: isNum(stats.spots) ? stats.spots : 0,
+      level: LEVELS_Q.includes(stats.level) ? stats.level : null,
+      rooms: isNum(meta.rooms) ? meta.rooms : 0,
+      errorM: isNum(meta.errorM) ? meta.errorM : null,
+      demo: raw.demo === true,
+    },
   };
 }
 

@@ -71,8 +71,9 @@
 //   'bom'            60+ medições úteis ou 20+ pontos
 //   'otimo'          120+ medições úteis ou 32+ pontos, com pelo menos 3 lugares com nome
 //
-// `throttled` = o intervalo típico entre as últimas varreduras passou de 20 s (limite do Android
-// de 4 buscas a cada 2 minutos): aí a orientação muda para "pare e marque pontos".
+// `throttled` = entre as últimas varreduras há intervalos de mais de 20 s (limite do Android de
+// 4 buscas a cada 2 minutos; o app então pede uma a cada 30 s): aí a orientação muda para
+// "pare e marque pontos". `cadenceS` é a mediana desses intervalos.
 
 import { groupByDevice, normalizeBssid } from '../core/model.js';
 
@@ -92,7 +93,7 @@ import { groupByDevice, normalizeBssid } from '../core/model.js';
  * @property {number} durationS       tempo de caminhada (escala aplicada, pausas fora)
  * @property {number|null} lastScanAgoS  segundos de relógio desde a última varredura gravada
  * @property {number|null} cadenceS   intervalo típico (mediana) entre as últimas varreduras, em tempo de caminhada
- * @property {boolean} throttled      cadenceS acima de ~20 s
+ * @property {boolean} throttled      o celular está espaçando as varreduras (intervalos acima de ~20 s)
  * @property {number|null} spreadDb   quanto o sinal dos roteadores mais fortes variou (dB); pouco = não saiu do lugar
  * @property {boolean} full           chegou ao limite de varreduras de um levantamento
  * @property {{id:number, label:string, floor:number, scans:number, target:number}|null} spot  ponto em andamento
@@ -766,13 +767,18 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     return value;
   }
 
+  /** Ritmo das últimas varreduras: intervalo típico (mediana) e se o celular está limitando as buscas. */
   function cadence() {
     const gaps = [];
     for (let i = scans.length - 1; i > 0 && gaps.length < 8; i--) {
       if (scanInfo[i].seg !== scanInfo[i - 1].seg) continue; // uma pausa no meio não é ritmo
       gaps.push(scans[i].t - scans[i - 1].t);
     }
-    return gaps.length ? Math.round(median(gaps) * 10) / 10 : null;
+    if (!gaps.length) return { cadenceS: null, throttled: false };
+    gaps.sort((a, b) => a - b);
+    // Com o limite do Android os intervalos longos (~30 s) se alternam com varreduras que o
+    // próprio sistema faz por conta dele: quem denuncia o limite é o quarto superior, não a mediana.
+    return { cadenceS: Math.round(median(gaps) * 10) / 10, throttled: quantile(gaps, 0.75) > T.throttledCadenceS };
   }
 
   function hintFor(s) {
@@ -832,8 +838,7 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
         heardDevices.add(devices.get(r.id) || r.id);
       }
     }
-    const cadenceS = cadence();
-    const throttled = cadenceS !== null && cadenceS > T.throttledCadenceS;
+    const { cadenceS, throttled } = cadence();
     const spreadDb = spread();
 
     let level = 0;
@@ -1016,8 +1021,7 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     get currentSpot() {
       const spot = currentSpot !== null ? spots.get(currentSpot) : null;
       if (!spot) return null;
-      const cadenceS = cadence();
-      return { ...spotView(spot), target: cadenceS !== null && cadenceS > T.throttledCadenceS ? 1 : T.scansPerSpot };
+      return { ...spotView(spot), target: cadence().throttled ? 1 : T.scansPerSpot };
     },
     start,
     pause,

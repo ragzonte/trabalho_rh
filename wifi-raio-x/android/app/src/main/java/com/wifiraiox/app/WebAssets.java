@@ -24,6 +24,22 @@ final class WebAssets implements WebViewAssetLoader.PathHandler {
     static final String URL_PATH = "/assets/www/";
     private static final String ROOT = "www/";
 
+    /**
+     * Política de segurança de toda página HTML do app, mandada como cabeçalho (vale mesmo que a
+     * página esqueça a dela; as duas se somam, nunca se afrouxam). O que ela garante ao lado nativo:
+     *   - só roda script que veio de dentro do APK: nome de rede, de aparelho ou qualquer outro texto
+     *     de fora que acabe virando HTML não consegue executar nada nem alcançar a ponte nativa;
+     *   - a página não fala com a rede (o teste de velocidade é feito pelo lado nativo);
+     *   - nenhum quadro com conteúdo de fora ou montado na hora (data:, blob:): a ponte é injetada
+     *     em todo quadro, e só os do próprio APK podem existir.
+     * Estilos em linha continuam valendo (a interface usa style="..."); imagens e fontes embutidas
+     * (data:, blob:) também.
+     */
+    static final String PAGE_POLICY = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            + "img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; "
+            + "worker-src 'self' blob:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; "
+            + "frame-ancestors 'self'";
+
     private static final Map<String, String> TYPES = new HashMap<>();
 
     static {
@@ -92,11 +108,7 @@ final class WebAssets implements WebViewAssetLoader.PathHandler {
             return status(404, "Not Found");
         }
         Map<String, String> headers = new HashMap<>();
-        if ("text/html".equals(mime)) {
-            // A ponte nativa é injetada em todo quadro da página; um iframe de outro site também a
-            // receberia. A interface é toda local, então quadros externos ficam proibidos.
-            headers.put("Content-Security-Policy", "frame-src 'self' blob: data:");
-        }
+        if ("text/html".equals(mime)) headers.put("Content-Security-Policy", PAGE_POLICY);
         return new WebResourceResponse(mime, isText(mime) ? "UTF-8" : null, 200, "OK", headers, in);
     }
 

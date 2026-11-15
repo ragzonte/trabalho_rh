@@ -155,7 +155,7 @@ export function openStartSheet(env, { onStart }) {
               'span.row__body',
               null,
               h('span.row__title', null, ssidLabel(n.ssid)),
-              h('span.row__sub', null, n.connected ? 'Conectada agora' : n.favorite ? 'Marcada como minha rede' : n.count > 1 ? `${n.count} sinais por perto` : 'Por perto'),
+              h('span.row__sub', null, n.connected ? 'Conectada agora' : n.favorite ? 'Marcada como minha rede' : n.sameDevice ? 'Do mesmo roteador da rede conectada' : n.count > 1 ? `${n.count} sinais por perto` : 'Por perto'),
             ),
             h('input.switch', {
               id,
@@ -259,13 +259,7 @@ function mapCard(rec, { onOpen, onMenu }) {
         null,
         h('span.mlib-map__name', { dir: 'auto' }, rec.name),
         h('span.mlib-map__meta', null, metaLine(rec.meta) || 'Mapa salvo'),
-        h(
-          'span.mlib-map__foot',
-          null,
-          q ? badge(`Qualidade ${q.label.toLowerCase()}`, { tone: QUALITY_TONE[q.level] }) : null,
-          rec.meta.demo ? badge('Demonstração', { icon: 'flask' }) : null,
-          when ? h('span.mlib-map__date', null, fmtDateTime(when)) : null,
-        ),
+        h('span.mlib-map__foot', null, q ? badge(`Qualidade ${q.label.toLowerCase()}`, { tone: QUALITY_TONE[q.level] }) : null, h('span.mlib-map__date', null, [when ? fmtDateTime(when) : null, rec.meta.demo ? 'demonstração' : null].filter(Boolean).join(' · '))),
       ),
     ),
     iconButton('more', `Mais ações para ${rec.name}`, () => onMenu(rec), { muted: true, class: 'icon-btn icon-btn--muted mlib-map__more' }),
@@ -357,9 +351,9 @@ export function mountLibrary(root, env) {
     const clean = name === null ? '' : cleanMapName(name);
     if (!clean || dead || clean === rec.name) return;
     try {
-      await storage.rename(rec.id, clean);
+      const ok = await storage.rename(rec.id, clean);
       await refresh();
-      toast('Mapa renomeado.');
+      toast(ok === false ? 'Este mapa não existe mais.' : 'Mapa renomeado.');
     } catch (err) {
       toast(String((err && err.message) || 'Não foi possível renomear o mapa.'));
     }
@@ -368,12 +362,8 @@ export function mountLibrary(root, env) {
   async function deleteMap(rec) {
     const ok = await confirmDialog({ title: 'Apagar este mapa?', text: `“${rec.name}” será apagado deste aparelho. Não dá para desfazer.`, confirmLabel: 'Apagar', danger: true });
     if (!ok || dead) return;
-    try {
-      await storage.remove(rec.id);
-      toast('Mapa apagado.');
-    } catch {
-      toast('Não foi possível apagar o mapa.');
-    }
+    const gone = await storage.remove(rec.id);
+    toast(gone ? 'Mapa apagado.' : 'Não foi possível apagar o mapa.');
     await refresh();
   }
 
@@ -396,7 +386,7 @@ export function mountLibrary(root, env) {
       return true;
     } catch (err) {
       console.warn('[mapa] arquivo de mapa recusado', err);
-      toast(storage.available ? 'Este arquivo não é um mapa do WiFi Raio-X (ou está danificado).' : String((err && err.message) || 'Não foi possível importar.'));
+      toast(String((err && err.name === 'MapStoreError' && err.message) || 'Este arquivo não é um mapa do WiFi Raio-X (ou está danificado).'));
       return false;
     }
   }
@@ -495,7 +485,7 @@ export function mountLibrary(root, env) {
             h('div.mlib-draft__actions', null, button('Descartar', { variant: 'quiet', onClick: discardDraft }), button('Continuar', { variant: 'primary', icon: 'play', onClick: resumeDraft })),
           )
         : null,
-      !storage.available && maps !== null
+      !storage.persistent && maps !== null
         ? banner({
             key: 'nostore',
             tone: 'warning',

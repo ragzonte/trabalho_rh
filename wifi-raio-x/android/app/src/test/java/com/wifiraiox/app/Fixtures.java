@@ -283,15 +283,33 @@ final class Fixtures {
         return cell;
     }
 
-    /** Uma rede Wi-Fi conectada, com endereços. */
+    /** Uma rede Wi-Fi conectada, com endereços, que é também a rede padrão do aparelho. */
     static Network wifiNetwork(LinkProperties lp, int... capabilities) {
         noNetworks();
-        Network net = ShadowNetwork.newInstance(42);
-        shadowConnectivity().addNetwork(net, ShadowNetworkInfo.newInstance(
-                NetworkInfo.DetailedState.CONNECTED, ConnectivityManager.TYPE_WIFI, 0, true, NetworkInfo.State.CONNECTED));
+        // O Robolectric guarda a rede padrão pelo TIPO da conexão ativa: a rede de teste usa o
+        // identificador do tipo Wi-Fi para que getActiveNetwork() devolva exatamente ela.
+        Network net = ShadowNetwork.newInstance(ConnectivityManager.TYPE_WIFI);
+        NetworkInfo info = ShadowNetworkInfo.newInstance(
+                NetworkInfo.DetailedState.CONNECTED, ConnectivityManager.TYPE_WIFI, 0, true, NetworkInfo.State.CONNECTED);
+        shadowConnectivity().setActiveNetworkInfo(info);
+        shadowConnectivity().addNetwork(net, info);
         shadowConnectivity().setNetworkCapabilities(net, capabilities(NetworkCapabilities.TRANSPORT_WIFI, capabilities));
         if (lp != null) shadowConnectivity().setLinkProperties(net, lp);
         return net;
+    }
+
+    /**
+     * O Wi-Fi continua conectado, mas a rede padrão passa a ser outra (dados móveis no comando, ou
+     * uma VPN por cima): conexões sem amarração deixam de sair pelo Wi-Fi.
+     */
+    static Network anotherNetworkBecomesDefault() {
+        NetworkInfo info = ShadowNetworkInfo.newInstance(
+                NetworkInfo.DetailedState.CONNECTED, ConnectivityManager.TYPE_MOBILE, 0, true, NetworkInfo.State.CONNECTED);
+        shadowConnectivity().setActiveNetworkInfo(info);
+        Network other = connectivity().getActiveNetwork();
+        shadowConnectivity().setNetworkCapabilities(other, capabilities(NetworkCapabilities.TRANSPORT_CELLULAR,
+                NetworkCapabilities.NET_CAPABILITY_INTERNET));
+        return other;
     }
 
     // ---------------------------------------------------------------- JSON

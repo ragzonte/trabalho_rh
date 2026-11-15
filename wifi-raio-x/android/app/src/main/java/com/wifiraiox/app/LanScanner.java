@@ -24,6 +24,9 @@ import java.util.concurrent.TimeUnit;
  * Descobre os aparelhos da rede local: sonda cada endereço da sub-rede do Wi-Fi em paralelo.
  * Quem não responde ao eco (ICMP/TCP 7) ganha uma segunda chance por TCP e, por fim, pelo NetBIOS
  * (computadores com firewall costumam responder só a esse). Roda inteiro fora da thread da interface.
+ *
+ * Confinamento: os endereços saem do próprio Wi-Fi (nunca da página), só de faixas privadas, no
+ * máximo um /22; e nenhuma sonda sai por outra rede que não o Wi-Fi (ver LanTarget.direct).
  */
 final class LanScanner {
 
@@ -179,11 +182,13 @@ final class LanScanner {
         String name = null;
         if (!self) {
             InetAddress address = InetAddress.getByAddress(LanRange.toBytes(host));
-            ms = net.probe(address, 0, target.network);
+            // A primeira sonda (eco) e o DNS reverso não podem ser amarrados ao Wi-Fi: só valem quando
+            // ele é a rede padrão. Senão (VPN, dados móveis no comando) ficam as sondas amarradas.
+            if (target.direct) ms = net.probe(address, 0, target.network);
             if (ms < 0 && !job.cancelled) ms = net.probe(address, 1, target.network);
             if (job.cancelled) return;
             if (ms >= 0) {
-                name = net.dnsName(address);
+                if (target.direct) name = net.dnsName(address);
                 if (name == null && !job.cancelled) name = net.netbiosName(address, target.network);
             } else {
                 long t0 = System.nanoTime();

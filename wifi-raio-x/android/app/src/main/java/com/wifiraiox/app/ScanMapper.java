@@ -9,6 +9,7 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 
@@ -40,10 +41,10 @@ final class ScanMapper {
         // Sem carimbos confiáveis a idade é a da lista: zero se acabou de ser varrida, senão a da última nova.
         boolean stamped = stampsLookRight(results, nowElapsedMs, fresh);
         long listAge = fresh ? 0 : Math.max(0, sinceFreshMs);
-        List<ScanResult> src = results;
+        List<ScanResult> src = unique(results);
         if (src.size() > MAX_APS) {
             // ficam as mais fortes
-            src = new ArrayList<>(results);
+            src = new ArrayList<>(src);
             Collections.sort(src, (a, b) -> Integer.compare(b == null ? Integer.MIN_VALUE : b.level,
                     a == null ? Integer.MIN_VALUE : a.level));
             src = src.subList(0, MAX_APS);
@@ -58,6 +59,30 @@ final class ScanMapper {
             }
         }
         return out;
+    }
+
+    /**
+     * Um ScanAp por BSSID, como o contrato diz. O Android até o 9 entrega a tabela do rádio como
+     * ela está, e um roteador que acabou de trocar de canal aparece duas vezes (a leitura antiga
+     * ainda não venceu): fica a ouvida por último e, no empate, a mais forte. A ordem da lista não muda.
+     */
+    static List<ScanResult> unique(List<ScanResult> results) {
+        LinkedHashMap<String, ScanResult> byBssid = new LinkedHashMap<>();
+        boolean repeated = false;
+        for (ScanResult r : results) {
+            if (r == null || r.BSSID == null || r.BSSID.isEmpty()) continue;
+            String key = r.BSSID.toLowerCase(Locale.ROOT);
+            ScanResult seen = byBssid.get(key);
+            if (seen == null) {
+                byBssid.put(key, r);
+            } else {
+                repeated = true;
+                if (r.timestamp > seen.timestamp || (r.timestamp == seen.timestamp && r.level > seen.level)) {
+                    byBssid.put(key, r); // mesma chave: o lugar na ordem continua o do primeiro
+                }
+            }
+        }
+        return repeated ? new ArrayList<>(byBssid.values()) : results;
     }
 
     static JSONObject one(ScanResult r, long nowElapsedMs) throws JSONException {

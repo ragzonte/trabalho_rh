@@ -100,8 +100,8 @@ export function simplifyClosed(ring, eps) {
 }
 
 /**
- * Arredonda as quinas: cada vértice vira um pequeno arco (curva quadrática) que começa e
- * termina a no máximo `radius` do vértice. Trechos retos compridos continuam retos.
+ * Arredonda as quinas: cada vértice vira um pequeno arco (curva quadrática, com até `steps`
+ * trechos) que começa e termina a no máximo `radius` do vértice. Trechos retos compridos continuam retos.
  */
 export function roundCorners(points, radius, closed, steps = 4) {
   const n = points.length;
@@ -130,8 +130,11 @@ export function roundCorners(points, radius, closed, steps = 4) {
     const d = Math.min(radius, la * 0.45, lc * 0.45);
     const p1 = [b[0] + ux * d, b[1] + uy * d];
     const p2 = [b[0] + vx * d, b[1] + vy * d];
-    for (let k = 0; k <= steps; k++) {
-      const t = k / steps;
+    // quina suave pede menos pontos que quina fechada (um a cada ~25° de curva)
+    const turn = Math.PI - Math.acos(clamp(ux * vx + uy * vy, -1, 1));
+    const arc = clamp(Math.round(turn / 0.45), 1, steps);
+    for (let k = 0; k <= arc; k++) {
+      const t = k / arc;
       const s = 1 - t;
       out.push([s * s * p1[0] + 2 * s * t * b[0] + t * t * p2[0], s * s * p1[1] + 2 * s * t * b[1] + t * t * p2[1]]);
     }
@@ -991,9 +994,12 @@ export function createViewer2d(container, options = {}) {
     const availH = Math.max(40, height - padding.top - padding.bottom - 56);
     const portrait = availH >= availW;
     // gira 90° quando isso aproveita melhor a tela (o mapa não tem norte mesmo)
+    // com os vizinhos ligados, o anel onde ficam os distantes também tem de caber
+    const fitW = layers.neighbours ? Math.max(e.w, prep.aps.ring * 2 + 1) : e.w;
+    const fitH = layers.neighbours ? Math.max(e.h, prep.aps.ring * 2 + 1) : e.h;
     const options = [false, true].map((rot) => {
-      const tw = rot ? e.h : e.w;
-      const th = rot ? e.w : e.h;
+      const tw = rot ? fitH : fitW;
+      const th = rot ? fitW : fitH;
       const n = list.length;
       const gap = 0.14;
       const cols = portrait ? 1 : n;
@@ -1273,7 +1279,8 @@ export function createViewer2d(container, options = {}) {
         });
       }
     }
-    if (layers.neighbours && i === (layout.tiles[0] && layout.tiles[0].floorIndex)) {
+    // o anel dos vizinhos distantes, em cada andar que tem algum preso a ele
+    if (layers.neighbours && prep.aps.items.some((a) => a.clamped && !a.ap.own && a.floorIndex === i)) {
       const [x, y] = toScreen(tile, e.cx, e.cy);
       ctx.save();
       ctx.setLineDash([3, 6]);
@@ -1318,7 +1325,9 @@ export function createViewer2d(container, options = {}) {
       if (layout.tiles.length > 1) {
         // etiqueta do andar no canto de cima à esquerda do seu quadro
         const [mx, my] = toScreen(tile, e.cx, e.cy);
-        labels.push({ spec: { kind: 'floor', text: floorTag(floor.floor) }, x: mx - (tile.w / 2) * view.zoom, y: my - (tile.h / 2) * view.zoom - 4, ax: 0, ay: 1, priority: 95 });
+        const halfW = ((layout.rot ? e.h : e.w) / 2) * s;
+        const halfH = ((layout.rot ? e.w : e.h) / 2) * s;
+        labels.push({ spec: { kind: 'floor', text: floorTag(floor.floor) }, x: mx - halfW, y: my - halfH - 6, ax: 0, ay: 1, priority: 95 });
       }
     }
   }
@@ -1327,7 +1336,11 @@ export function createViewer2d(container, options = {}) {
     if (!layers.labels) return;
     const boxes = labels.map((l) => {
       const lay = layoutLabel(ctx, l.spec, theme);
-      return { ...l, lay, w: lay.w, h: lay.h, x: Math.round(l.x - lay.w * l.ax), y: Math.round(l.y - lay.h * l.ay) };
+      // encosta na borda da tela em vez de cortar o rótulo; se o próprio ponto saiu da tela, o rótulo some
+      const x = clamp(Math.round(l.x - lay.w * l.ax), 6, Math.max(6, width - 6 - lay.w));
+      const y = Math.round(l.y - lay.h * l.ay);
+      const off = l.x < -8 || l.x > width + 8 || y < -lay.h || y > height;
+      return { ...l, lay, w: lay.w, h: lay.h, x, y, skip: off };
     });
     const visible = declutter(boxes);
     boxes.forEach((b, i) => {
@@ -1491,10 +1504,21 @@ export function createViewer2d(container, options = {}) {
   const observer = typeof win.ResizeObserver === 'function' ? new win.ResizeObserver(() => resize()) : null;
   observer?.observe(root);
 
+  // a barra de escala sai de baixo dos controles que a tela põe por cima do mapa
+  function applyInsets() {
+    root.style.setProperty('--mapv-inset-b', `${padding.bottom}px`);
+    root.style.setProperty('--mapv-inset-l', `${padding.left}px`);
+  }
+  applyInsets();
+
   const api = {
     kind: '2d',
     el: root,
     setModel(next, opts = {}) {
+      if (next && next === model) {
+        if (opts.keepView === false) api.resetView();
+        return;
+      }
       const keep = opts.keepView ?? isSameMap(model, next);
       model = next || null;
       if (!model) heat = null;
@@ -1510,9 +1534,10 @@ export function createViewer2d(container, options = {}) {
       invalidate();
     },
     setLayers(partial) {
-      const before = layers.rooms;
+      const before = layers;
       layers = { ...layers, ...(partial || {}) };
-      if (before !== layers.rooms) invalidateTiles();
+      if (before.rooms !== layers.rooms) invalidateTiles();
+      if (before.neighbours !== layers.neighbours) computeLayout();
       invalidate();
     },
     getLayers: () => ({ ...layers }),
@@ -1541,6 +1566,7 @@ export function createViewer2d(container, options = {}) {
     },
     setPadding(p) {
       padding = { top: 0, right: 0, bottom: 0, left: 0, ...(p || {}) };
+      applyInsets();
       computeLayout();
       invalidate();
     },

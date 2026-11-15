@@ -534,3 +534,26 @@ export function fitRigid(ax, ay, bx, by, opts = {}) {
   };
   return { apply, mirrored, rms: Math.sqrt(Math.max(0, aa + bb - 2 * gain) / Math.max(1, n)) };
 }
+
+/**
+ * Varreduras do mesmo ponto marcado dividem UMA posição (a média das que cada uma recebeu), mesmo
+ * em visitas diferentes: é o contrato da saída. Mexe em x e y.
+ */
+export function shareSpots(view, x, y) {
+  const bySpot = new Map();
+  for (let i = 0; i < view.n; i++) {
+    if (view.spot[i] === null) continue;
+    let e = bySpot.get(view.spot[i]);
+    if (!e) bySpot.set(view.spot[i], (e = { x: 0, y: 0, list: [] }));
+    e.x += x[i];
+    e.y += y[i];
+    e.list.push(i);
+  }
+  for (const e of bySpot.values()) {
+    if (e.list.length < 2) continue;
+    for (const i of e.list) {
+      x[i] = e.x / e.list.length;
+      y[i] = e.y / e.list.length;
+    }
+  }
+}

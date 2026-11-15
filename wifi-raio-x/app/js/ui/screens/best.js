@@ -17,6 +17,9 @@
 // "Minhas redes" = store.favorites (toggleFavorite / setFavorite). A rede conectada e as outras
 // redes do mesmo roteador contam como da pessoa mesmo sem estrela.
 //
+// Rota: #/melhor abre no topo; #/melhor?ver=diagnostico e #/melhor?ver=ranking abrem a tela já
+// rolada até aquela parte (para os atalhos das outras telas).
+//
 // As contas que não dependem da tela (palavra da nota, linhas visíveis, partes e motivos da
 // nota, resumo do diagnóstico) são funções puras exportadas, com testes em tests/best.test.mjs.
 //
@@ -34,8 +37,8 @@ const isObj = (x) => x !== null && typeof x === 'object';
 
 /** Quantas redes o ranking mostra antes do "mostrar as outras". */
 export const TOP_ROWS = 5;
-/** Dados mais velhos que isto ganham a idade escrita junto da recomendação. */
-const STALE_NOTE_MS = 30_000;
+/** Dados mais velhos que isto ganham a idade escrita junto da recomendação (com o limite do Android as buscas vêm a cada ~30 s). */
+const STALE_NOTE_MS = 40_000;
 /** De quanto em quanto tempo a idade escrita é atualizada. */
 const AGE_TICK_MS = 5000;
 const PREFS_KEY = 'melhor';
@@ -187,7 +190,7 @@ export function scoreParts(row) {
   const level = signalLevel(detail.rssi);
 
   const share = pct(parts.congestion);
-  const crowd = share >= 85 ? 'sem disputa' : share >= 60 ? 'pouca disputa' : share >= 35 ? 'disputado' : 'muito disputado';
+  const crowd = share >= 85 ? 'sem congestionamento' : share >= 60 ? 'pouco congestionamento' : share >= 35 ? 'congestionado' : 'muito congestionado';
   const secLevel = security.known === true && Number.isInteger(security.level) && security.level >= 0 && security.level <= 4 ? security.level : null;
   const secLabel = typeof security.label === 'string' && security.label ? security.label : 'Desconhecida';
 
@@ -310,10 +313,10 @@ export function heroKind(advice) {
   return advice.current ? 'ok' : 'unknown';
 }
 
-/** Ganho de velocidade para o selo da recomendação: 2.34 -> "≈ 2,3x mais rápida"; null quando não vale dizer. */
+/** Ganho de velocidade para o selo da recomendação: 2.34 -> "≈ 2,3x mais rápida"; 206 -> "pelo menos 10x mais rápida"; null quando não vale dizer. */
 export function gainText(gain) {
   if (!isNum(gain) || gain < 1.2) return null;
-  return gain >= 10 ? '10x ou mais de velocidade' : `≈ ${formatGain(gain)} mais rápida`;
+  return gain >= 10 ? 'pelo menos 10x mais rápida' : `≈ ${formatGain(gain)} mais rápida`;
 }
 
 /**
@@ -440,11 +443,6 @@ function scoreRing(score, { size = 44, usable = true } = {}) {
   );
 }
 
-function nameLabel(item) {
-  if (item.hidden || !item.ssid) return h('span.ssid.ssid--hidden', null, '(rede oculta)');
-  return ssidLabel(item.ssid);
-}
-
 /**
  * Nome que pode quebrar de linha depois de "_", "." e "/" (nomes como "CLARO_5G4F1D2A" não têm
  * espaço). O texto continua idêntico: a quebra é um <wbr>, que não é texto.
@@ -487,7 +485,7 @@ const HERO_LOOK = {
 };
 
 /** Um dos lados do "de onde -> para onde" (advice.current / advice.target). */
-function sideTile(item, { label, target = false, gain = null, ring = false, onClick }) {
+function sideTile(item, { label, target = false, gain = null, ring = false, signal = false, onClick }) {
   return h(
     'button.best-side',
     { type: 'button', class: [target && 'best-side--target', ring && 'best-side--wide'], dataset: { side: target ? 'target' : 'current' }, onClick },
@@ -496,8 +494,15 @@ function sideTile(item, { label, target = false, gain = null, ring = false, onCl
       'span.best-side__body',
       null,
       h('span.best-side__label', null, label),
-      h('span.best-side__name', null, nameLabel(item)),
-      h('span.best-side__where', null, item.band ? bandBadge(item.band, { plain: true }) : null, item.channel != null ? h('span', null, `canal ${item.channel}`) : null),
+      h('span.best-side__name', null, wrappingName(item)),
+      h(
+        'span.best-side__where',
+        null,
+        item.band ? bandBadge(item.band, { plain: true }) : null,
+        item.channel != null ? h('span', null, `canal ${item.channel}`) : null,
+        // dois pontos de acesso da mesma rede só se distinguem pelo sinal
+        signal && isNum(item.rssi) ? h('span', null, fmtDbm(item.rssi)) : null,
+      ),
       h('span.best-side__speed', null, estText(item.estMbps)),
       gain ? h('span.best-side__gain', null, icon('bolt', { size: 14 }), gain) : null,
     ),
@@ -517,9 +522,9 @@ function heroCard(view, on) {
     extra = h(
       'div.best-compare',
       { key: 'compare' },
-      sideTile(current, { label: 'Agora', onClick: () => on.openRow(current.key) }),
+      sideTile(current, { label: 'Agora', signal: advice.kind === 'switch-ap', onClick: () => on.openRow(current.key) }),
       h('span.best-compare__arrow', { 'aria-hidden': 'true' }, icon('arrow-right', { size: 20 })),
-      sideTile(target, { label: 'Melhor aqui', target: true, gain: gainText(advice.gain), onClick: () => on.openRow(target.key) }),
+      sideTile(target, { label: 'Melhor aqui', target: true, signal: advice.kind === 'switch-ap', gain: gainText(advice.gain), onClick: () => on.openRow(target.key) }),
     );
   } else if (kind === 'connect' && target) {
     extra = h('div.best-compare.best-compare--single', { key: 'compare' }, sideTile(target, { label: 'Melhor opção aqui', target: true, ring: true, onClick: () => on.openRow(target.key) }));
@@ -886,7 +891,7 @@ function scoreSheetBody(row, { gone, favorite, on }) {
       'section.stack.stack--sm',
       { key: 'aps' },
       h('h3.best-subtitle', null, entries.length > 1 ? 'Pontos de acesso desta rede' : 'Ponto de acesso', entries.length > 1 ? h('span.best-subtitle__count', null, entries.length) : null),
-      entries.length > 1 ? h('p.best-caption', null, 'A nota da rede é a do melhor deles. Quem escolhe em qual ficar é o celular.') : null,
+      entries.length > 1 ? h('p.best-caption', null, 'Cada roteador ou repetidor, em cada faixa, é um ponto de acesso. A nota da rede é a do melhor deles; quem escolhe em qual ficar é o celular.') : null,
       h('div.card.card--flush.list', null, entries.map((entry, i) => apRow(entry, { best: i === 0 && entries.length > 1, onOpen: on.openAp }))),
     ),
   ];
@@ -898,6 +903,8 @@ function scoreSheetBody(row, { gone, favorite, on }) {
 
 export async function mount(root, ctx) {
   await ensureCss();
+  // a pessoa trocou de aba enquanto o estilo carregava: não há tela para montar
+  if (!root.isConnected) return { unmount() {} };
   const { store } = ctx;
   root.classList.add('best-screen');
 
@@ -924,15 +931,23 @@ export async function mount(root, ctx) {
 
   // --- ações ---
 
+  let opening = false;
+  /** Abre o painel de Wi-Fi do Android (e, se o celular não tiver o painel, a tela de Wi-Fi das configurações). */
   async function openWifi() {
+    if (opening) return;
     if (store.get().backend === 'sim') {
       toast('Na demonstração não há configurações do Android para abrir.');
       return;
     }
-    const res = await ctx.bridge.openSettings('panel').catch(() => null);
-    if (res && res.ok !== false) return;
-    const again = await ctx.bridge.openSettings('wifi').catch(() => null);
-    if (!again || again.ok === false) toast('Não foi possível abrir. Procure “Wi-Fi” nas configurações do Android.');
+    opening = true;
+    try {
+      const res = await ctx.bridge.openSettings('panel').catch(() => null);
+      if (res && res.ok !== false) return;
+      const again = await ctx.bridge.openSettings('wifi').catch(() => null);
+      if (!again || again.ok === false) toast('Não foi possível abrir. Procure “Wi-Fi” nas configurações do Android.');
+    } finally {
+      opening = false;
+    }
   }
 
   async function scanNow() {
@@ -1001,14 +1016,16 @@ export async function mount(root, ctx) {
 
   // --- painéis ---
 
-  function track(panel, renderPanel) {
-    const entry = { panel, render: renderPanel };
+  function track(id, panel, renderPanel) {
+    const entry = { id, panel, render: renderPanel };
     panels.add(entry);
     return () => panels.delete(entry);
   }
+  /** O painel com este id já está aberto? (dois toques seguidos não abrem dois painéis) */
+  const isOpen = (id) => [...panels].some((entry) => entry.id === id && entry.panel.isOpen());
 
   function openRow(key) {
-    if (!data) return;
+    if (!data || isOpen(`row:${key}`)) return;
     let last = data.ranking.find((r) => r.key === key);
     if (!last) {
       toast('Esta rede saiu do alcance.');
@@ -1021,8 +1038,9 @@ export async function mount(root, ctx) {
       subtitle,
       content: [],
       tall: true,
+      // conectar só faz sentido numa rede com nome, que o celular consiga usar e em que ele ainda não esteja
       footer:
-        !last.connected && !last.hidden && !last.p2p
+        !last.connected && !last.hidden && !last.p2p && last.detail && last.detail.usable === true
           ? [button('Abrir o Wi-Fi do celular', { variant: 'primary', icon: 'external', onClick: openWifi })]
           : undefined,
       onClose: () => untrack(),
@@ -1038,11 +1056,12 @@ export async function mount(root, ctx) {
       subtitle.textContent = usable ? `Nota ${Math.round(row.score)} de 100 neste ponto` : 'Sem nota neste celular';
       patch(panel.body, scoreSheetBody(row, { gone: !found, favorite: !row.hidden && store.isFavorite(row.ssid), on: { setFavorite, openAp } }));
     };
-    untrack = track(panel, renderPanel);
+    untrack = track(`row:${key}`, panel, renderPanel);
     renderPanel();
   }
 
   function openPicker() {
+    if (isOpen('picker')) return;
     let untrack = () => {};
     const panel = sheet({
       title: 'Minhas redes',
@@ -1067,7 +1086,7 @@ export async function mount(root, ctx) {
         seen.add(row.ssid);
         named.push(row);
       }
-      const weight = (row) => (row.connected ? 2 : favorites.has(row.ssid) ? 1 : 0);
+      const weight = (row) => (row.connected ? 3 : favorites.has(row.ssid) ? 2 : isMine(row) ? 1 : 0);
       named.sort((a, b) => weight(b) - weight(a));
       for (const ssid of favorites) if (!seen.has(ssid)) sticky.add(ssid);
       const away = [...sticky].filter((ssid) => !seen.has(ssid)).sort((a, b) => a.localeCompare(b, 'pt-BR'));
@@ -1077,6 +1096,7 @@ export async function mount(root, ctx) {
         const on = favorites.has(row.ssid);
         const sub = [];
         if (row.connected) sub.push('Conectado');
+        else if (!on && isMine(row)) sub.push('Mesmo roteador');
         sub.push(usable ? `nota ${Math.round(row.score)}` : 'sem uso neste celular');
         if (usable) sub.push(estText(row.estMbps));
         if (row.security && row.security.known !== false && row.security.label) sub.push(row.security.label);
@@ -1112,11 +1132,12 @@ export async function mount(root, ctx) {
           : null,
       );
     };
-    untrack = track(panel, renderPanel);
+    untrack = track('picker', panel, renderPanel);
     renderPanel();
   }
 
   function openHow() {
+    if (isOpen('how')) return;
     const panel = sheet({
       title: 'Como a nota funciona',
       content: [
@@ -1155,7 +1176,7 @@ export async function mount(root, ctx) {
       onClose: () => untrack(),
     });
     panel.el.classList.add('best-sheet');
-    const untrack = track(panel, () => {});
+    const untrack = track('how', panel, () => {});
   }
 
   // --- desenho de cada região ---
@@ -1236,6 +1257,22 @@ export async function mount(root, ctx) {
     else if (!loading && el.loading.firstChild) render(el.loading);
   }
 
+  // #/melhor?ver=diagnostico (ou ?ver=ranking) abre a tela já naquela parte; se os dados ainda
+  // não chegaram, o salto espera por eles
+  let pendingJump = null;
+  function applyRoute(route) {
+    const want = route && route.query && typeof route.query.get === 'function' ? route.query.get('ver') : null;
+    pendingJump = want === 'diagnostico' ? el.diag : want === 'ranking' ? el.rank : null;
+    jumpIfReady();
+  }
+  function jumpIfReady() {
+    if (!pendingJump || !data || isLoading(store.get())) return;
+    const target = pendingJump;
+    pendingJump = null;
+    // depois de o roteador devolver a rolagem da última visita
+    requestAnimationFrame(() => requestAnimationFrame(() => !dead && target.scrollIntoView({ block: 'start' })));
+  }
+
   function refresh() {
     if (dead) return;
     data = analyse(store.get());
@@ -1245,6 +1282,7 @@ export async function mount(root, ctx) {
     drawRank();
     drawDiag();
     for (const entry of [...panels]) entry.render();
+    jumpIfReady();
   }
 
   // Uma análise por varredura: `aps` é trocado a cada varredura (e quando a conexão muda de
@@ -1267,18 +1305,17 @@ export async function mount(root, ctx) {
     if (!dead && data) drawHero();
   }, AGE_TICK_MS);
 
-  ctx.onCleanup(() => {
+  function dispose() {
+    if (dead) return;
     dead = true;
     clearInterval(ageTimer);
     for (const entry of [...panels]) entry.panel.close();
     panels.clear();
-  });
+  }
+  ctx.onCleanup(dispose);
 
   refresh();
+  applyRoute(ctx.route);
 
-  return {
-    unmount() {
-      dead = true;
-    },
-  };
+  return { unmount: dispose, onRoute: applyRoute };
 }

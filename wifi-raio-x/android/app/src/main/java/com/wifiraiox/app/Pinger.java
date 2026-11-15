@@ -18,6 +18,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 /**
  * Ping. Usa o programa /system/bin/ping do Android (um processo para a série toda, lido linha a
@@ -54,12 +55,48 @@ final class Pinger {
 
     static final String ERR_INVALID_HOST = "host inválido";
     static final String ERR_UNKNOWN_HOST = "host não encontrado";
+    static final String ERR_TOO_MANY = "muitos pings em sequência; aguarde um instante";
+
+    /** Uma pessoa mexendo na tela não passa disto; um laço trocando de destino a cada chamada, sim. */
+    static final int START_BURST = 8;
+    static final long START_EVERY_MS = 1000;
+
+    /**
+     * Freio de pings iniciados: uma rajada curta e depois um por segundo. Cada série já é lenta
+     * (um pacote a cada 0,2 s, no máximo 50), mas sem isto a página poderia varrer endereços da
+     * internet trocando de destino a cada chamada, que é o que separa um ping de um scanner.
+     */
+    static final class Limiter {
+        private final int burst;
+        private final double refillNanos;
+        private final LongSupplier nanoClock;
+        private double tokens;
+        private long last;
+
+        Limiter(int burst, long everyMs, LongSupplier nanoClock) {
+            this.burst = Math.max(1, burst);
+            this.refillNanos = Math.max(1, everyMs) * 1_000_000.0;
+            this.nanoClock = nanoClock;
+            this.tokens = this.burst;
+            this.last = nanoClock.getAsLong();
+        }
+
+        synchronized boolean tryStart() {
+            long now = nanoClock.getAsLong();
+            if (now > last) tokens = Math.min(burst, tokens + (now - last) / refillNanos);
+            last = now;
+            if (tokens < 1) return false;
+            tokens -= 1;
+            return true;
+        }
+    }
 
     private final String ping4;
     private final String ping6;
     private final Resolver resolver;
     private final Prober[] probers;
     private final ScheduledExecutorService watchdog;
+    private final Limiter limiter; // null = sem freio (testes das outras partes)
     private Job current;
 
     private static final class Job {
@@ -82,15 +119,26 @@ final class Pinger {
 
     /** Configuração de verdade: os programas do sistema e as sondas TCP. */
     Pinger(ScheduledExecutorService watchdog) {
-        this("/system/bin/ping", "/system/bin/ping6", Pinger::resolveBounded, defaultProbers(), watchdog);
+        this("/system/bin/ping", "/system/bin/ping6", Pinger::resolveBounded, defaultProbers(), watchdog,
+                new Limiter(START_BURST, START_EVERY_MS, System::nanoTime));
     }
 
     Pinger(String ping4, String ping6, Resolver resolver, Prober[] probers, ScheduledExecutorService watchdog) {
+        this(ping4, ping6, resolver, probers, watchdog, null);
+    }
+
+    Pinger(String ping4, String ping6, Resolver resolver, Prober[] probers, ScheduledExecutorService watchdog,
+           Limiter limiter) {
         this.ping4 = ping4;
         this.ping6 = ping6;
         this.resolver = resolver;
         this.probers = probers;
         this.watchdog = watchdog;
+        this.limiter = limiter;
+    }
+
+    boolean rateLimited() {
+        return limiter != null;
     }
 
     private static Prober[] defaultProbers() {
@@ -117,6 +165,8 @@ final class Pinger {
      */
     JSONObject run(String host, int count, int timeoutMs, Events events) {
         if (!PingHost.isValid(host)) return Json.error(ERR_INVALID_HOST);
+        // Antes de qualquer coisa sair para a rede (nem a consulta de DNS); o ping em andamento segue intacto.
+        if (limiter != null && !limiter.tryStart()) return Json.error(ERR_TOO_MANY);
         count = Math.max(MIN_COUNT, Math.min(MAX_COUNT, count));
         timeoutMs = Math.max(MIN_TIMEOUT_MS, Math.min(MAX_TIMEOUT_MS, timeoutMs));
 

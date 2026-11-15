@@ -54,12 +54,23 @@ final class ConnectionTracker {
         final int prefix;
         final int gateway; // 0 = desconhecido
         final Network network;
+        /**
+         * O Wi-Fi é a rede padrão do app: o que não pode ser amarrado a uma rede (eco ICMP, DNS
+         * reverso) sai mesmo por ele. Com uma VPN ligada, ou com os dados móveis no comando, esses
+         * pacotes iriam para a rede da VPN ou da operadora — endereços de outra gente.
+         */
+        final boolean direct;
 
         LanTarget(int ip, int prefix, int gateway, Network network) {
+            this(ip, prefix, gateway, network, true);
+        }
+
+        LanTarget(int ip, int prefix, int gateway, Network network, boolean direct) {
             this.ip = ip;
             this.prefix = prefix;
             this.gateway = gateway;
             this.network = network;
+            this.direct = direct;
         }
     }
 
@@ -234,7 +245,17 @@ final class ConnectionTracker {
                 break;
             }
         }
-        return new LanTarget(ip, prefix, gateway, s.network);
+        return new LanTarget(ip, prefix, gateway, s.network, isDefaultNetwork(s.network));
+    }
+
+    /** Conexões sem amarração saem por esta rede? Na dúvida, não. */
+    private boolean isDefaultNetwork(Network network) {
+        try {
+            ConnectivityManager cm = Sys.connectivity(context);
+            return cm != null && network != null && network.equals(cm.getActiveNetwork());
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private static final class Snapshot {

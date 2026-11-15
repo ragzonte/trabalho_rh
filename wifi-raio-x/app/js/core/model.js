@@ -127,7 +127,11 @@ function describeStandard(wifiStandard, occ, ie) {
 
   // O Android anterior ao 13 não conhece o 11be e chama um roteador Wi-Fi 7 de "11ax": se os
   // elementos do beacon anunciam uma geração mais nova, valem eles.
-  const ieGen = ie && isNum(ie.gen) ? ie.gen : null;
+  let ieGen = ie && isNum(ie.gen) ? ie.gen : null;
+  // O 802.11ac só existe em 5 GHz. Elementos VHT num beacon de 2,4 GHz são uma extensão de
+  // fabricante (256-QAM, "TurboQAM"), muito comum em roteadores domésticos: a rede é 11n, e é
+  // assim que o próprio Android a classifica.
+  if (band === '2.4' && ieGen === 5) ieGen = 4;
   if (ieGen !== null && STANDARD_OF_GEN[ieGen] !== undefined && std !== WIFI_STANDARD.AD) {
     const current = std === null ? 0 : (standardInfo(std, band).gen ?? 0);
     if (ieGen > current) {
@@ -157,8 +161,9 @@ function describeStandard(wifiStandard, occ, ie) {
  *    160 MHz. O elemento EHT Operation traz a largura e o centro do canal.
  * 2. Um AP 11ac/11ax que usa menos fluxos em 160 MHz do que em 80 MHz anuncia os 160 MHz (ou
  *    80+80) pelo campo "Channel Center Frequency Segment 2" do HT Operation, deixando zerado o
- *    segundo centro do VHT Operation (IEEE 802.11-2020, 9.4.2.158 e 11.38.1). O Android só lê
- *    o VHT Operation e entrega 80 MHz.
+ *    segundo centro do VHT Operation (IEEE 802.11-2020, elemento VHT Operation: é a mesma
+ *    regra que o Linux aplica em ieee80211_chandef_vht_oper). O Android só lê o VHT Operation
+ *    e entrega 80 MHz.
  */
 function widenWithIes(raw, occ, ieInfo) {
   const eht = ieInfo.ehtOperation;
@@ -174,8 +179,9 @@ function widenWithIes(raw, occ, ieInfo) {
   const caps = ieInfo.vht;
   if (occ.band !== '5' || occ.widthMHz !== 80 || occ.noncontiguous || !isObj(ht) || !isObj(vht) || !isObj(caps)) return occ;
   if (vht.width !== 1 || vht.centerSeg1 !== 0 || !(ht.centerSeg2 > 0)) return occ;
-  // só vale para quem declara 160 MHz nas capacidades (largura cheia ou com menos fluxos)
-  if (!(caps.width160 === true || caps.extNssBw > 0)) return occ;
+  // O campo só tem significado quando o AP declara "Extended NSS BW Support" (160 MHz com menos
+  // fluxos); com o valor 3 junto de 160 MHz pleno, quem vale é o segundo centro do VHT Operation.
+  if (!(caps.extNssBw > 0) || (caps.extNssBw === 3 && caps.width160 === true)) return occ;
   const gap = Math.abs(ht.centerSeg2 - vht.centerSeg0);
   const center0 = channelToFreq(vht.centerSeg0, '5');
   const center2 = channelToFreq(ht.centerSeg2, '5');

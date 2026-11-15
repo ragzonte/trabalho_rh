@@ -113,11 +113,46 @@ function freshness(ageMs) {
   return Math.pow(0.5, (ageMs - STALE_AFTER_MS) / STALE_HALF_LIFE_MS);
 }
 
+// Enlace de referência por largura (sinal, piso de ruído e capacidade sem interferência): são
+// sempre os mesmos números, e esta conta roda para cada vizinho de cada canal.
+const REFERENCE_LINK = new Map();
+
+function referenceLink(widthMHz) {
+  let ref = REFERENCE_LINK.get(widthMHz);
+  if (!ref) {
+    const signal = dbmToMw(REFERENCE_SIGNAL_DBM);
+    const floor = dbmToMw(noiseFloorDbm(widthMHz));
+    ref = { signal, floor, clean: Math.log2(1 + signal / floor) };
+    REFERENCE_LINK.set(widthMHz, ref);
+  }
+  return ref;
+}
+
 /** Fração da capacidade que o enlace de referência mantém com `mw` de ruído extra na banda. */
 function capacityKept(mw, widthMHz) {
-  const signal = dbmToMw(REFERENCE_SIGNAL_DBM);
-  const floor = dbmToMw(noiseFloorDbm(widthMHz));
-  return Math.log2(1 + signal / (floor + mw)) / Math.log2(1 + signal / floor);
+  const ref = referenceLink(widthMHz);
+  return Math.log2(1 + ref.signal / (ref.floor + mw)) / ref.clean;
+}
+
+// Ap -> id do aparelho, guardado por lista de aparelhos: quem avalia vários APs da mesma lista
+// (best-network avalia todos) reaproveita o índice em vez de remontá-lo a cada chamada.
+const DEVICE_INDEX = new WeakMap();
+
+function deviceIndex(devices) {
+  let index = DEVICE_INDEX.get(devices);
+  if (!index) {
+    index = new Map();
+    for (const device of devices) for (const ap of device.aps) index.set(ap, device.id);
+    DEVICE_INDEX.set(devices, index);
+  }
+  return index;
+}
+
+/** `devices` tem o formato de groupByDevice()? (Só então pode entrar no lugar do agrupamento.) */
+function usableDevices(devices) {
+  if (!Array.isArray(devices)) return null;
+  for (const d of devices) if (!isObj(d) || !Array.isArray(d.aps) || !Array.isArray(d.bssids)) return null;
+  return devices;
 }
 
 /**
@@ -134,8 +169,7 @@ function buildContext(all, band, exclude, devices) {
     else if (isNum(ap.rssi) && ap.occ.segments.length > 0) others.push(ap);
   }
 
-  const deviceOf = new Map();
-  for (const device of devices || groupByDevice(all)) for (const ap of device.aps) deviceOf.set(ap, device.id);
+  const deviceOf = deviceIndex(devices || groupByDevice(all));
 
   const radios = new Map();
   others.forEach((ap, index) => {
@@ -306,8 +340,9 @@ function rateBlock(ctx, block, only, prefer) {
  * bloco da largura pedida (5 GHz em 80 MHz: 42, 58, 106, 122, 138, 155, 171).
  *
  * @param {import('./model.js').Ap[]} aps  lista do ApTracker (ou ScanAp crus)
- * @param {{band: '2.4'|'5'|'6', widthMHz?: number, exclude?: Iterable<string>}} options
- *        exclude = BSSIDs do próprio usuário, que não contam como interferência
+ * @param {{band: '2.4'|'5'|'6', widthMHz?: number, exclude?: Iterable<string>, devices?: object[]}} options
+ *        exclude = BSSIDs do próprio usuário, que não contam como interferência;
+ *        devices = groupByDevice(aps) já calculado para esta mesma lista (só poupa trabalho)
  * @returns {{
  *   band: string,
  *   channel: number,            canal primário (o melhor dentro do bloco; nos 6 GHz, um PSC)
@@ -333,7 +368,7 @@ export function rateChannels(aps, options) {
   if (band === null) return [];
   const blocks = blocksOf(band, width);
   if (!blocks.length) return [];
-  const ctx = buildContext(toAps(aps), band, o.exclude);
+  const ctx = buildContext(toAps(aps), band, o.exclude, usableDevices(o.devices));
   return blocks.map((block) => rateBlock(ctx, block));
 }
 
@@ -396,14 +431,66 @@ function ownBssids(devices, own) {
   return ids;
 }
 
-/** Lista normalizada (com o roteador do usuário, se ele não estiver nela) e os aparelhos dela. */
-function prepare(aps, own) {
+const DEFAULT_WIDTH = { '2.4': 20, 5: 80, 6: 80 };
+
+/**
+ * Lista normalizada (com o roteador do usuário, se ele não estiver nela) e os aparelhos dela.
+ * `devices` (groupByDevice da mesma lista, já calculado) só vale se a lista não mudou aqui.
+ */
+function prepare(aps, own, devices) {
   const list = toAps(aps);
-  if (own && own.id && !list.some((ap) => ap.id === own.id)) list.push(own);
-  return { list, devices: groupByDevice(list) };
+  let ready = usableDevices(devices);
+  if (own && own.id && !list.some((ap) => ap.id === own.id)) {
+    list.push(own);
+    ready = null;
+  }
+  return { list, devices: ready || groupByDevice(list) };
 }
 
-const DEFAULT_WIDTH = { '2.4': 20, 5: 80, 6: 80 };
+/**
+ * Nota do canal em que `own` está (bloco e primário dele), sem contar o próprio roteador.
+ * Em 2,4 GHz/40 MHz e 6 GHz/320 MHz o mesmo primário cabe em dois blocos: vale o que o roteador usa.
+ */
+function currentRating(ctx, band, width, own) {
+  let spots = blocksContaining(band, width, own.channel);
+  const exact = spots.filter((b) => b.centerFreq === own.occ.centerFreq);
+  if (exact.length) spots = exact;
+  let current = null;
+  for (const block of spots) {
+    const rating = rateBlock(ctx, block, own.channel);
+    if (current === null || rating.score > current.score) current = rating;
+  }
+  return current;
+}
+
+/** Largura a analisar: a pedida; senão a do roteador do usuário; senão o padrão da faixa. */
+function widthFor(band, requested, own) {
+  if (requested !== undefined && requested !== null) return Number(requested);
+  return own && blocksOf(band, own.widthMHz).length ? own.widthMHz : DEFAULT_WIDTH[band];
+}
+
+/**
+ * Nota do canal em que um roteador está hoje: o mesmo `current` de recommendChannel, sem avaliar
+ * os outros canais (bem mais barato; é o que best-network usa para cada AP da lista).
+ *
+ * @param {import('./model.js').Ap[]} aps
+ * @param {{own: import('./model.js').Ap, widthMHz?: number, devices?: object[]}} options
+ *        own = o roteador avaliado (a faixa é a dele); widthMHz padrão: a largura dele;
+ *        devices = groupByDevice(aps) já calculado para esta mesma lista (só poupa trabalho)
+ * @returns {object|null}  uma linha no formato de rateChannels, ou null (roteador sem canal
+ *          conhecido, faixa sem análise ou largura que não existe nela)
+ */
+export function rateOwnChannel(aps, options) {
+  const o = isObj(options) ? options : {};
+  const own = isObj(o.own) ? asAp(o.own) : null;
+  const band = own === null ? null : normBand(own.band);
+  if (band === null || !isNum(own.channel)) return null;
+  const width = widthFor(band, o.widthMHz, own);
+  if (!blocksOf(band, width).length) return null;
+  const { list, devices } = prepare(aps, own, o.devices);
+  const ctx = buildContext(list, band, ownBssids(devices, own), devices);
+  return currentRating(ctx, band, width, own);
+}
 
 /**
  * Recomenda o canal para o roteador do usuário.
@@ -413,9 +500,10 @@ const DEFAULT_WIDTH = { '2.4': 20, 5: 80, 6: 80 };
  * 5 pontos melhor; em 6 GHz só canais PSC. Com menos de 8 pontos de ganho, fica como está.
  *
  * @param {import('./model.js').Ap[]} aps
- * @param {{band: '2.4'|'5'|'6', widthMHz?: number, own?: import('./model.js').Ap|null}} options
+ * @param {{band: '2.4'|'5'|'6', widthMHz?: number, own?: import('./model.js').Ap|null, devices?: object[]}} options
  *        own = o Ap do roteador do usuário nesta faixa (ou null). widthMHz padrão: a largura
- *        dele; sem ele, 20 MHz em 2,4 GHz e 80 MHz em 5/6 GHz.
+ *        dele; sem ele, 20 MHz em 2,4 GHz e 80 MHz em 5/6 GHz. devices = groupByDevice(aps) já
+ *        calculado para esta mesma lista (só poupa trabalho).
  * @returns {{
  *   best: object|null,        nota do melhor canal pela política (formato de rateChannels); com
  *                             'keep' pode ser outro canal que não o atual: é melhor, mas não o
@@ -434,29 +522,16 @@ export function recommendChannel(aps, options) {
   const own = isObj(o.own) ? asAp(o.own) : null;
   const ownHere = own !== null && own.band === band && isNum(own.channel) ? own : null;
 
-  let width = o.widthMHz === undefined || o.widthMHz === null ? null : Number(o.widthMHz);
-  if (width === null) width = ownHere && blocksOf(band, ownHere.widthMHz).length ? ownHere.widthMHz : DEFAULT_WIDTH[band];
-
+  const width = band === null ? null : widthFor(band, o.widthMHz, ownHere);
   const blocks = band === null ? [] : blocksOf(band, width);
   if (!blocks.length) {
     return { best: null, current: null, ranking: [], gain: null, verdict: 'keep', text: 'Não há canais com essa largura nesta faixa.' };
   }
 
-  const { list, devices } = prepare(aps, ownHere);
+  const { list, devices } = prepare(aps, ownHere, o.devices);
   const ctx = buildContext(list, band, ownBssids(devices, ownHere), devices);
   const ratings = blocks.map((block) => rateBlock(ctx, block, null, ownHere ? ownHere.channel : null));
-
-  let current = null;
-  if (ownHere) {
-    // Em 2,4 GHz/40 MHz e 6 GHz/320 MHz o mesmo primário cabe em dois blocos: vale o que o roteador usa
-    let spots = blocksContaining(band, width, ownHere.channel);
-    const exact = spots.filter((b) => b.centerFreq === ownHere.occ.centerFreq);
-    if (exact.length) spots = exact;
-    for (const block of spots) {
-      const rating = rateBlock(ctx, block, ownHere.channel);
-      if (current === null || rating.score > current.score) current = rating;
-    }
-  }
+  const current = ownHere ? currentRating(ctx, band, width, ownHere) : null;
 
   const ranking = rank(ratings, current);
   let best = ranking[0] || null;
@@ -517,8 +592,9 @@ const BAND_NAME = { '2.4': '2,4 GHz', 5: '5 GHz', 6: '6 GHz' };
  *
  * @param {import('./model.js').Ap[]} aps
  * @param {'2.4'|'5'|'6'} band
- * @param {{own?: import('./model.js').Ap|null}} [options]  o roteador do usuário nesta faixa: sai da
- *        conta da interferência e limita a largura ao que a geração dele alcança
+ * @param {{own?: import('./model.js').Ap|null, devices?: object[]}} [options]  own = o roteador do
+ *        usuário nesta faixa: sai da conta da interferência e limita a largura ao que a geração
+ *        dele alcança; devices = groupByDevice(aps) já calculado para esta mesma lista
  * @returns {{widthMHz: number|null, text: string,
  *            options: {widthMHz:number, score:number, channel:number, dfs:boolean}[]}}
  *          `options` = o melhor bloco de cada largura, da maior para a menor
@@ -529,7 +605,7 @@ export function recommendWidth(aps, band, options) {
   const o = isObj(options) ? options : {};
   const own = isObj(o.own) ? asAp(o.own) : null;
   const ownHere = own !== null && own.band === b ? own : null;
-  const { list, devices } = prepare(aps, ownHere);
+  const { list, devices } = prepare(aps, ownHere, o.devices);
   const ctx = buildContext(list, b, ownBssids(devices, ownHere), devices);
   const cap = widthCap(b, ownHere);
 

@@ -23,8 +23,8 @@ final class SystemBars {
         if (s.charAt(0) != '#') return null;
         int rgb = 0;
         for (int i = 1; i < s.length(); i++) {
+            if (!PingHost.isHex(s.charAt(i))) return null; // só ASCII: nada de algarismos de outros alfabetos
             int d = Character.digit(s.charAt(i), 16);
-            if (d < 0) return null;
             if (s.length() == 4) rgb = (rgb << 8) | (d * 17); // "#abc" = "#aabbcc"
             else rgb = (rgb << 4) | d;
         }

@@ -315,6 +315,17 @@
   line-height: 20px;
 }
 
+/* até duas linhas: "Casa" e "Casa_5G" lado a lado não podem virar os dois "Casa…" */
+.best-side__name > .ssid,
+.best-row__name > .ssid {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .best-side__where {
   display: flex;
   align-items: center;
@@ -469,15 +480,6 @@
 .best-row__name {
   grid-area: name;
   align-items: flex-start;
-}
-
-.best-row__name > .ssid {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  white-space: normal;
-  overflow-wrap: anywhere;
 }
 
 .best-row__name > .icon {

@@ -86,18 +86,17 @@ final class ConnectionMapper {
             }
             if (ipv6.length() > 0) Json.put(o, "ipv6", ipv6);
 
-            String gateway6 = null;
+            // Só o roteador IPv4, par do `ip`: é o endereço que a interface manda abrir no navegador
+            // e usa como destino do ping. O de IPv6 é um endereço de enlace (fe80::...) que, sem o
+            // nome da interface, não serve para nenhuma das duas coisas.
             for (RouteInfo route : link.getRoutes()) {
                 InetAddress g = route.getGateway();
-                if (!route.isDefaultRoute() || g == null || g.isAnyLocalAddress()) continue;
-                if (g instanceof Inet4Address) {
+                if (route.isDefaultRoute() && g instanceof Inet4Address && !g.isAnyLocalAddress()) {
                     gateway = g.getHostAddress();
                     break;
                 }
-                if (gateway6 == null) gateway6 = noScope(g.getHostAddress());
             }
             if (gateway == null && dhcp != null && dhcp.gateway != 0) gateway = ipv4(dhcp.gateway);
-            if (gateway == null) gateway = gateway6;
 
             JSONArray dns = new JSONArray();
             for (InetAddress server : link.getDnsServers()) {

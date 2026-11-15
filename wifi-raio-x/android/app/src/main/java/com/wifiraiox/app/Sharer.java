@@ -12,6 +12,9 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 
 /** Compartilhar texto e exportar arquivos (relatórios, mapas) pelo "compartilhar/salvar" do Android. */
@@ -23,6 +26,14 @@ final class Sharer {
     static final String FOLDER = "shared";
     /** Exportações antigas são apagadas; as recentes ficam porque o app de destino pode ainda estar lendo. */
     static final long KEEP_MS = 60L * 60 * 1000;
+    /** Mesmo recentes, só ficam as últimas: uma página que exporta sem parar não pode encher o aparelho. */
+    static final int MAX_FILES = 5;
+    /**
+     * Um texto compartilhado viaja dentro do Intent, e o Android só transporta por volta de 1 MB
+     * entre apps (o texto ainda é copiado mais de uma vez no caminho). Acima disto vai como arquivo.
+     */
+    static final int MAX_TEXT_CHARS = 50_000;
+    static final int MAX_TITLE_CHARS = 200;
     private static final int MAX_NAME = 80;
     private static final String DEFAULT_NAME = "arquivo";
     private static final String DEFAULT_MIME = "application/octet-stream";
@@ -92,11 +103,21 @@ final class Sharer {
         long now = System.currentTimeMillis();
         File[] old = dir.listFiles();
         if (old != null) {
+            List<File> kept = new ArrayList<>();
             for (File f : old) {
-                if (f.isFile() && (f.getName().equals(name) || now - f.lastModified() > KEEP_MS)) {
+                if (!f.isFile()) continue;
+                if (f.getName().equals(name) || now - f.lastModified() > KEEP_MS) {
                     //noinspection ResultOfMethodCallIgnored
                     f.delete();
+                } else {
+                    kept.add(f);
                 }
+            }
+            // das recentes, as mais antigas saem até sobrar lugar para a nova
+            Collections.sort(kept, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+            for (int i = MAX_FILES - 1; i < kept.size(); i++) {
+                //noinspection ResultOfMethodCallIgnored
+                kept.get(i).delete();
             }
         }
         File file = new File(dir, name);
@@ -127,14 +148,35 @@ final class Sharer {
         return chooser;
     }
 
-    static Intent sendText(String title, String text) {
+    static Intent sendText(String rawTitle, String text) {
+        String title = cleanTitle(rawTitle);
         Intent send = new Intent(Intent.ACTION_SEND);
         send.setType("text/plain");
         send.putExtra(Intent.EXTRA_TEXT, text);
-        if (title != null && !title.isEmpty()) {
+        if (title != null) {
             send.putExtra(Intent.EXTRA_SUBJECT, title);
             send.putExtra(Intent.EXTRA_TITLE, title);
         }
-        return Intent.createChooser(send, title == null || title.isEmpty() ? null : title);
+        return Intent.createChooser(send, title);
+    }
+
+    /** Título numa linha só e de tamanho contido (aparece no topo do "compartilhar"); null quando vazio. */
+    static String cleanTitle(String raw) {
+        if (raw == null) return null;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < raw.length() && sb.length() < MAX_TITLE_CHARS; i++) {
+            char c = raw.charAt(i);
+            sb.append(Character.isISOControl(c) ? ' ' : c);
+        }
+        String title = sb.toString().trim();
+        return title.isEmpty() ? null : title;
+    }
+
+    /** Nome do arquivo .txt que leva um texto grande demais para ir dentro do Intent. */
+    static String textFileName(String rawTitle) {
+        String title = cleanTitle(rawTitle);
+        String base = title == null ? "texto" : sanitizeName(title);
+        if (base.length() > 60) base = base.substring(0, 60).trim();
+        return base + ".txt";
     }
 }

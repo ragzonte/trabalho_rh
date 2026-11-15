@@ -11,7 +11,8 @@ import androidx.webkit.WebViewAssetLoader;
 
 /**
  * Regras de navegação do WebView: a página do app vem dos assets do APK; qualquer outro endereço
- * abre no navegador do celular, nunca dentro do app (onde teria acesso à ponte nativa).
+ * abre no navegador do celular, nunca dentro do app (onde teria acesso à ponte nativa), e nenhum
+ * recurso (script, imagem, quadro, fetch) é buscado fora do APK.
  */
 class WebClient extends WebViewClient {
 
@@ -51,6 +52,12 @@ class WebClient extends WebViewClient {
         return uri != null && "https".equals(uri.getScheme()) && HOST.equals(uri.getHost()) && uri.getPort() == -1;
     }
 
+    /** Endereços que o próprio WebView resolve na memória, sem tocar na rede nem em arquivos. */
+    static boolean isLocalScheme(Uri uri) {
+        String scheme = uri == null ? null : uri.getScheme();
+        return "data".equals(scheme) || "blob".equals(scheme) || "about".equals(scheme);
+    }
+
     static boolean isAppUrl(String url) {
         if (url == null || url.isEmpty()) return false;
         try {
@@ -74,7 +81,10 @@ class WebClient extends WebViewClient {
                 host.onForeignMainFrame(uri);
                 return WebAssets.status(403, "Forbidden");
             }
-            return null; // recursos de outros sites (imagem, fetch) seguem as regras normais da web
+            // A interface é toda local e nada dela sai para a rede (quem fala com a internet é o lado
+            // nativo). Um pedido para fora só pode ser conteúdo injetado tentando trazer código ou
+            // levar dados embora; data:, blob: e about: não saem do aparelho e seguem normais.
+            return isLocalScheme(uri) ? null : WebAssets.status(403, "Forbidden");
         } catch (RuntimeException e) {
             // Roda numa thread do WebView: uma exceção solta aqui derrubaria o app inteiro.
             return WebAssets.status(500, "Internal Error");

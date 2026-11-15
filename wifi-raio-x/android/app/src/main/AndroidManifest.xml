@@ -13,7 +13,6 @@
     <!-- Detalhes da conexão (IP, gateway, DNS), ping e descoberta de aparelhos na rede local. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- Sem Wi-Fi o app não tem o que fazer; GPS e RTT são opcionais (tablets sem GPS continuam instalando). -->

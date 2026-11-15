@@ -268,7 +268,7 @@ test('conectado no 2,4 GHz com o 5 GHz do roteador à mão: manda trocar, mostra
     assert.match(await current.locator('.best-side__where').textContent(), /2,4\sGHz.*canal 6/);
     assert.equal(await target.locator('.ssid').textContent(), 'Familia Souza_5G');
     assert.match(await target.locator('.best-side__where').textContent(), /5\sGHz.*canal 36/);
-    assert.match(await target.locator('.best-side__gain').textContent(), /mais rápida|ou mais de velocidade/);
+    assert.match(await target.locator('.best-side__gain').textContent(), /mais rápida$/);
     const speed = (text) => Number(text.replace(/[^\d,]/g, '').replace(',', '.'));
     assert.ok(speed(await target.locator('.best-side__speed').textContent()) > speed(await current.locator('.best-side__speed').textContent()));
 
@@ -706,6 +706,54 @@ test('diagnóstico: problemas por gravidade com o atalho certo; observações re
     await waitForScreen(page, '/canais');
     assert.equal(await page.evaluate(() => location.hash), '#/canais?band=2.4');
     assert.equal(await page.getAttribute('.ch-band[aria-checked="true"]', 'data-band'), '2.4');
+  });
+});
+
+test('a rota escolhe a parte da tela: ?ver=diagnostico ao abrir e com a tela já aberta', T, async () => {
+  // espera a parte pedida chegar ao alto da tela (ou, se ela é a última e é curta, a tela rolar até o fim com ela à vista)
+  const landed = (page, region) =>
+    page.waitForFunction(
+      (name) => {
+        const view = document.querySelector('.view');
+        const top = document.querySelector(`[data-region="${name}"]`).getBoundingClientRect().top - view.getBoundingClientRect().top;
+        const atEnd = view.scrollTop >= view.scrollHeight - view.clientHeight - 2;
+        return view.scrollTop > 100 && (Math.abs(top) <= 2 || (atEnd && top > 0 && top < view.clientHeight - 100));
+      },
+      region,
+      { timeout: 5000 },
+    );
+  const scrollTop = (page) => page.evaluate(() => document.querySelector('.view').scrollTop);
+  await open({ route: '/ferramentas' }, async ({ page }) => {
+    await waitForScans(page, 1);
+    await inject(page, HOME);
+    await goto(page, '/melhor?ver=diagnostico');
+    await page.waitForSelector('.best-diag');
+    await landed(page, 'diag');
+    assert.equal(await page.textContent('.topbar__title'), 'Melhor Wi-Fi');
+
+    // com a tela já aberta: muda só a rota, a tela não é remontada (o que estava aberto continua)
+    await page.click('.best-more');
+    await page.evaluate(() => {
+      document.querySelector('.view').scrollTop = 0;
+    });
+    await settle(page);
+    assert.equal(await scrollTop(page), 0);
+    await page.evaluate(() => {
+      location.hash = '#/melhor?ver=ranking';
+    });
+    await landed(page, 'rank');
+    assert.equal(await page.getAttribute('.best-more', 'aria-expanded'), 'true');
+
+    // os dados ainda não chegaram: o salto espera por eles
+    await goto(page, '/ferramentas');
+    await inject(page, { scan: null });
+    await goto(page, '/melhor?ver=diagnostico');
+    await page.waitForSelector('.best-skel-hero');
+    await settle(page);
+    assert.equal(await scrollTop(page), 0);
+    await page.evaluate((c) => window.__wrx.app.store.setConnection(c), HOME.connection);
+    await nextScan(page, fx.apartment);
+    await landed(page, 'diag');
   });
 });
 

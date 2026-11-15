@@ -41,6 +41,12 @@ public final class Bridge implements Emitter {
     static final String ERR_UNKNOWN = "método desconhecido: ";
     static final String ERR_ASYNC_ONLY = "método assíncrono, use callAsync: ";
     static final String ERR_CLOSED = "encerrado";
+    static final String ERR_BUSY = "muitas chamadas em andamento";
+    /**
+     * Teto de chamadas assíncronas sem resposta. A interface nunca chega perto (um ping, uma busca,
+     * um teste por vez); uma página com defeito chamando em laço não pode criar threads sem fim.
+     */
+    static final int MAX_PENDING = 64;
     private static final long UI_WAIT_MS = 1500;
 
     private final Activity activity;
@@ -123,6 +129,10 @@ public final class Bridge implements Emitter {
     @JavascriptInterface
     public void callAsync(final int id, String method, String argsJson) {
         if (!trustedPage || destroyed) return; // página estranha: nem resposta recebe
+        if (pending.size() >= MAX_PENDING && !pending.containsKey(id)) {
+            sink.eval(Js.resolve(id, Json.error(ERR_BUSY).toString())); // recusada na hora, sem ocupar lugar
+            return;
+        }
         final Reply reply = new Reply(id);
         pending.put(id, reply);
         try {
@@ -293,7 +303,9 @@ public final class Bridge implements Emitter {
         final String text = Json.string(args, "text");
         if (text == null) return Json.error(ERR_ARGS + ": text");
         final String title = Json.string(args, "title");
-        return Json.ok(startOnMain(Sharer.sendText(title, text)));
+        if (text.length() <= Sharer.MAX_TEXT_CHARS) return Json.ok(startOnMain(Sharer.sendText(title, text)));
+        // Grande demais para viajar dentro do Intent (o Android derrubaria a entrega): vai como arquivo de texto.
+        return shareFile(Sharer.textFileName(title), "text/plain", Sharer.payload(text, null));
     }
 
     private JSONObject saveFile(JSONObject args) {
@@ -308,12 +320,16 @@ public final class Bridge implements Emitter {
         } catch (IllegalArgumentException e) {
             return Json.error(ERR_ARGS + ": base64");
         }
-        if (data == null) return Json.ok(false); // grande demais
+        return shareFile(name, Json.string(args, "mime"), data);
+    }
+
+    /** Grava em cache/shared e abre o "compartilhar/salvar" do Android. `data` null = grande demais. */
+    private JSONObject shareFile(String name, String mime, byte[] data) {
+        if (data == null) return Json.ok(false);
         try {
             File file = Sharer.write(activity, name, data);
             Uri uri = Sharer.uriFor(activity, file);
-            Intent chooser = Sharer.sendFile(uri, Json.string(args, "mime"), file.getName(),
-                    activity.getString(R.string.share_file_title));
+            Intent chooser = Sharer.sendFile(uri, mime, file.getName(), activity.getString(R.string.share_file_title));
             return Json.ok(startOnMain(chooser));
         } catch (Exception e) {
             return Json.ok(false); // sem espaço, sem pasta...

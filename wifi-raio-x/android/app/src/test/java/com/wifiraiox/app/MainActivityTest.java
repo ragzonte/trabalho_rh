@@ -168,7 +168,7 @@ public class MainActivityTest extends AllSdks {
         assertEquals("text/html", index.getMimeType());
         assertEquals("UTF-8", index.getEncoding());
         assertTrue(body(index).toLowerCase().contains("<!doctype html>"));
-        assertEquals("quadros de outros sites ficam proibidos na página", "frame-src 'self' blob: data:",
+        assertEquals("a política de segurança da página vai no cabeçalho", WebAssets.PAGE_POLICY,
                 index.getResponseHeaders().get("Content-Security-Policy"));
 
         // Módulos ES só carregam com um tipo JavaScript.
@@ -317,8 +317,11 @@ public class MainActivityTest extends AllSdks {
         Fixtures.idle();
         assertEquals("https://evil.example/login", shadowOf(activity).getNextStartedActivity().getDataString());
 
-        // recursos de terceiros (imagem, fetch) não são da nossa conta
-        assertNull(client.shouldInterceptRequest(web, request("https://cdn.example/lib.js", false)));
+        // recursos de terceiros (script, imagem, fetch) também não entram: a interface é toda local
+        WebResourceResponse foreign = client.shouldInterceptRequest(web, request("https://cdn.example/lib.js", false));
+        assertNotNull(foreign);
+        assertEquals(403, foreign.getStatusCode());
+        assertEquals(0, foreign.getData().available());
 
         // se a página principal chegar a trocar de endereço: a ponte se fecha e o app recarrega a própria interface
         client.onPageStarted(web, "https://evil.example/login", null);
@@ -951,7 +954,6 @@ public class MainActivityTest extends AllSdks {
                 "android.permission.NEARBY_WIFI_DEVICES",
                 "android.permission.ACCESS_NETWORK_STATE",
                 "android.permission.INTERNET",
-                "android.permission.CHANGE_WIFI_MULTICAST_STATE",
                 "android.permission.VIBRATE")), declared);
     }
 

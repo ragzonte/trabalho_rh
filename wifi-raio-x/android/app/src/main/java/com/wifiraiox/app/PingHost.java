@@ -40,7 +40,7 @@ final class PingHost {
         for (int i = 0; i < address.length(); i++) {
             char c = address.charAt(i);
             if (c == ':') colons++;
-            else if (c != '.' && Character.digit(c, 16) < 0) return false;
+            else if (c != '.' && !isHex(c)) return false;
         }
         if (colons < 2 || colons > 7) return false;
         int lastColon = address.lastIndexOf(':');
@@ -74,6 +74,11 @@ final class PingHost {
             }
         }
         return !numeric;
+    }
+
+    /** Só ASCII: Character.digit aceitaria também os algarismos de outros alfabetos (árabes, de largura cheia...). */
+    static boolean isHex(char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
     }
 
     private static boolean isAlnum(char c) {

@@ -303,6 +303,42 @@ describe('normalizeAp', () => {
     assert.equal(lost.standardLabel, 'Wi-Fi (padrão não informado)');
   });
 
+  // Regressão: um roteador de 2,4 GHz com os elementos VHT (extensão de fabricante para 256-QAM)
+  // saía como "Wi-Fi 5 (802.11ac)". O 11ac só existe em 5 GHz; o Android (WifiMode.determineMode)
+  // ignora o VHT em 2,4 GHz e chama a rede de 11n.
+  test('elementos VHT em 2,4 GHz não fazem da rede um Wi-Fi 5', () => {
+    const HT_CAP = 'ef091bffff000000000000000000000100000000000000000000';
+    const HT_OP = `0600000000${'00'.repeat(17)}`;
+    const VHT_CAP = 'b2798a03eaff0000eaff0000';
+    const VHT_OP = '0000000000';
+    const ies = [
+      { id: 45, ext: 0, hex: HT_CAP },
+      { id: 61, ext: 0, hex: HT_OP },
+      { id: 191, ext: 0, hex: VHT_CAP },
+      { id: 192, ext: 0, hex: VHT_OP },
+    ];
+    const base = { bssid: '00:11:22:33:44:77', ssid: 'Turbo', level: -50, capabilities: '[WPA2-PSK-CCMP][ESS]', ies };
+    for (const wifiStandard of [4, undefined, 0]) {
+      const ap = normalizeAp({ ...base, frequency: 2437, channelWidth: CW.W20, wifiStandard });
+      assert.equal(ap.band, '2.4');
+      assert.equal(ap.ie.gen, 5); // o beacon anuncia VHT...
+      assert.equal(ap.gen, 4, String(wifiStandard)); // ...mas a rede é 11n
+      assert.equal(ap.ieee, '802.11n');
+      assert.equal(ap.phy, 'ht');
+      assert.equal(ap.standardLabel, 'Wi-Fi 4 (802.11n)');
+      assert.equal(ap.genSource, wifiStandard === 4 ? 'android' : 'ies');
+    }
+    // os mesmos elementos em 5 GHz são um Wi-Fi 5 de verdade, mesmo que o Android diga 11n
+    const five = normalizeAp({ ...base, frequency: 5180, channelWidth: CW.W20, wifiStandard: 4 });
+    assert.equal(five.gen, 5);
+    assert.equal(five.standardLabel, 'Wi-Fi 5 (802.11ac)');
+    assert.equal(five.genSource, 'ies');
+    // Wi-Fi 6 em 2,4 GHz continua Wi-Fi 6 (o 11ax existe nas três faixas)
+    const ax = normalizeAp({ ...base, frequency: 2437, channelWidth: CW.W20, wifiStandard: 4, ies: [...ies, { id: 255, ext: 36, hex: 'f43f0025fcff' }] });
+    assert.equal(ax.gen, 6);
+    assert.equal(ax.standardLabel, 'Wi-Fi 6 (802.11ax)');
+  });
+
   test('Wi-Fi 7 completo: 320 MHz, MLD, RTT', () => {
     const ap = byId(wifi7).get(wifi7Truth.own.b6);
     assert.equal(ap.band, '6');
@@ -342,7 +378,7 @@ describe('normalizeAp', () => {
   });
 
   // Regressão: 160 MHz anunciado pelo campo CCFS2 do HT Operation (AP com menos fluxos em 160 do
-  // que em 80 MHz; IEEE 802.11-2020, 11.38.1). O VhtOperation do Android só olha o 2º centro do
+  // que em 80 MHz; IEEE 802.11-2020, elemento VHT Operation). O VhtOperation do Android só olha o 2º centro do
   // VHT Operation, que nesse caso é 0, e entrega CHANNEL_WIDTH_80MHZ: o AP aparecia com 80 MHz.
   test('160 MHz sinalizado no HT Operation (CCFS2): os elementos devolvem a largura de verdade', () => {
     const hex = (...parts) => parts.join('').replace(/\s+/g, '');
@@ -353,6 +389,8 @@ describe('normalizeAp', () => {
     // VHT Capabilities Info 0x438A79B2: sem 160 MHz no "channel width set", Extended NSS BW = 1
     const VHT_CAP_EXT_NSS = hex('b2 79 8a 43', 'ea ff 00 00', 'ea ff 00 00');
     const VHT_CAP_80_ONLY = hex('b2 79 8a 03', 'ea ff 00 00', 'ea ff 00 00');
+    // 0x038A79B6: 160 MHz pleno no "channel width set" (bits 2-3 = 1) e Extended NSS BW = 0
+    const VHT_CAP_160_FULL = hex('b6 79 8a 03', 'ea ff 00 00', 'ea ff 00 00');
     const VHT_OP_80 = hex('01 2a 00', 'fc ff'); // largura 1, centro 42, segundo centro 0
     const raw = (ccfs2, vhtCap = VHT_CAP_EXT_NSS, vhtOp = VHT_OP_80) => ({
       bssid: '00:11:22:33:44:66',
@@ -387,11 +425,13 @@ describe('normalizeAp', () => {
     assert.equal(split.occ.noncontiguous, true);
     assert.deepEqual(split.occ.segments, [{ lo: 5170, hi: 5250 }, { lo: 5735, hi: 5815 }]);
 
-    // nada muda: CCFS2 zerado; distância reservada (4 canais); AP que não declara 160 MHz;
+    // nada muda: CCFS2 zerado; distância reservada (4 canais); AP sem Extended NSS BW;
     // centro que não é o do bloco do primário; sem os elementos
     assert.equal(normalizeAp(raw(0)).widthMHz, 80);
     assert.equal(normalizeAp(raw(46)).widthMHz, 80);
     assert.equal(normalizeAp(raw(50, VHT_CAP_80_ONLY)).widthMHz, 80);
+    // sem Extended NSS BW o campo não vale: um AP de 160 MHz pleno usa o 2º centro do VHT Operation
+    assert.equal(normalizeAp(raw(50, VHT_CAP_160_FULL)).widthMHz, 80);
     assert.equal(normalizeAp(raw(66, VHT_CAP_EXT_NSS, hex('01 3a 00', 'fc ff'))).widthMHz, 80);
     assert.equal(normalizeAp({ ...raw(50), ies: undefined }).widthMHz, 80);
     assert.deepEqual(normalizeAp(raw(0)).occ.segments, [{ lo: 5170, hi: 5250 }]);

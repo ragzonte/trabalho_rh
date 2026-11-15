@@ -49,7 +49,9 @@ final class RttRanger {
         final Set<String> wanted = new LinkedHashSet<>();
         if (requested != null) {
             for (String b : requested) {
-                if (b != null && wanted.size() < MAX_REQUESTED) wanted.add(b.trim().toLowerCase(Locale.ROOT));
+                if (b == null || wanted.size() >= MAX_REQUESTED) continue;
+                String bssid = b.trim().toLowerCase(Locale.ROOT);
+                if (isBssid(bssid)) wanted.add(bssid); // o que não é um MAC não tem como ser medido (nem volta na resposta)
             }
         }
         if (Build.VERSION.SDK_INT < 28 || !DeviceInfoReader.rttSupported(context) || wanted.isEmpty()) {
@@ -76,6 +78,16 @@ final class RttRanger {
                 session.finish(null); // SecurityException sem localização, serviço indisponível...
             }
         });
+    }
+
+    /** "aa:bb:cc:dd:ee:ff", já em minúsculas. */
+    static boolean isBssid(String s) {
+        if (s == null || s.length() != 17) return false;
+        for (int i = 0; i < 17; i++) {
+            char c = s.charAt(i);
+            if (i % 3 == 2 ? c != ':' : !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        }
+        return true;
     }
 
     /** A Activity está morrendo: responde o que estiver pendente. */

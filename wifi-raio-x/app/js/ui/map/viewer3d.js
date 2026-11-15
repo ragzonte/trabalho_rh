@@ -9,33 +9,46 @@
 //   ...
 //   viewer.destroy();
 //
+// O contêiner precisa ter tamanho (o visualizador ocupa 100% dele e acompanha as mudanças).
+// O acabamento (barra de escala, foco) está em css/map-viewer.css.
+//
 // Interface (igual nos dois visualizadores; no 2D, o que não se aplica é aceito e ignorado):
 //   kind                         '3d' | '2d' (muda sozinho para '2d' se o 3D se perder; avisa em options.onFallback)
-//   setModel(model, {keepView})  mantém a câmera quando é uma atualização do mesmo mapa (levantamento ao vivo);
-//                                reenquadra quando é outro mapa. `keepView` (true/false) passa por cima do palpite
-//   setHeat(fields | null)       setLayers(parcial)        getLayers()
+//   setModel(model, {keepView})  outro mapa: reenquadra. Atualização do mesmo mapa (levantamento ao vivo): a câmera
+//                                fica onde o usuário a deixou; se ele ainda não mexeu, acompanha o mapa que cresce.
+//                                `keepView: true` nunca mexe na câmera; `false` sempre reenquadra
+//   setHeat(fields | null)       pinta o piso pelo sinal (escala de map-colors.js) ou, com null, por ambiente
+//   setLayers(parcial)           { rooms, walls, path, spots, routers, neighbours, labels, relief, grid } (ver DEFAULT_LAYERS);
+//                                relief só aparece com mapa de calor       getLayers()
 //   setView('orbit' | 'top')     resetView()               setExplode(0..1)
-//   setFocusFloor(andar | null)  setWalker({x, y, z} | null)   setTheme('dark' | 'light')
+//   setFocusFloor(andar | null)  número do andar (MapFloor.floor); os outros somem (em órbita sobra o contorno)
+//   setWalker({x, y, z} | null)  "você está aqui"           setTheme('dark' | 'light')
 //   setPadding({top, right, bottom, left})   área (px) coberta por controles da tela: o mapa é enquadrado no resto
-//   setOnPick(fn)                worldToScreen({x, y, z | floor}) -> {x, y, visible}
-//   pickAt(x, y) -> pick | null  (mesmo objeto do onPick, sem chamar o onPick)
-//   snapshot() -> Promise<Blob>  PNG da vista atual           resize()   destroy()   stats()
+//   setOnPick(fn)                worldToScreen({x, y, z | floor}) -> {x, y, visible} (px dentro do visualizador)
+//   pickAt(x, y) -> pick | null  (o mesmo objeto do onPick, sem chamar o onPick)
+//   snapshot() -> Promise<Blob>  PNG da vista atual, com a barra de escala     resize()   destroy()
+//   stats()                      números para testes e diagnóstico (quadros, triângulos, geometrias, texturas, câmera)
 //
 // onPick recebe { kind: 'room' | 'cell' | 'router' | 'spot', x, y, floor, floorIndex, label, ... }:
 //   room/cell: room (MapRoom | null), roomId, dbm (com mapa de calor), conf, cell, ix, iy
+//              ('cell' quando há mapa de calor ou o lugar não pertence a um ambiente)
 //   router: ap (MapAp), id, own        spot: spot (MapSpot), id
+// O toque simples espera 230 ms pelo segundo toque (toque duplo = reenquadrar) antes de avisar.
 //
 // Opções: theme, onPick, onFallback(motivo), renderer ('auto' | '3d' | '2d'), padding, label (aria),
 //         ambient (false desliga a pulsação dos roteadores), maxPixelRatio (padrão 2),
 //         antialias (padrão: ligado, menos quando o WebGL é desenhado por software),
 //         reducedMotion (padrão: o que o sistema pede), contextRestoreMs (espera pelo contexto: 4000)
 //
+// Teclado (com o foco no canvas): setas giram (ou movem, de cima), + e - aproximam e afastam, 0 reenquadra.
+//
 // Honestidade: o mapa é aproximado. Por isso o contorno é um vidro baixo de quinas macias,
-// as divisões internas são tracejadas e o piso fica neutro e hachurado onde a confiança é baixa.
+// as divisões internas são tracejadas e o piso fica lavado e hachurado onde a confiança é baixa.
 //
 // Desempenho: só desenha quando algo muda (toque, animação, dado novo); a pulsação dos
-// roteadores roda a ~30 quadros/s e dorme depois de um tempo sem toque; a resolução cai
-// durante o movimento se o aparelho não dá conta e volta quando a cena para.
+// roteadores roda a ~30 quadros/s e dorme depois de 20 s sem toque; a resolução cai
+// durante o movimento se o aparelho não dá conta e volta quando a cena para; o piso plano
+// vira poucos retângulos e cada variante do shader só paga pelo que usa.
 
 import {
   WebGLRenderer,
@@ -108,7 +121,6 @@ export { DEFAULT_LAYERS };
 const RELIEF_MAX = 1.2; // altura máxima do relevo de sinal (m)
 const SLAB = 0.12; // espessura da laje desenhada (m)
 const FOV = 32;
-const POLAR_ORBIT = 0.93; // inclinação padrão da vista em órbita (rad a partir da vertical)
 const POLAR_MAX = 1.4; // a câmera nunca desce abaixo disto: não passa para baixo do piso
 const POLAR_TOP = 1e-4;
 const GHOST = 0.22; // quanto sobra do contorno de um andar fora de foco
@@ -869,8 +881,8 @@ function createViewer3d(container, options = {}) {
         arrows: flat(theme.neighbour, { side: DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
         pathStart: flat(theme.path[0], { polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }),
         pathEnd: flat(theme.path[2], { polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }),
-        walker: flat(theme.router, { polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 }),
-        walkerCore: flat('#ffffff', { polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5 }),
+        walker: flat(theme.router, { polygonOffset: true, polygonOffsetFactor: -5, polygonOffsetUnits: -5 }),
+        walkerCore: flat('#ffffff', { polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 }),
         walkerHalo: flat(theme.router, { transparent: true, opacity: 0.4, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }),
         tap: flat(theme.text, { transparent: true, opacity: 0, depthWrite: false, depthTest: false }),
       },
@@ -899,12 +911,11 @@ function createViewer3d(container, options = {}) {
   // marcador "você está aqui" e a onda do toque: existem sempre, aparecem quando preciso
   const walkerGroup = new Group();
   walkerGroup.visible = false;
+  // o "ponto azul" dos mapas: disco na cor de destaque com aro branco e um halo que pulsa
   const walkerHalo = new Mesh(kit.ring, kit.mats.walkerHalo);
-  const walkerDisc = new Mesh(kit.disc, kit.mats.walker);
-  const walkerCore = new Mesh(kit.disc, kit.mats.walkerCore);
-  const walkerBeam = new Mesh(kit.beam, kit.mats.walker);
-  const walkerOrb = new Mesh(kit.orb, kit.mats.walker);
-  walkerGroup.add(walkerHalo, walkerDisc, walkerCore, walkerBeam, walkerOrb);
+  const walkerDisc = new Mesh(kit.disc, kit.mats.walkerCore);
+  const walkerCore = new Mesh(kit.disc, kit.mats.walker);
+  walkerGroup.add(walkerHalo, walkerDisc, walkerCore);
   world.add(walkerGroup);
   const tapRing = new Mesh(kit.ring, kit.mats.tap);
   tapRing.visible = false;
@@ -1095,7 +1106,8 @@ function createViewer3d(container, options = {}) {
     hgt.unpackAlignment = 1;
     hgt.needsUpdate = true;
 
-    const step = Math.max(1, Math.ceil(Math.max(nx, ny) / 72));
+    // malha do relevo: no máximo ~56 quadros de lado (casas ficam na resolução da grade; áreas grandes, mais grossas)
+    const step = Math.max(1, Math.ceil(Math.max(nx, ny) / 56));
     const gx = Math.ceil(nx / step);
     const gy = Math.ceil(ny / step);
     const fb = meshBuilder({ position: 3, aH: 1, aG: 2, aKind: 1 });
@@ -1743,7 +1755,7 @@ function createViewer3d(container, options = {}) {
     for (const fs of floorsState) {
       const on = fs.fade > 0.5;
       fs.sheetMesh.visible = layers.walls;
-      fs.capMesh.visible = layers.walls;
+      fs.capMesh.visible = layers.walls && (fs.fade > 0.01 || viewMode !== 'top');
       if (fs.pathMesh) fs.pathMesh.visible = layers.path;
       fs.markerGroup.visible = on;
       for (const child of fs.markerGroup.children) {
@@ -1820,7 +1832,9 @@ function createViewer3d(container, options = {}) {
     fs.floorMesh.visible = f > 0.01;
     fs.edgeMesh.visible = f > 0.01;
     fs.sheetMat.uniforms.uFade.value = f;
-    fs.capMat.uniforms.uFade.value = Math.max(f, GHOST);
+    // de cima, o contorno de outro andar só atrapalharia a leitura do andar em foco
+    fs.capMat.uniforms.uFade.value = Math.max(f, viewMode === 'top' ? 0 : GHOST);
+    fs.capMesh.visible = layers.walls && (f > 0.01 || viewMode !== 'top');
     if (fs.pathMat) fs.pathMat.uniforms.uFade.value = f;
     fs.markerGroup.visible = f > 0.5;
     labelsDirty = true;
@@ -1859,6 +1873,12 @@ function createViewer3d(container, options = {}) {
     const w = Math.max(40, width - padding.left - padding.right);
     const h = Math.max(40, height - padding.top - padding.bottom);
     return { w, h };
+  }
+
+  // a barra de escala sai de baixo dos controles que a tela põe por cima do mapa
+  function applyInsets() {
+    root.style.setProperty('--mapv-inset-b', `${padding.bottom}px`);
+    root.style.setProperty('--mapv-inset-l', `${padding.left}px`);
   }
 
   function applyViewOffset() {
@@ -2132,9 +2152,12 @@ function createViewer3d(container, options = {}) {
         adaptResolution(dt);
         lastMotion = now;
       } else {
-        if (appliedRatio < baseRatio - 1e-3 && now - lastMotion > 140) applyRatio(baseRatio);
+        if (now - lastMotion > 140) {
+          motionEnded();
+          applyRatio(baseRatio);
+        }
         // aparelho lento demais até para a pulsação: melhor desligar o enfeite que gastar bateria
-        if (ambient && dt > 80 && ++ambientSlow > 12) ambientOk = false;
+        if (ambient && dt > 120 && ++ambientSlow > 20) ambientOk = false;
       }
       render(now);
     }
@@ -2143,23 +2166,36 @@ function createViewer3d(container, options = {}) {
   }
   let controlsBusy = false;
   let cameraMoved = false;
+  let wasMoving = false;
   let lastMotion = 0;
   let ambientSlow = 0;
 
-  // Resolução: cai um degrau quando os quadros demoram demais durante o movimento e volta ao parar.
+  // Resolução durante o movimento: cai um degrau quando os quadros passam de ~34 ms (abaixo de
+  // 30 por segundo) e sobe de volta quando sobram (abaixo de ~21 ms). Parado, sempre resolução cheia.
   function adaptResolution(dt) {
-    frameAvg += (dt - frameAvg) * 0.2;
-    if (frameAvg > 34) {
-      fastFrames = 0;
-      if (++slowFrames >= 6 && motionScale > 0.5) {
-        motionScale = Math.max(0.5, motionScale - 0.17);
-        slowFrames = 0;
-        frameAvg = 24;
-      }
-    } else if (frameAvg < 15) {
+    if (!wasMoving) {
+      // começo de um movimento: o intervalo desde o último quadro não diz nada sobre o desempenho
+      wasMoving = true;
+      frameAvg = 18;
       slowFrames = 0;
-      if (++fastFrames >= 45 && motionScale < 1) {
-        motionScale = Math.min(1, motionScale + 0.17);
+      fastFrames = 0;
+    } else {
+      frameAvg += (dt - frameAvg) * 0.2;
+      if (frameAvg > 34) {
+        fastFrames = 0;
+        if (++slowFrames >= 6 && motionScale > 0.5) {
+          motionScale = Math.max(0.5, motionScale - 0.17);
+          slowFrames = 0;
+          frameAvg = 24;
+        }
+      } else if (frameAvg < 21) {
+        slowFrames = 0;
+        if (++fastFrames >= 30 && motionScale < 1) {
+          motionScale = Math.min(1, motionScale + 0.17);
+          fastFrames = 0;
+        }
+      } else {
+        slowFrames = 0;
         fastFrames = 0;
       }
     }
@@ -2167,12 +2203,22 @@ function createViewer3d(container, options = {}) {
     applyRatio(baseRatio * motionScale);
   }
 
-  // parou: um último quadro na resolução cheia
+  // Um tropeço (compilar um shader, o sistema ocupado) não condena os próximos movimentos:
+  // cada um começa um degrau acima de onde o anterior terminou.
+  function motionEnded() {
+    if (!wasMoving) return;
+    wasMoving = false;
+    motionScale = Math.min(1, motionScale + 0.17);
+  }
+
+  // parou de verdade (140 ms sem movimento): um último quadro na resolução cheia
   function settle() {
-    if (appliedRatio >= baseRatio - 1e-3) return;
     win.clearTimeout(sharpTimer);
+    if (!wasMoving && appliedRatio >= baseRatio - 1e-3) return;
     sharpTimer = win.setTimeout(() => {
       if (destroyed || contextLost || tweens.size) return;
+      motionEnded();
+      if (appliedRatio >= baseRatio - 1e-3) return;
       applyRatio(baseRatio);
       render(win.performance.now());
     }, 140);
@@ -2318,14 +2364,11 @@ function createViewer3d(container, options = {}) {
     const lift = reliefNow * RELIEF_MAX * heightAt(fs, walker.x, walker.y);
     const z = fs.group.position.z + 0.05 + lift;
     const s = unit;
-    walkerHalo.scale.setScalar(0.42 * s);
-    walkerDisc.scale.setScalar(0.24 * s);
-    walkerCore.scale.setScalar(0.11 * s);
+    walkerHalo.scale.setScalar(0.46 * s);
+    walkerDisc.scale.setScalar(0.25 * s);
+    walkerCore.scale.setScalar(0.17 * s);
     walkerCore.position.z = 0.004;
     walkerDisc.position.z = 0.002;
-    walkerBeam.scale.set(s * 0.6, s * 0.6, 1.05 * Math.sqrt(s));
-    walkerOrb.scale.setScalar(s * 0.9);
-    walkerOrb.position.z = 1.05 * Math.sqrt(s);
     const from = walkerGroup.position.clone();
     const jump = instant || !walkerGroup.visible || walkerFloor !== fi;
     walkerFloor = fi;
@@ -2344,7 +2387,7 @@ function createViewer3d(container, options = {}) {
   function animateWalker(now) {
     if (!walkerGroup.visible) return;
     const k = (now % 1800) / 1800;
-    walkerHalo.scale.setScalar(unit * (0.3 + 0.5 * k));
+    walkerHalo.scale.setScalar(unit * (0.3 + 0.55 * k));
     kit.mats.walkerHalo.opacity = 0.45 * (1 - k);
   }
 
@@ -2710,6 +2753,11 @@ function createViewer3d(container, options = {}) {
     el: root,
     setModel(next, opts = {}) {
       const prev = model;
+      // o mesmo objeto de novo: nada mudou, nada a refazer (o modelo é recalculado, nunca alterado no lugar)
+      if (next && next === prev) {
+        if (opts.keepView === false) api.resetView();
+        return;
+      }
       const same = opts.keepView ?? isSameMap(prev, next);
       model = next || null;
       if (!model) heat = null;
@@ -2725,7 +2773,7 @@ function createViewer3d(container, options = {}) {
       if (!same || !prev) {
         userMoved = false;
         fit(false);
-      } else if (!userMoved) {
+      } else if (!userMoved && opts.keepView !== true) {
         fit(true); // o levantamento cresceu: acompanha, a menos que o usuário já tenha mexido na vista
       } else {
         const c = defaultCamera();
@@ -2761,6 +2809,7 @@ function createViewer3d(container, options = {}) {
       if (next === viewMode) return;
       viewMode = next;
       userMoved = false;
+      for (const fs of floorsState) setFloorFade(fs);
       wake();
       if (!model || !width) {
         needsFit = true;
@@ -2825,6 +2874,7 @@ function createViewer3d(container, options = {}) {
     },
     setPadding(p) {
       padding = { top: 0, right: 0, bottom: 0, left: 0, ...(p || {}) };
+      applyInsets();
       applyViewOffset();
       if (model && !userMoved) fit(true);
       labelsDirty = true;
@@ -2878,6 +2928,7 @@ function createViewer3d(container, options = {}) {
         running: raf !== 0,
         contextLost,
         antialias: msaa,
+        ambient: ambientOk,
         geometries: info.memory.geometries,
         textures: info.memory.textures,
         programs: info.programs ? info.programs.length : 0,
@@ -2946,6 +2997,7 @@ function createViewer3d(container, options = {}) {
     render(now);
   }
 
+  applyInsets();
   resize();
   applyLimits();
   return api;

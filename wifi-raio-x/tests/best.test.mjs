@@ -313,7 +313,7 @@ test('heroKind e gainText', () => {
 
   assert.equal(gainText(2.34), '≈ 2,3x mais rápida');
   assert.equal(gainText(8), '≈ 8x mais rápida');
-  assert.equal(gainText(206), '10x ou mais de velocidade');
+  assert.equal(gainText(206), 'pelo menos 10x mais rápida');
   assert.equal(gainText(1.1), null, 'ganho pequeno não vira selo');
   assert.equal(gainText(null), null);
 });

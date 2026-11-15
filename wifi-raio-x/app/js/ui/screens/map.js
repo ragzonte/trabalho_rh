@@ -10,9 +10,9 @@
 //
 // O que as partes recebem (`env`):
 //   ctx                        o contexto da tela (main.js)
-//   storage                    mapas salvos e rascunho, com tudo protegido: sem armazenamento o fluxo
-//                              continua (o mapa aparece) e salvar explica o problema
-//                                .ready -> Promise · .available · list() · get(id) · put(reg) · rename(id, nome)
+//   storage                    mapas salvos e rascunho (mapping/storage.js), com tudo protegido: sem ter onde
+//                              gravar o fluxo continua (o mapa aparece) e salvar explica o problema
+//                                .ready -> Promise · .persistent · list() · get(id) · put(reg) · rename(id, nome)
 //                                remove(id) · exportMap(id) · importMap(texto) · draft.load()/save()/clear()
 //   session                    o que passa de uma parte para a outra sem ir para o disco:
 //                                .start   {ownSsids, extraOwn, pilot}   pedido de levantamento novo
@@ -21,11 +21,12 @@
 //   sim()                      -> Promise<controles do simulador | null> (só na demonstração)
 //   isDemo()                   o app está no modo demonstração?
 //   go(caminho, {replace})     navega
+//   rekey(chave)               a parte aberta passa a valer por outra rota sem ser remontada
 //
 // As folhas de estilo da tela (css/map.css e css/map-viewer.css) são carregadas na primeira visita.
 
 import { h, mount as render } from '../dom.js';
-import { spinner } from '../components.js';
+import { spinner, errorState, button } from '../components.js';
 import { mountLibrary } from '../map/library.js';
 
 // ---------------------------------------------------------------------------
@@ -58,20 +59,27 @@ function ensureCss() {
 // Armazenamento protegido
 // ---------------------------------------------------------------------------
 
-/** Mensagem para o usuário quando guardar não deu certo. */
-export const STORAGE_PROBLEM = 'Este aparelho não deixou o app guardar o mapa (armazenamento indisponível ou cheio).';
+/** O que dizer quando o aparelho não guarda nada de forma permanente. */
+export const NOT_PERSISTENT = 'Este aparelho não deixou o app gravar dados: o mapa fica guardado só enquanto o app estiver aberto.';
+const NO_STORE = 'Não foi possível guardar o mapa neste aparelho.';
 
 /**
- * Embrulha o armazenamento de mapas (mapping/storage.js): nada aqui lança erro para as telas,
- * a não ser put/importMap/exportMap, cujo erro é a explicação que o usuário precisa ver.
- * Sem armazenamento, o rascunho fica só na memória (vale enquanto o app estiver aberto).
+ * Embrulha o armazenamento de mapas (mapping/storage.js). As leituras nunca lançam erro para as
+ * telas (lista vazia, mapa inexistente); put / rename / exportMap / importMap rejeitam com um
+ * erro cuja mensagem já é o texto para o usuário.
+ *   persistent = false  -> o aparelho não tem onde gravar: tudo vale só até fechar o app
  */
 function createStorage() {
   let store = null;
   let memoryDraft = null;
+  const need = async () => {
+    await api.ready;
+    if (!store) throw new Error(NO_STORE);
+    return store;
+  };
   const api = {
-    available: false,
-    error: null,
+    persistent: false,
+    kind: 'none',
     ready: null,
     async list() {
       await api.ready;
@@ -94,37 +102,25 @@ function createStorage() {
         return null;
       }
     },
-    async put(record) {
-      await api.ready;
-      if (!store) throw new Error(STORAGE_PROBLEM);
-      return store.put(record);
-    },
-    async rename(id, name) {
-      await api.ready;
-      if (!store) throw new Error(STORAGE_PROBLEM);
-      return store.rename(id, name);
-    },
+    put: async (record) => (await need()).put(record),
+    rename: async (id, name) => (await need()).rename(id, name),
+    exportMap: async (id) => (await need()).exportMap(id),
+    importMap: async (text) => (await need()).importMap(text),
     async remove(id) {
       await api.ready;
-      if (!store) return;
-      await store.remove(id);
-    },
-    async exportMap(id) {
-      await api.ready;
-      if (!store) throw new Error(STORAGE_PROBLEM);
-      return store.exportMap(id);
-    },
-    async importMap(text) {
-      await api.ready;
-      if (!store) throw new Error(STORAGE_PROBLEM);
-      return store.importMap(text);
+      if (!store) return false;
+      try {
+        return (await store.remove(id)) !== false;
+      } catch {
+        return false;
+      }
     },
     draft: {
       async load() {
         await api.ready;
         if (!store) return memoryDraft;
         try {
-          return (await store.draft.load()) || memoryDraft || null;
+          return (await store.draft.load()) || null;
         } catch {
           return memoryDraft;
         }
@@ -134,8 +130,7 @@ function createStorage() {
         await api.ready;
         if (!store) return false;
         try {
-          await store.draft.save(json);
-          return true;
+          return (await store.draft.save(json)) !== false;
         } catch (err) {
           console.warn('[mapa] não foi possível guardar o rascunho', err);
           return false;
@@ -152,17 +147,22 @@ function createStorage() {
         }
       },
     },
+    close() {
+      try {
+        if (store && typeof store.close === 'function') store.close();
+      } catch {
+        // já estava fechado
+      }
+    },
   };
   api.ready = (async () => {
     try {
       const mod = await import('../../mapping/storage.js');
-      store = await mod.openMapStore();
-      if (!store) throw new Error('sem armazenamento');
-      api.available = store.available !== false && store.persistent !== false;
+      store = (await mod.openMapStore()) || null;
+      api.persistent = !!store && store.persistent !== false;
+      api.kind = store ? store.kind || 'idb' : 'none';
     } catch (err) {
-      store = store || null;
-      api.available = false;
-      api.error = err;
+      store = null;
       console.warn('[mapa] armazenamento de mapas indisponível', err);
     }
   })();
@@ -208,6 +208,10 @@ export async function mount(root, ctx) {
       return engine;
     },
     go: (path, options) => ctx.navigate(path, options),
+    /** A parte aberta passa a responder por outra rota (ex.: o resultado recém-salvo ganha o id), sem remontar. */
+    rekey(key) {
+      if (current) current.key = key;
+    },
   };
 
   function leave() {
@@ -221,6 +225,26 @@ export async function mount(root, ctx) {
       }
     }
     ctx.setActions();
+  }
+
+  async function open(target, my) {
+    if (target.view === 'library') {
+      ctx.setTitle('Mapa 3D');
+      render(root);
+      return mountLibrary(root, env);
+    }
+    if (target.view === 'survey') {
+      ctx.setTitle('Novo mapa');
+      const mod = await import('../map/survey.js');
+      if (my !== token || dead) return null;
+      render(root);
+      return mod.mountSurvey(root, env);
+    }
+    ctx.setTitle('Mapa');
+    const mod = await import('../map/result.js');
+    if (my !== token || dead) return null;
+    render(root);
+    return mod.mountResult(root, env, { id: target.id });
   }
 
   async function show(route) {
@@ -238,22 +262,16 @@ export async function mount(root, ctx) {
     render(root, h('div.center.map-loading', null, spinner({ large: true, label: 'Abrindo' })));
 
     let instance = null;
-    if (target.view === 'library') {
-      ctx.setTitle('Mapa 3D');
-      render(root);
-      instance = mountLibrary(root, env);
-    } else if (target.view === 'survey') {
-      ctx.setTitle('Novo mapa');
-      const mod = await import('../map/survey.js');
+    try {
+      instance = await open(target, my);
+    } catch (err) {
       if (my !== token || dead) return;
-      render(root);
-      instance = await mod.mountSurvey(root, env);
-    } else {
-      ctx.setTitle('Mapa');
-      const mod = await import('../map/result.js');
-      if (my !== token || dead) return;
-      render(root);
-      instance = await mod.mountResult(root, env, { id: target.id });
+      // uma parte que não abre não derruba a tela inteira: aviso com "tentar de novo"
+      console.error('[mapa] erro ao abrir', key, err);
+      root.className = 'screen';
+      ctx.setActions();
+      render(root, errorState({ onRetry: () => void show(route) }), h('div.center', null, button('Voltar para os mapas', { variant: 'quiet', onClick: () => ctx.navigate('/mapa', { replace: true }) })));
+      return;
     }
     if (my !== token || dead) {
       // o usuário já foi para outro lugar enquanto esta parte montava
@@ -278,6 +296,7 @@ export async function mount(root, ctx) {
         engine.then((e) => e.dispose()).catch(() => {});
         engine = null;
       }
+      env.storage.close();
     },
   };
 }

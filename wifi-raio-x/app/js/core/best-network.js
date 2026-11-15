@@ -34,7 +34,7 @@
 import { clamp, lerp, qualityPct, signalLevel } from './signal.js';
 import { estimateLink, usableMbps, standardInfo } from './phy.js';
 import { asAp, groupByDevice, groupBySsid, normalizeBssid, ssidStem } from './model.js';
-import { recommendChannel } from './channel-rating.js';
+import { rateOwnChannel } from './channel-rating.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 const isObj = (x) => x !== null && typeof x === 'object';
@@ -399,10 +399,9 @@ function airtimeFor(ap, widthMHz, ctx) {
   const ownDuty = Math.min(MAX_DUTY, base + EXTRA_NETWORK_DUTY * (mates.length - 1));
 
   // Vizinhos: a nota do canal do AP sem contar ele mesmo. nota = (1 − tempo dos vizinhos) · (1 − ruído)
-  let current = null;
-  if (ap.band !== null && isNum(ap.channel)) {
-    current = recommendChannel(ctx.list, { band: ap.band, widthMHz: widthMHz ?? undefined, own: ap }).current;
-  }
+  // (rateOwnChannel avalia só o canal do AP e reaproveita o agrupamento por aparelho do contexto:
+  // esta conta roda para cada AP da lista)
+  const current = rateOwnChannel(ctx.list, { own: ap, widthMHz: widthMHz ?? undefined, devices: ctx.devices });
   let neighboursLeft = 1;
   let noiseLeft = 1;
   if (current !== null && isNum(current.score) && isNum(current.airtime)) {
