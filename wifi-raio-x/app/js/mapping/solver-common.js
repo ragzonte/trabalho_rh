@@ -18,7 +18,7 @@ export { FLOOR_HEIGHT };
 /** Altura típica do celular na mão (m acima do piso). */
 export const PHONE_HEIGHT = 1.2;
 /** Intervalo assumido entre varreduras quando o relógio falta (s): o do modo sem limite do Android. */
-export const DEFAULT_GAP_S = 3.5;
+const DEFAULT_GAP_S = 3.5;
 /** Uma varredura completa leva menos que isto (ms): leitura mais velha nunca é da varredura atual. */
 const MAX_SWEEP_MS = 4500;
 /** A posição de uma varredura feita andando vale para o meio dela: ~1,35 s antes da entrega da lista. */
@@ -26,6 +26,8 @@ export const SWEEP_MID_S = 1.35;
 
 export const now = () => (typeof performance !== 'undefined' && performance && typeof performance.now === 'function' ? performance.now() : 0);
 export const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+/** Número finito, ou zero (nada que não seja finito sai do solucionador). */
+export const finite = (v) => (Number.isFinite(v) ? v : 0);
 
 export function median(values) {
   if (!values.length) return NaN;
@@ -34,8 +36,14 @@ export function median(values) {
   return v.length % 2 ? v[m] : 0.5 * (v[m - 1] + v[m]);
 }
 
+/** Andar marcado numa varredura, como número inteiro (0 quando falta ou não é número). */
+export function floorOf(scan) {
+  const f = Math.round(Number(scan && scan.floor));
+  return Number.isFinite(f) ? clamp(f, -20, 200) : 0;
+}
+
 /** Faixa de um canal: 0 = 2,4 GHz, 1 = 5 GHz, 2 = 6 GHz. */
-export function bandOf(freq) {
+function bandOf(freq) {
   if (!(freq > 0) || freq < 3000) return 0;
   return freq < 5925 ? 1 : 2;
 }
@@ -111,8 +119,7 @@ export function readSurvey(survey) {
     const s = raw[i] && typeof raw[i] === 'object' ? raw[i] : {};
     const t = Number.isFinite(s.t) ? s.t : i > 0 ? time[i - 1] + DEFAULT_GAP_S : 0;
     time[i] = i > 0 ? Math.max(t, time[i - 1]) : t; // a ordem é a do vetor; o relógio não volta
-    const f = Math.round(Number(s.floor));
-    floor[i] = Number.isFinite(f) ? clamp(f, -20, 200) : 0;
+    floor[i] = floorOf(s);
     spot[i] = s.spot == null ? null : String(s.spot);
     still[i] = s.still || s.spot != null ? 1 : 0;
     const list = [];
@@ -207,6 +214,30 @@ export function visitsOf(view) {
     else visits.push({ members: [i], spot: view.spot[i], floor: view.floor[i] });
   }
   return visits;
+}
+
+/**
+ * Lugares: um por ponto marcado (todas as visitas a ele juntas: quem volta a um ponto está no
+ * mesmo lugar) e um por varredura andando.
+ * @returns {{nodeOf: Int32Array, nodes: {scans:number[], spot:(string|null), floor:number}[]}}
+ */
+export function placesOf(view) {
+  const nodeOf = new Int32Array(view.n);
+  const nodes = [];
+  const spotNode = new Map();
+  for (let i = 0; i < view.n; i++) {
+    const spot = view.spot[i];
+    let a;
+    if (spot !== null && spotNode.has(spot)) a = spotNode.get(spot);
+    else {
+      a = nodes.length;
+      nodes.push({ scans: [], spot, floor: view.floor[i] });
+      if (spot !== null) spotNode.set(spot, a);
+    }
+    nodes[a].scans.push(i);
+    nodeOf[i] = a;
+  }
+  return { nodeOf, nodes };
 }
 
 /** Lista ordenada dos andares e o índice do andar de cada item de `floors`. */
@@ -456,7 +487,22 @@ export function choleskySolve(L, b, m) {
 // Geometria de nuvens de pontos (vetores x[], y[])
 // ---------------------------------------------------------------------------
 
-/** Centro e raio quadrático médio de uma nuvem. */
+/** Centro e raio quadrático médio dos `n` primeiros pontos de um vetor intercalado [x0, y0, x1, y1, ...]. */
+export function flatCloudStats(X, n) {
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < n; i++) {
+    cx += X[2 * i];
+    cy += X[2 * i + 1];
+  }
+  cx /= n || 1;
+  cy /= n || 1;
+  let r2 = 0;
+  for (let i = 0; i < n; i++) r2 += (X[2 * i] - cx) * (X[2 * i] - cx) + (X[2 * i + 1] - cy) * (X[2 * i + 1] - cy);
+  return { cx, cy, radius: Math.sqrt(r2 / (n || 1)) };
+}
+
+/** Centro e raio quadrático médio de uma nuvem dada por dois vetores. */
 export function cloudStats(x, y) {
   const n = x.length;
   let cx = 0;

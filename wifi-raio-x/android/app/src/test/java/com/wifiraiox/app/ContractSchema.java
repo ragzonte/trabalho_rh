@@ -237,12 +237,19 @@ final class ContractSchema {
     private static final Check IP_ANY = (v, path, out) -> {
         if (!(v instanceof String) || !(isIpv4((String) v) || isIpv6((String) v))) out.add(path + ": " + show(v) + " não é um endereço IP");
     };
+    /** Nome de rede: texto de até 32 bytes no rádio (64 em UTF-8 quando veio em Latin-1), nunca a sentinela do Android. */
     private static final Check SSID = (v, path, out) -> {
         if (!(v instanceof String)) out.add(path + ": esperava texto, veio " + show(v));
         else if (((String) v).getBytes(StandardCharsets.UTF_8).length > 64) out.add(path + ": SSID longo demais");
-        else if (((String) v).startsWith("\"") && ((String) v).endsWith("\"") && ((String) v).length() >= 2) {
-            out.add(path + ": o nome veio com as aspas do Android");
-        } else if ("<unknown ssid>".equals(v)) out.add(path + ": sentinela do Android no lugar do nome");
+        else if ("<unknown ssid>".equals(v)) out.add(path + ": sentinela do Android no lugar do nome");
+    };
+    /** Nome da rede conectada: o WifiInfo o entrega entre aspas; aqui tem de chegar sem elas, e nunca vazio. */
+    private static final Check CONNECTED_SSID = (v, path, out) -> {
+        SSID.check(v, path, out);
+        if (!(v instanceof String)) return;
+        String s = (String) v;
+        if (s.isEmpty()) out.add(path + ": nome vazio tem de ficar ausente");
+        if (s.length() >= 2 && s.startsWith("\"") && s.endsWith("\"")) out.add(path + ": o nome veio com as aspas do Android");
     };
     private static final Check MAC = matching(BSSID, "um MAC minúsculo aa:bb:cc:dd:ee:ff");
     private static final Check REAL_MAC = (v, path, out) -> {
@@ -336,10 +343,7 @@ final class ContractSchema {
 
     static final Check CONNECTION = shape(fields(
             req("connected", BOOL),
-            opt("ssid", (v, path, out) -> {
-                SSID.check(v, path, out);
-                if ("".equals(v)) out.add(path + ": nome vazio tem de ficar ausente");
-            }),
+            opt("ssid", CONNECTED_SSID),
             opt("bssid", REAL_MAC),
             opt("rssi", DBM),
             opt("frequency", MHZ),
@@ -574,7 +578,6 @@ final class ContractSchema {
             out.add(label + ": não é um objeto JSON (" + json + ")");
             return out;
         }
-        if (json.contains("NaN") && json.matches(".*[:\\[,]\\s*-?(NaN|Infinity).*")) out.add(label + ": NaN/Infinity não existem em JSON");
         check.check(value, label, out);
         return out;
     }

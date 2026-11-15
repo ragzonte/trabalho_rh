@@ -49,6 +49,7 @@
 // e <html data-ready> quando a partida termina.
 // ---------------------------------------------------------------------------------------------
 
+import './polyfills.js'; // primeiro de tudo: completa o que falta em WebViews antigos
 import * as bridge from './bridge.js';
 import { createPrefs } from './prefs.js';
 import { createStore } from './store.js';

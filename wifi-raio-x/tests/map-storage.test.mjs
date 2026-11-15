@@ -463,16 +463,22 @@ test('local: registro estragado é pulado, não derruba a lista', async () => {
   storage.data.set(key(future), JSON.stringify(f));
   storage.data.delete(key(vanished)); // linha na lista sem o registro
 
-  // a lista ainda mostra o que tem registro; abrir um estragado devolve null
-  const names = (await store.list()).map((e) => e.name);
-  assert.ok(names.includes('Inteiro'));
-  assert.ok(!names.includes('Sumiu'), 'linha sem registro não é mapa');
+  // um armazenamento recém-aberto (o app acabou de abrir) confere cada registro antes de listar:
+  // só o inteiro aparece; abrir um estragado devolve null
+  const fresh = await local(storage, { now: clock.now });
+  assert.deepEqual((await fresh.list()).map((e) => e.name), ['Inteiro']);
+  assert.equal(fresh.lastError, null, 'registro estragado não é erro: é só pulado');
+  // o armazenamento que gravou os registros ainda confia neles (foram estragados por fora)...
+  assert.ok((await store.list()).some((e) => e.name === 'Inteiro'));
+  // ...até tentar abrir um: aí ele sai da lista
   assert.equal(await store.get(broken), null);
   assert.equal(await store.get(gutted), null);
   assert.equal(await store.get(future), null);
   assert.equal(await store.get(vanished), null);
   assert.deepEqual((await store.get(good)).survey, sampleSurvey());
   assert.ok(storage.data.has(key(future)), 'registro de versão futura não é apagado');
+  assert.ok(storage.data.has(key(gutted)), 'nem o estragado: só sai da lista');
+  assert.deepEqual((await store.list()).map((e) => e.name), ['Inteiro']);
 
   // lista corrompida: é refeita a partir dos registros inteiros
   for (const junk of ['{não é json', '"texto"', '{"a":1}', JSON.stringify([null, 42, 'x', { id: good }, { id: 'a b', name: 'x', createdAt: 1, updatedAt: 1, stats: {} }])]) {

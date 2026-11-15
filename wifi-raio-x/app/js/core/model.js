@@ -464,8 +464,12 @@ export function groupByDevice(aps) {
   // União de conjuntos; a raiz é sempre o menor índice, para o resultado ser determinístico
   const parent = nodes.map((_, i) => i);
   const members = nodes.map((_, i) => [i]);
+  const grown = new Array(n).fill(0); // quantas vezes o grupo de cada raiz cresceu
   const find = (i) => {
-    while (parent[i] !== i) i = parent[i];
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]]; // encurta o caminho para as próximas buscas
+      i = parent[i];
+    }
     return i;
   };
   const union = (i, j) => {
@@ -476,10 +480,27 @@ export function groupByDevice(aps) {
     parent[child] = root;
     members[root] = members[root].concat(members[child]);
     members[child] = [];
+    grown[root] += 1;
   };
+  // O conflito entre dois grupos é perguntado muitas vezes enquanto as junções são decididas, e
+  // só muda quando um deles cresce: a resposta fica guardada junto com o "tamanho" de cada um.
+  const clashMemo = new Map();
   const clusterClash = (x, y) => {
+    const lo = x < y ? x : y;
+    const hi = x < y ? y : x;
+    const key = lo * n + hi;
+    const mark = (grown[lo] * (n + 1) + grown[hi]) * 4;
+    const known = clashMemo.get(key);
+    if (known !== undefined && known - (known % 4) === mark) return known % 4;
     let worst = 0;
-    for (const i of members[x]) for (const j of members[y]) worst = Math.max(worst, clash(nodes[i], nodes[j]));
+    for (const i of members[lo]) {
+      for (const j of members[hi]) {
+        const level = clash(nodes[i], nodes[j]);
+        if (level > worst) worst = level;
+      }
+      if (worst === VETO) break;
+    }
+    clashMemo.set(key, mark + worst);
     return worst;
   };
 
@@ -520,22 +541,34 @@ export function groupByDevice(aps) {
   }
 
   // --- 2 e 3. endereços próximos, respeitando os vetos
-  /** Elos entre grupos ainda separados e compatíveis (o mais curto de cada par de grupos). */
+  /**
+   * Elos entre grupos ainda separados e compatíveis (o mais curto de cada par de grupos).
+   * Tira de `pairs` os pares que não voltam a ser elo: os dois lados já se juntaram, ou os
+   * grupos se vetam (grupos só crescem, e um veto entre eles não some).
+   */
   const linksOf = (pairs) => {
     const links = new Map();
-    for (const p of pairs) {
-      const x = find(p.i);
-      const y = find(p.j);
-      if (x === y) continue;
-      const key = x < y ? `${x}|${y}` : `${y}|${x}`;
+    let kept = 0;
+    for (let k = 0; k < pairs.length; k++) {
+      const p = pairs[k];
+      const a = find(p.i);
+      const b = find(p.j);
+      if (a === b) continue;
+      const x = a < b ? a : b;
+      const y = a < b ? b : a;
+      const key = x * n + y;
       const known = links.get(key);
       if (known) {
-        known.d = Math.min(known.d, p.d);
+        if (p.d < known.d) known.d = p.d;
+        pairs[kept++] = p;
         continue;
       }
       const level = clusterClash(x, y);
-      if (level !== VETO) links.set(key, { x: Math.min(x, y), y: Math.max(x, y), d: p.d, strained: level === STRAIN });
+      if (level === VETO) continue;
+      links.set(key, { x, y, d: p.d, strained: level === STRAIN });
+      pairs[kept++] = p;
     }
+    pairs.length = kept;
     return [...links.values()].sort((a, b) => a.d - b.d || a.x - b.x || a.y - b.y);
   };
 
@@ -776,6 +809,22 @@ export function groupBySsid(aps, options) {
 const DEDUPE_MS = 500; // o mesmo beacon relido: (ts − ageMs) só varia pelo arredondamento dos relógios
 const CLOCK_JUMP_MS = 60_000;
 
+// Fora da classe de propósito: método privado (#nome()) só existe a partir do Chrome 84,
+// e o WebView de celulares sem atualização pode ser mais antigo.
+function trackerView(state, now) {
+  const ageMs = Math.max(0, now - state.lastSeen);
+  return {
+    ...state.ap,
+    ageMs,
+    stale: ageMs > STALE_MS,
+    seenAt: state.lastSeen,
+    rssiSmooth: state.smooth === null ? null : Math.round(state.smooth * 10) / 10,
+    firstSeen: state.firstSeen,
+    lastSeen: state.lastSeen,
+    seenCount: state.seenCount,
+  };
+}
+
 /**
  * Guarda o estado de cada BSSID de uma varredura para a outra: última leitura, sinal suavizado,
  * histórico e quando foi visto.
@@ -872,19 +921,6 @@ export class ApTracker {
     return result;
   }
 
-  #view(state, now) {
-    const ageMs = Math.max(0, now - state.lastSeen);
-    return {
-      ...state.ap,
-      ageMs,
-      stale: ageMs > STALE_MS,
-      seenAt: state.lastSeen,
-      rssiSmooth: state.smooth === null ? null : Math.round(state.smooth * 10) / 10,
-      firstSeen: state.firstSeen,
-      lastSeen: state.lastSeen,
-      seenCount: state.seenCount,
-    };
-  }
 
   /**
    * BSSIDs conhecidos, do sinal mais forte para o mais fraco. Cada item é o Ap da última leitura
@@ -900,7 +936,7 @@ export class ApTracker {
     if (now === null) return [];
     const out = [];
     for (const state of this.#aps.values()) {
-      if (now - state.lastSeen <= maxAgeMs) out.push(this.#view(state, now));
+      if (now - state.lastSeen <= maxAgeMs) out.push(trackerView(state, now));
     }
     return out.sort(
       (a, b) => (b.rssiSmooth ?? -Infinity) - (a.rssiSmooth ?? -Infinity) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
@@ -912,7 +948,7 @@ export class ApTracker {
     const state = this.#aps.get(normalizeBssid(bssid));
     if (!state) return null;
     const now = isObj(options) && isNum(options.now) ? options.now : this.#lastTs;
-    return this.#view(state, now);
+    return trackerView(state, now);
   }
 
   /**

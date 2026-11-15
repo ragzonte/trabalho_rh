@@ -226,12 +226,19 @@ function parse(json) {
   }
 }
 
+// O Android avisa de uma falha da PONTE com {error: "..."} e nada mais. Um resultado que
+// tem `ok` (ex.: o resumo do teste de velocidade com ok:false e error:'offline') é uma
+// resposta normal do método, não uma falha: precisa chegar inteiro a quem chamou.
+function isNativeError(out) {
+  return !!out && typeof out === 'object' && typeof out.error === 'string' && !('ok' in out);
+}
+
 /** Fala com o Android pelo objeto injetado no WebView. */
 function nativeBackend(native) {
   return {
     call(method, args) {
       const out = parse(native.call(method, JSON.stringify(args ?? {})));
-      if (out && out.error) throw new Error(out.error);
+      if (isNativeError(out)) throw new Error(out.error);
       return out;
     },
     callAsync(method, args) {
@@ -259,7 +266,7 @@ hook.resolve = (id, result) => {
   if (!p) return;
   pending.delete(id);
   const out = parse(result);
-  if (out && out.error) p.reject(new Error(out.error));
+  if (isNativeError(out)) p.reject(new Error(out.error));
   else p.resolve(out);
 };
 

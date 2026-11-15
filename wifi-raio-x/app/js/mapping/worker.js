@@ -7,15 +7,17 @@
 //      não tem Worker de módulo, e nos testes em Node.
 //
 // Mensagens (só engine.js fala com este arquivo):
-//   worker -> página   { type: 'ready', solver }                       assim que carrega
+//   worker -> página   { type: 'ready', solver }                       assim que carrega (solver = nome e versão)
 //   página -> worker   { type: 'run', id, survey, own, quick, previous, budgetMs, seed }
 //   worker -> página   { type: 'progress', id, fraction, label }
 //                      { type: 'done', id, solution, model, ms, solveMs, buildMs }   (os vetores do modelo são transferidos)
 //                      { type: 'error', id, name, message }
-// Não há mensagem de cancelamento: o solucionador ocupa a thread sem ceder a vez, então quem
-// cancela é a página, encerrando o worker (engine.js cria outro).
+// Não há mensagem de cancelamento: cada motor do solucionador ocupa a thread por até alguns
+// segundos sem ceder a vez, então quem cancela é a página, encerrando o worker (engine.js cria
+// outro quando precisar).
 
 import { buildMap } from './mapmodel.js';
+import { solve, solveQuick, SOLVER_INFO } from './solver.js';
 
 const clock = () => (typeof performance === 'object' && performance && typeof performance.now === 'function' ? performance.now() : Date.now());
 
@@ -24,42 +26,6 @@ export function abortError(message = 'cálculo do mapa cancelado') {
   const err = new Error(message);
   err.name = 'AbortError';
   return err;
-}
-
-// ---------------------------------------------------------------------------
-// Solucionador
-// ---------------------------------------------------------------------------
-// Provisório: enquanto app/js/mapping/solver.js não existe, vale o melhor candidato da bancada
-// (candidates/geo.js). Quando o solver.js chegar, loadSolver vira só o import dele.
-
-let solverPromise = null;
-
-function adaptCandidate(mod) {
-  const solve = mod.solve;
-  return {
-    info: { name: 'geo (provisório)', version: 0 },
-    solve: (survey, options = {}) => solve(survey, { seed: options.seed, budgetMs: options.budgetMs, onProgress: options.onProgress }),
-    // prévia rápida: o mesmo método com pouco tempo, partindo da solução anterior quando ela serve
-    solveQuick: (survey, options = {}) => solve(survey, { budgetMs: options.budgetMs ?? 700, warmStart: options.previous || undefined }),
-  };
-}
-
-function adaptOfficial(mod) {
-  const solve = mod.solve;
-  if (typeof solve !== 'function') throw new Error('solver.js sem solve()');
-  const quick = typeof mod.solveQuick === 'function' ? mod.solveQuick : (survey, options = {}) => solve(survey, { budgetMs: options.budgetMs ?? 700 });
-  return { info: mod.SOLVER_INFO || { name: 'solver' }, solve, solveQuick: quick };
-}
-
-/** Carrega o solucionador uma vez só (import dinâmico: só pesa quando o primeiro mapa é pedido). */
-export function loadSolver() {
-  if (!solverPromise) {
-    solverPromise = import('./solver.js').then(adaptOfficial, () => import('./candidates/geo.js').then(adaptCandidate));
-    solverPromise.catch(() => {
-      solverPromise = null; // falhou (rede?): a próxima tentativa começa do zero
-    });
-  }
-  return solverPromise;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,12 +39,24 @@ function validSolution(solution, survey) {
   return solution.aps !== null && typeof solution.aps === 'object';
 }
 
+function smallJson(value) {
+  try {
+    const text = JSON.stringify(value);
+    return typeof text === 'string' && text.length <= 4000;
+  } catch {
+    return false;
+  }
+}
+
+/** O que a interface pode dizer sobre o solucionador em uso (nome, versão, erro esperado, notas). */
+export { SOLVER_INFO };
+
 /**
  * @typedef {Object} MapJob
  * @property {import('./types.js').Survey} survey
  * @property {string[]} [own]         BSSIDs das redes do usuário
  * @property {boolean} [quick]        prévia rápida (solveQuick) em vez da solução completa
- * @property {import('./types.js').MapSolution|null} [previous]  solução anterior, ponto de partida da prévia
+ * @property {import('./types.js').MapSolution|null} [previous]  solução anterior (a última prévia): o resultado sai no mesmo referencial
  * @property {number} [budgetMs]
  * @property {number} [seed]
  */
@@ -89,7 +67,7 @@ function validSolution(solution, survey) {
  * @param {MapJob} job
  * @param {object} [hooks]
  * @param {(fraction:number, label:string) => void} [hooks.onProgress]  0..1; no máximo ~100 avisos
- * @param {{cancelled:boolean}} [hooks.signal]   ligado por quem cancela; conferido entre as etapas (e pelo solucionador)
+ * @param {{cancelled:boolean}} [hooks.signal]   ligado por quem cancela; conferido entre as etapas, aqui e no solucionador
  * @param {() => Promise<void>} [hooks.breathe]  chamado entre as etapas: na thread principal, devolve a vez à tela
  * @returns {Promise<{solution: import('./types.js').MapSolution, model: import('./types.js').MapModel, ms:number, solveMs:number, buildMs:number}>}
  */
@@ -121,26 +99,28 @@ export async function runJob(job, hooks = {}) {
   if (!job || typeof job !== 'object' || !job.survey || !Array.isArray(job.survey.scans)) throw new Error('levantamento inválido');
   const survey = job.survey;
   report(0, 'Preparando');
-  const solver = await loadSolver();
   check();
   await breathe();
   check();
 
-  // 0 a 85%: posições; o resto: desenho do mapa
-  const solveProgress = (fraction, label) => report(0.02 + 0.83 * (Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : 0), label || 'Calculando as posições');
+  // 0 a 85%: posições; o resto: desenho do mapa. (O "pronto" do solucionador ainda não é o nosso.)
+  const solveProgress = (fraction, label) => {
+    const f = Number.isFinite(fraction) ? Math.max(0, Math.min(1, fraction)) : 0;
+    if (f < 1) report(0.02 + 0.83 * f, label || 'Calculando as posições');
+  };
   report(0.02, 'Calculando as posições');
+  // `previous` (a última prévia) mantém o mapa na mesma posição da tela: sem ela cada solução
+  // sairia girada ou espelhada de um jeito, porque só o Wi-Fi não diz onde fica o norte.
+  const options = { seed: Number.isFinite(job.seed) ? job.seed : 1 };
+  if (job.previous && typeof job.previous === 'object') options.previous = job.previous;
+  if (Number.isFinite(job.budgetMs) && job.budgetMs > 0) options.budgetMs = job.budgetMs;
   let solution;
-  if (job.quick) {
-    solution = await solver.solveQuick(survey, { previous: job.previous || undefined, budgetMs: job.budgetMs });
-  } else {
-    const options = { seed: Number.isFinite(job.seed) ? job.seed : 1, onProgress: solveProgress, signal };
-    if (Number.isFinite(job.budgetMs) && job.budgetMs > 0) options.budgetMs = job.budgetMs;
-    solution = await solver.solve(survey, options);
-  }
+  if (job.quick) solution = await solveQuick(survey, options);
+  else solution = await solve(survey, { ...options, onProgress: solveProgress, signal });
   check();
   if (!validSolution(solution, survey)) throw new Error('o solucionador devolveu uma solução inválida');
-  if (solution.debug !== undefined) {
-    // dados de bancada: não atravessam o worker nem vão para o armazenamento
+  if (solution.debug !== undefined && !smallJson(solution.debug)) {
+    // só um resumo pequeno (motores usados, tempos) atravessa o worker: dados de bancada ficam
     solution = { ...solution };
     delete solution.debug;
   }
@@ -208,7 +188,5 @@ if (inWorker) {
       if (active === signal) active = null;
     }
   };
-  scope.postMessage({ type: 'ready' });
-  // deixa o solucionador carregando enquanto o primeiro pedido não chega
-  loadSolver().catch(() => {});
+  scope.postMessage({ type: 'ready', solver: `${SOLVER_INFO.name} ${SOLVER_INFO.version || ''}`.trim() });
 }

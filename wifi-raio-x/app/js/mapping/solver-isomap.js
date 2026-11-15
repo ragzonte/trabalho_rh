@@ -16,11 +16,11 @@
 //                 critério, levado até o fim, se ajusta ao ruído e deforma o mapa.
 //   5. SAÍDA    - roteadores pela lei de distância ajustada, confiança pela curvatura do ajuste.
 //
-// É o motor mais barato: a etapa grossa sozinha serve de prévia ao vivo (solveQuick em solver.js).
+// É o motor mais barato: sozinho, serve de prévia ao vivo (solveQuick em solver.js).
 // Nenhuma constante de propagação é dada como certa: os valores a priori abaixo são largos e só
 // entram onde os dados não decidem.
 
-import { FLOOR_HEIGHT, SWEEP_MID_S, classicalMds, now, shortestPaths, visitsOf } from './solver-common.js';
+import { FLOOR_HEIGHT, SWEEP_MID_S, classicalMds, finite, now, shortestPaths, visitsOf } from './solver-common.js';
 
 const TRACK_WINDOW_S = 1.8; // uma amostra da rede conectada vale para a varredura cujo meio está a menos disto
 
@@ -75,8 +75,7 @@ const T = {
 /**
  * Resolve o levantamento com o motor isomap.
  * @param {import('./solver-common.js').SurveyView} view
- * @param {{budgetMs?: number, rounds?: number}} [options]
- *        `rounds`: voltas de refino (padrão: as de T.rounds; 0 = só a etapa grossa, para a prévia)
+ * @param {{budgetMs?: number}} [options]
  * @returns {{x: Float64Array, y: Float64Array, conf: Float64Array, aps: Object, scaleConf: number}}
  *          posições por varredura (metros, referencial próprio) e roteadores por BSSID
  */
@@ -89,7 +88,7 @@ export function solveIsomap(view, options = {}) {
   const timed = model.trans.some((tr) => tr.type !== 'free');
   let X = coarseScale(model, coarseEmbedding(model));
   // Sem tempo útil (modo de 30 s) o refino persegue ruído: fica só a etapa grossa.
-  const rounds = model.M >= 6 && model.active.length >= 2 && timed ? (options.rounds ?? T.rounds) : 0;
+  const rounds = model.M >= 6 && model.active.length >= 2 && timed ? T.rounds : 0;
   const fit = refineContinuous(model, X, { rounds, sweeps: T.sweeps, h0: T.kernelH0, h1: T.kernelH, deadline });
   X = fit.X;
   return buildOutput(prep, model, X, fit, timed);
@@ -1066,7 +1065,6 @@ function coarseScale(model, X) {
 function buildOutput(prep, model, X, fit, timed) {
   const { N, nodeOf } = prep;
   const { M, K, active, radios, floors, val, nObs, seen } = model;
-  const finite = (v) => (Number.isFinite(v) ? v : 0);
   // Confiança de cada ponto: desvio esperado da posição pela curvatura do custo (em nats/m²),
   // rebaixada quando o levantamento inteiro é pouco informativo (modo de 30 s, sem refino).
   const quality = timed ? 1 : 0.6;

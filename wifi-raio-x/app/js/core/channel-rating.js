@@ -40,7 +40,7 @@
 // canais; não modelamos a queda para uma largura menor quando só parte do bloco está ocupada
 // (canais largos saem um pouco piores do que são); o ciclo de trabalho é uma estimativa.
 
-import { blocksOf, blocksContaining, channelList, interferenceFactor, overlapMHz, maskDb } from './channels.js';
+import { blocksOf, blocksContaining, channelList, interferenceFactor, segmentsOf, maskDb } from './channels.js';
 import { dbmToMw, mwToDbm, noiseFloorDbm } from './signal.js';
 import { asAp, groupByDevice, normalizeBssid } from './model.js';
 
@@ -134,20 +134,6 @@ function capacityKept(mw, widthMHz) {
   return Math.log2(1 + ref.signal / (ref.floor + mw)) / ref.clean;
 }
 
-// Ap -> id do aparelho, guardado por lista de aparelhos: quem avalia vários APs da mesma lista
-// (best-network avalia todos) reaproveita o índice em vez de remontá-lo a cada chamada.
-const DEVICE_INDEX = new WeakMap();
-
-function deviceIndex(devices) {
-  let index = DEVICE_INDEX.get(devices);
-  if (!index) {
-    index = new Map();
-    for (const device of devices) for (const ap of device.aps) index.set(ap, device.id);
-    DEVICE_INDEX.set(devices, index);
-  }
-  return index;
-}
-
 /** `devices` tem o formato de groupByDevice()? (Só então pode entrar no lugar do agrupamento.) */
 function usableDevices(devices) {
   if (!Array.isArray(devices)) return null;
@@ -155,56 +141,117 @@ function usableDevices(devices) {
   return devices;
 }
 
-/**
- * Prepara a análise de uma faixa: separa as redes do usuário e junta os BSSIDs dos vizinhos em
- * rádios (mesmo aparelho, mesma frequência). `all` já normalizado; `devices` = groupByDevice(all).
- */
-function buildContext(all, band, exclude, devices) {
-  const excluded = bssidSet(exclude);
-  const own = [];
-  const others = [];
+/** Um rádio vizinho: as redes do mesmo aparelho na mesma frequência, resumidas no que a nota usa. */
+function makeRadio(members) {
+  let lead = members[0];
+  let stations = null;
+  let utilization = null;
+  let weight = 0;
+  for (const m of members) {
+    const ap = m.ap;
+    if (ap.rssi > lead.ap.rssi) lead = m;
+    if (isNum(ap.stations)) stations = (stations ?? 0) + ap.stations;
+    if (isNum(ap.utilization)) utilization = Math.max(utilization ?? 0, ap.utilization);
+    weight = Math.max(weight, freshness(ap.ageMs));
+  }
+  const base = stations === null ? DEFAULT_DUTY : IDLE_DUTY + DUTY_PER_STATION * stations;
+  return {
+    ap: lead.ap,
+    channel: lead.ap.channel,
+    rssi: lead.ap.rssi,
+    occ: lead.occ,
+    mw: dbmToMw(lead.ap.rssi),
+    duty: Math.min(MAX_DUTY, base + EXTRA_NETWORK_DUTY * (members.length - 1)),
+    utilization,
+    weight,
+    first: members[0].pos,
+  };
+}
+
+// Os APs de uma faixa já separados em rádios, ainda sem tirar ninguém da conta. Fica guardado
+// por lista de aparelhos (groupByDevice): quem avalia vários roteadores da mesma lista
+// (best-network avalia todos, a cada varredura) reaproveita em vez de refazer a cada chamada.
+const BAND_BASE = new WeakMap(); // devices -> Map(faixa -> base)
+
+function sameItems(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function bandBase(all, band, devices) {
+  let perBand = BAND_BASE.get(devices);
+  if (!perBand) {
+    perBand = new Map();
+    BAND_BASE.set(devices, perBand);
+  }
+  const known = perBand.get(band);
+  if (known && sameItems(known.all, all)) return known;
+
+  const deviceOf = new Map();
+  for (const device of devices) for (const ap of device.aps) deviceOf.set(ap, device.id);
+
+  const inBand = []; // todos os APs da faixa, na ordem da lista
+  const groups = new Map(); // "aparelho|frequência" -> membros
   for (const ap of all) {
     if (ap.band !== band) continue;
-    if (ap.id && excluded.has(ap.id)) own.push(ap);
-    else if (isNum(ap.rssi) && ap.occ.segments.length > 0) others.push(ap);
+    // `audible` = entra como vizinho: tem sinal medido e ocupa algum trecho do espectro
+    const audible = isNum(ap.rssi) && ap.occ.segments.length > 0;
+    const segments = audible ? segmentsOf(ap.occ) : [];
+    const entry = { ap, pos: inBand.length, audible, segments, occ: { segments }, group: null };
+    inBand.push(entry);
+    if (!audible) continue;
+    const device = deviceOf.get(ap);
+    // AP que o agrupamento não conhece é um rádio sozinho
+    const key = device === undefined ? entry : `${device}|${ap.freq}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { members: [], radio: null };
+      groups.set(key, group);
+    }
+    group.members.push(entry);
+    entry.group = group;
+  }
+  for (const group of groups.values()) group.radio = makeRadio(group.members);
+
+  const base = { all, inBand, groups: [...groups.values()] };
+  perBand.set(band, base);
+  return base;
+}
+
+/**
+ * Prepara a análise de uma faixa: separa as redes do usuário e junta os BSSIDs dos vizinhos em
+ * rádios (mesmo aparelho, mesma frequência). `all` já normalizado; `excluded` = Set de BSSIDs
+ * (já normalizados) que não contam como vizinhos; `devices` = groupByDevice(all).
+ */
+function buildContext(all, band, excluded, devices) {
+  const base = bandBase(all, band, devices || groupByDevice(all));
+  const own = [];
+  const others = [];
+  const touched = new Set(); // rádios que perderam alguma rede para a lista de exclusão
+  for (const entry of base.inBand) {
+    if (entry.ap.id && excluded.has(entry.ap.id)) {
+      own.push(entry.ap);
+      if (entry.group) touched.add(entry.group);
+    } else if (entry.audible) others.push(entry);
   }
 
-  const deviceOf = deviceIndex(devices || groupByDevice(all));
-
-  const radios = new Map();
-  others.forEach((ap, index) => {
-    const key = `${deviceOf.get(ap) ?? `?${index}`}|${ap.freq}`;
-    const radio = radios.get(key);
-    if (!radio) radios.set(key, { lead: ap, aps: [ap] });
-    else {
-      radio.aps.push(ap);
-      if (ap.rssi > radio.lead.rssi) radio.lead = ap;
+  let radios = [];
+  if (touched.size === 0) {
+    for (const group of base.groups) radios.push(group.radio);
+  } else {
+    for (const group of base.groups) {
+      if (!touched.has(group)) {
+        radios.push(group.radio);
+        continue;
+      }
+      const left = group.members.filter((m) => !(m.ap.id && excluded.has(m.ap.id)));
+      if (left.length) radios.push(makeRadio(left));
     }
-  });
-
-  const list = [];
-  for (const radio of radios.values()) {
-    let stations = null;
-    let utilization = null;
-    let weight = 0;
-    for (const ap of radio.aps) {
-      if (isNum(ap.stations)) stations = (stations ?? 0) + ap.stations;
-      if (isNum(ap.utilization)) utilization = Math.max(utilization ?? 0, ap.utilization);
-      weight = Math.max(weight, freshness(ap.ageMs));
-    }
-    const base = stations === null ? DEFAULT_DUTY : IDLE_DUTY + DUTY_PER_STATION * stations;
-    list.push({
-      ap: radio.lead,
-      channel: radio.lead.channel,
-      rssi: radio.lead.rssi,
-      occ: radio.lead.occ,
-      mw: dbmToMw(radio.lead.rssi),
-      duty: Math.min(MAX_DUTY, base + EXTRA_NETWORK_DUTY * (radio.aps.length - 1)),
-      utilization,
-      weight,
-    });
+    // A ordem dos rádios é a da primeira rede de cada um na lista (ela decide os empates)
+    radios = radios.sort((a, b) => a.first - b.first);
   }
-  return { band, own, others, radios: list };
+  return { band, own, others, radios };
 }
 
 /** Avalia um bloco com um canal primário fixo. Devolve os números sem arredondar. */
@@ -302,9 +349,9 @@ function rateBlock(ctx, block, only, prefer) {
 
   let coChannel = 0;
   let overlapping = 0;
-  for (const ap of ctx.others) {
-    if (ap.channel === best.primary) coChannel += 1;
-    else if (overlapMHz(ap.occ, block) > 0) overlapping += 1;
+  for (const other of ctx.others) {
+    if (other.ap.channel === best.primary) coChannel += 1;
+    else if (other.segments.some((seg) => seg.lo < block.hi && seg.hi > block.lo)) overlapping += 1;
   }
 
   return {
@@ -368,7 +415,7 @@ export function rateChannels(aps, options) {
   if (band === null) return [];
   const blocks = blocksOf(band, width);
   if (!blocks.length) return [];
-  const ctx = buildContext(toAps(aps), band, o.exclude, usableDevices(o.devices));
+  const ctx = buildContext(toAps(aps), band, bssidSet(o.exclude), usableDevices(o.devices));
   return blocks.map((block) => rateBlock(ctx, block));
 }
 

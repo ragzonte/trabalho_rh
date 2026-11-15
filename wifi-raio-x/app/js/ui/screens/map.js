@@ -17,6 +17,7 @@
 //   session                    o que passa de uma parte para a outra sem ir para o disco:
 //                                .start   {ownSsids, extraOwn, pilot}   pedido de levantamento novo
 //                                .result  {survey, solution, model, ...} resultado recém-calculado
+//                                .saving  Promise da gravação do rascunho ao sair do levantamento
 //   engine()                   -> Promise<motor> (mapping/engine.js), um só para a tela toda
 //   sim()                      -> Promise<controles do simulador | null> (só na demonstração)
 //   isDemo()                   o app está no modo demonstração?
@@ -192,7 +193,7 @@ export async function mount(root, ctx) {
   const env = {
     ctx,
     storage: createStorage(),
-    session: { start: null, result: null },
+    session: { start: null, result: null, saving: null },
     isDemo: () => ctx.app.isDemo(),
     async sim() {
       if (!ctx.app.isDemo()) return null;

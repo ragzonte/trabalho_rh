@@ -8,7 +8,8 @@
 //   const { solution, model, ms } = await engine.run(survey, {
 //     own,          // string[]: BSSIDs das redes do usuário (store.get().own)
 //     quick,        // true = prévia rápida (solveQuick), para o mapa ao vivo durante a caminhada
-//     previous,     // MapSolution anterior: ponto de partida da prévia
+//     previous,     // MapSolution anterior (a última prévia): o resultado sai no mesmo referencial,
+//                   // sem girar nem espelhar o mapa na tela de uma atualização para a outra
 //     budgetMs,     // tempo que o solucionador pode gastar
 //     onProgress,   // (fração 0..1, rótulo em pt-BR) => void
 //   });
@@ -24,9 +25,11 @@
 //
 // Como funciona: um Web Worker de módulo (worker.js) recebe o levantamento por mensagem e
 // devolve a solução e o modelo (os vetores tipados do modelo são transferidos, sem cópia).
-// Cancelar = encerrar o worker; o próximo run() cria outro. Se o worker não puder ser criado
-// ou falhar ao carregar (WebView antigo, sem Worker de módulo), o mesmo trabalho roda na thread
-// principal, devolvendo a vez à tela entre as etapas — mais travado, mas funciona.
+// Cancelar um cálculo completo = encerrar o worker (o próximo run() cria outro); uma prévia
+// rápida abandonada só tem o resultado ignorado, porque termina em décimos de segundo. Se o
+// worker não puder ser criado ou falhar ao carregar (WebView antigo, sem Worker de módulo), o
+// mesmo trabalho roda na thread principal, devolvendo a vez à tela entre as etapas — mais
+// travado, mas funciona.
 
 // Sem imports estáticos de propósito: o solucionador e o construtor do modelo só são carregados
 // na thread principal se o caminho de reserva for mesmo necessário.
@@ -178,7 +181,12 @@ export function createMapEngine({ workerUrl, readyTimeoutMs = READY_TIMEOUT_MS }
       const report = progressOf(entry);
       entry.abort = () => {
         clearTimeout(timer);
-        kill(h); // o solucionador não cede a vez: só encerrando o worker ele para
+        if (job.quick) {
+          // prévia rápida: acaba sozinha em décimos de segundo; a resposta dela é ignorada (id antigo)
+          if (h.onCrash === onCrash) h.onCrash = null;
+          return;
+        }
+        kill(h); // cada motor do solucionador segura a thread por segundos: só encerrando o worker ele para já
       };
       h.onMessage = (msg) => {
         if (msg.id !== job.id) return;
@@ -198,12 +206,13 @@ export function createMapEngine({ workerUrl, readyTimeoutMs = READY_TIMEOUT_MS }
           reject(err);
         }
       };
-      h.onCrash = () => {
+      const onCrash = () => {
         // o worker morreu no meio do cálculo (falta de memória?): tenta de novo, aqui mesmo
         clearTimeout(timer);
         if (entry.signal.cancelled) reject(abortError());
         else runOnMain(entry, job).then(resolve, reject);
       };
+      h.onCrash = onCrash;
       try {
         h.worker.postMessage({ type: 'run', ...job });
       } catch (err) {

@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createMapEngine } from '../app/js/mapping/engine.js';
-import { runJob, loadSolver, collectTransferables, abortError } from '../app/js/mapping/worker.js';
+import { runJob, collectTransferables, abortError, SOLVER_INFO } from '../app/js/mapping/worker.js';
 import { validateSurvey } from '../app/js/mapping/recorder.js';
 import { planWalk, simulateSurvey } from '../app/js/sim/walk.js';
 import { presetSpec } from '../app/js/sim/presets.js';
@@ -24,7 +24,9 @@ function makeSurvey(world = 'kitnet', lengthM = 45) {
 }
 const SURVEY = makeSurvey();
 const OWN = Object.keys(SURVEY.aps).slice(0, 2);
-const BUDGET = 2500;
+// Tempo de sobra: com folga todos os motores do solucionador rodam e o resultado não depende
+// de quão ocupada a máquina está (com pouco tempo ele deixa os mais caros de fora).
+const BUDGET = 20_000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -44,7 +46,7 @@ async function abortOf(promise) {
 function checkResult(out, survey = SURVEY) {
   assert.equal(out.solution.points.length, survey.scans.length);
   assert.ok(out.solution.points.every((p) => [p.x, p.y, p.z].every(Number.isFinite)));
-  assert.equal('debug' in out.solution, false, 'dados de bancada não saem do motor');
+  if ('debug' in out.solution) assert.ok(JSON.stringify(out.solution.debug).length <= 4000, 'só um resumo pequeno sai do motor');
   const model = out.model;
   assert.equal(model.version, 1);
   assert.equal(model.path.length, survey.scans.length);
@@ -93,7 +95,8 @@ test('o mesmo levantamento dá sempre o mesmo mapa, e o motor não mexe no que r
   const a = await engine.run(copy, { own: OWN, budgetMs: BUDGET });
   assert.deepEqual(copy, SURVEY, 'o levantamento não foi alterado');
   const b = await engine.run(copy, { own: new Set(OWN), budgetMs: BUDGET });
-  assert.deepEqual(b.solution, a.solution);
+  // (solution.debug traz os tempos de cada motor, que mudam de uma execução para a outra)
+  for (const key of ['points', 'aps', 'scaleConf']) assert.deepEqual(b.solution[key], a.solution[key], key);
   assert.deepEqual(b.model.quality, a.model.quality);
   assert.deepEqual(Array.from(b.model.floors[0].inside), Array.from(a.model.floors[0].inside));
   engine.dispose();
@@ -192,10 +195,8 @@ test('levantamento que não presta rejeita com erro comum (não AbortError) e n�
 // ---------------------------------------------------------------------------
 
 test('runJob: confere o sinal de cancelamento entre as etapas e devolve a vez em cada uma', async () => {
-  const solver = await loadSolver();
-  assert.equal(typeof solver.solve, 'function');
-  assert.equal(typeof solver.solveQuick, 'function');
-  assert.equal(await loadSolver(), solver, 'o solucionador é carregado uma vez só');
+  assert.equal(typeof SOLVER_INFO.name, 'string');
+  assert.ok(Array.isArray(SOLVER_INFO.notes) && SOLVER_INFO.notes.length > 0, 'o que a interface pode dizer sobre a precisão');
 
   let breaths = 0;
   const out = await runJob({ survey: SURVEY, own: OWN, budgetMs: BUDGET }, { breathe: async () => void (breaths += 1) });
@@ -251,6 +252,7 @@ test('collectTransferables: acha os buffers dos vetores tipados do modelo, sem r
 /**
  * Instala um Worker de mentira em globalThis. `behaviour` decide o que cada instância faz:
  *   'ok'        avisa 'ready' e resolve os pedidos com o runJob de verdade
+ *   'slow'      como 'ok', mas a resposta demora 80 ms (para dar tempo de cancelar no meio)
  *   'throws'    o construtor lança
  *   'load-error' dispara onerror antes de ficar pronto (script 404 ou sem suporte a módulo)
  *   'silent'    nunca fica pronto
@@ -292,8 +294,9 @@ function installFakeWorker(t, behaviours) {
       }
       // como o worker de verdade: clona o pedido, roda e devolve (com transferência)
       const job = structuredClone(msg);
+      const delay = this.behaviour === 'slow' ? 80 : 0;
       runJob(job, { onProgress: (fraction, label) => this.emit({ type: 'progress', id: job.id, fraction, label }) }).then(
-        (result) => this.emit(structuredClone({ type: 'done', id: job.id, ...result }, { transfer: collectTransferables(result.model) })),
+        (result) => setTimeout(() => this.emit(structuredClone({ type: 'done', id: job.id, ...result }, { transfer: collectTransferables(result.model) })), delay),
         (err) => this.emit({ type: 'error', id: job.id, name: err.name, message: err.message }),
       );
     }
@@ -382,6 +385,33 @@ test('worker: um pedido novo substitui o que está rodando', async (t) => {
   await abortOf(a);
   checkResult(await b);
   assert.equal(made[1].messages.length, 2, 'o pedido cancelado antes de sair não foi enviado');
+  engine.dispose();
+});
+
+test('worker: prévia rápida substituída não derruba o worker — só o resultado antigo é ignorado', async (t) => {
+  const made = installFakeWorker(t, ['slow']);
+  const engine = createMapEngine();
+  const first = engine.run(SURVEY, { quick: true, budgetMs: 600 });
+  await sleep(5);
+  const second = engine.run(SURVEY, { quick: true, budgetMs: 600 });
+  const third = engine.run(SURVEY, { quick: true, budgetMs: 600, own: OWN });
+  await abortOf(first);
+  await abortOf(second);
+  const out = await third;
+  checkResult(out);
+  assert.equal(out.worker, true);
+  assert.equal(made.length, 1, 'o mesmo worker do começo ao fim');
+  assert.equal(made[0].terminated, false);
+  // cancel() numa prévia também não encerra o worker
+  const fourth = engine.run(SURVEY, { quick: true, budgetMs: 600 });
+  await sleep(5);
+  assert.equal(engine.cancel(), true);
+  await abortOf(fourth);
+  assert.equal(made[0].terminated, false);
+  await sleep(150); // a resposta atrasada da prévia cancelada chega e é ignorada
+  checkResult(await engine.run(SURVEY, { budgetMs: BUDGET }));
+  assert.equal(made.length, 1);
+  assert.equal(made[0].messages.length, 4, 'os pedidos que saíram: 1ª, 3ª e 4ª prévias e o cálculo completo');
   engine.dispose();
 });
 

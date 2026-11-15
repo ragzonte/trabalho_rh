@@ -283,6 +283,8 @@ export function mountLibrary(root, env) {
 
   async function refresh() {
     await storage.ready;
+    // o levantamento que acabou de ser fechado pode ainda estar gravando o rascunho
+    if (env.session.saving) await Promise.resolve(env.session.saving).catch(() => {});
     const [list, d] = await Promise.all([storage.list(), storage.draft.load()]);
     if (dead) return;
     maps = list

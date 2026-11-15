@@ -17,7 +17,7 @@
 // de caminhada entre dois pontos marcados sai do sinal da rede conectada (ele estabiliza quando o
 // usuário chega): é o motor que melhor aproveita esse modo.
 
-import { FLOOR_HEIGHT, SWEEP_MID_S, cholesky, choleskySolve, median, now, shareSpots, topEigen2, visitsOf } from './solver-common.js';
+import { FLOOR_HEIGHT, SWEEP_MID_S, cholesky, choleskySolve, finite, median, now, shareSpots, topEigen2, visitsOf } from './solver-common.js';
 
 // --- como o Android entrega as leituras ---
 const SWEEP_S = 2.6; // duração típica de uma varredura completa
@@ -103,7 +103,6 @@ export function solveChain(view, options = {}) {
   const x = new Float64Array(n);
   const y = new Float64Array(n);
   const conf = new Float64Array(n);
-  const finite = (v) => (Number.isFinite(v) ? v : 0);
   for (let i = 0; i < n; i++) {
     const a = nodeOf[i];
     x[i] = finite(X[a][0]);

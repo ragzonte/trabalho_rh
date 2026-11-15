@@ -602,8 +602,8 @@ test('3d: sem vazamento em 50 trocas de modelo (geometrias, texturas e programas
       await cycle();
       const first = viewer.stats();
       const history = [];
-      for (let i = 0; i < 12; i++) {
-        await cycle(); // 4 trocas por volta: 48 + as 8 de antes
+      for (let i = 0; i < 17; i++) {
+        await cycle(); // 3 trocas de verdade por volta (repetir o mesmo objeto não refaz nada): 51, fora as de antes
         const s = viewer.stats();
         history.push([s.geometries, s.textures, s.programs]);
       }

@@ -394,6 +394,9 @@ export async function mountSurvey(root, env) {
       return;
     }
     bridge.vibrate(20).catch(() => {});
+    // ponto a ponto: pede uma leitura já (se o Android ainda tiver busca sobrando ela chega em
+    // segundos; se não, vale a próxima do ritmo de 30 s)
+    if (store.get().loop.throttled) scanLoop.scanNow().catch(() => {});
     draw();
   }
 
@@ -478,6 +481,7 @@ export async function mountSurvey(root, env) {
     } else {
       rec.resume();
       scanLoop.setMode('mapping');
+      bridge.keepAwake(true).catch(() => {});
       lastScanAt = null;
       gaps = [];
     }
@@ -522,6 +526,7 @@ export async function mountSurvey(root, env) {
   // --- concluir ------------------------------------------------------------
 
   let processing = null;
+  let delivered = false; // o resultado já foi entregue à tela seguinte
 
   function showStage(node) {
     surveyEl.hidden = !!node;
@@ -561,6 +566,7 @@ export async function mountSurvey(root, env) {
       if (dead) return;
       if (cancelled) throw Object.assign(new Error('cancelado'), { name: 'AbortError' });
       env.session.result = { survey, solution: out.solution, model: out.model, own, ownSsids: info.ownSsids, extraOwn: info.extraOwn, recordId: info.recordId, name: info.name, createdAt: info.createdAt, demo: info.demo };
+      delivered = true;
       env.go('/mapa/ver/novo', { replace: true });
     } catch (err) {
       if (dead) return;
@@ -724,6 +730,8 @@ export async function mountSurvey(root, env) {
           levelMeter(level),
           // com um ponto aberto a orientação já está na linha de cima; sem poder concluir, ela vai junto do botão
           !spot && !paused && level.canFinish ? h('p.msv-level__hint', null, st.hint) : null,
+          // (deitado, a barra de ações é baixa: o motivo de não poder concluir aparece aqui)
+          !level.canFinish && !piloting ? h('p.msv-level__hint.msv-level__blocker', null, finishBlocker(st, SURVEY_THRESHOLDS)) : null,
         ),
       ),
       h(
@@ -894,14 +902,15 @@ export async function mountSurvey(root, env) {
       if (leftMidSurvey) {
         const count = rec.stats().scans;
         if (count > 0) {
-          void storage.draft.save(draftPayload());
+          // quem abrir a biblioteca em seguida espera esta gravação antes de procurar o rascunho
+          env.session.saving = storage.draft.save(draftPayload());
           toast('Mapeamento em pausa. O rascunho ficou guardado.');
         } else if (!resumed) {
           void storage.draft.clear();
         }
       }
       // o cálculo em andamento (prévia ou final) não interessa mais
-      env.engine().then((e) => leftMidSurvey && e.cancel()).catch(() => {});
+      if (!delivered) env.engine().then((e) => e.cancel()).catch(() => {});
       bridge.keepAwake(false).catch(() => {});
       if (scanLoop.getState().mode !== prevLoopMode) scanLoop.setMode(prevLoopMode);
       if (viewer) viewer.destroy();

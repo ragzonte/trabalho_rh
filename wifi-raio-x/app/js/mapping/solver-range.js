@@ -19,7 +19,7 @@
 // largos e têm a justificativa ao lado. É o motor mais caro e o único que estima a posição dos
 // roteadores junto com as dos pontos.
 
-import { FLOOR_HEIGHT, PHONE_HEIGHT, classicalMds, clamp, lbfgs, median, now } from './solver-common.js';
+import { FLOOR_HEIGHT, PHONE_HEIGHT, classicalMds, clamp, finite, flatCloudStats, lbfgs, median, now, placesOf } from './solver-common.js';
 
 // ---------------------------------------------------------------------------
 // Constantes e priores
@@ -181,11 +181,11 @@ export function solveRange(view, options = {}) {
       if (!ev) break;
       scaleConf = clamp(0.75 - ev.sd, 0.2, 0.55);
       applyScale(model, theta, ev.factor);
-      model.sizeTarget = cloudRadius(theta, P).r;
+      model.sizeTarget = flatCloudStats(theta, P).radius;
       optimise(maxIter, false);
     }
   }
-  let targetSize = cloudRadius(theta, P).r;
+  let targetSize = flatCloudStats(theta, P).radius;
   if (walked) targetSize *= turnFactor(cfg, targetSize);
 
   // --- trajetória: EM curto com campo residual e grade ---
@@ -220,7 +220,7 @@ export function solveRange(view, options = {}) {
   // --- tamanho final ---
   // O alisamento encolhe um pouco o mapa: devolve o tamanho decidido na etapa de escala.
   {
-    const size = cloudRadius(theta, P).r;
+    const size = flatCloudStats(theta, P).radius;
     if (cfg.spreadShrink > 0 && size > 1e-6) {
       // Mapa de erro mínimo: pontos incertos espalham mais do que a casa real (o ruído soma ao
       // tamanho), e um mapa grande demais erra mais que um pequeno demais. Encolhe na medida da
@@ -274,15 +274,8 @@ function prepare(view) {
   const NF = Math.max(1, floorList.length);
 
   // --- nós ---
-  const nodeOf = new Int32Array(N);
-  const spotNode = new Map();
-  let P = 0;
-  for (let i = 0; i < N; i++) {
-    if (spot[i] !== null) {
-      if (!spotNode.has(spot[i])) spotNode.set(spot[i], P++);
-      nodeOf[i] = spotNode.get(spot[i]);
-    } else nodeOf[i] = P++;
-  }
+  const { nodeOf, nodes } = placesOf(view);
+  const P = nodes.length;
   const nodeFloor = new Int32Array(P).fill(-1);
   for (let i = 0; i < N; i++) if (nodeFloor[nodeOf[i]] < 0) nodeFloor[nodeOf[i]] = scanFloor[i];
 
@@ -673,15 +666,15 @@ function costAndGrad(model, cfg, theta, grad) {
 
   // --- âncora de tamanho (levantamentos sem caminhada contínua): segura a escala já decidida ---
   if (model.sizeTarget > 0) {
-    const c = cloudRadius(theta, P);
-    const r2 = c.r * c.r + 1e-9;
+    const c = flatCloudStats(theta, P);
+    const r2 = c.radius * c.radius + 1e-9;
     const el = 0.5 * Math.log(r2 / (model.sizeTarget * model.sizeTarget));
     cost += 0.5 * cfg.sizeWeight * el * el;
     if (grad) {
       const g = (cfg.sizeWeight * el) / (P * r2);
       for (let i = 0; i < P; i++) {
-        grad[2 * i] += g * (theta[2 * i] - c.mx);
-        grad[2 * i + 1] += g * (theta[2 * i + 1] - c.my);
+        grad[2 * i] += g * (theta[2 * i] - c.cx);
+        grad[2 * i + 1] += g * (theta[2 * i + 1] - c.cy);
       }
     }
   }
@@ -761,21 +754,6 @@ function applyScale(model, theta, s) {
       theta[ip] += 10 * theta[oR + 2 * a] * Math.log10(s);
     }
   }
-}
-
-/** Raio quadrático médio dos nós em torno do centro. */
-function cloudRadius(theta, P) {
-  let mx = 0;
-  let my = 0;
-  for (let i = 0; i < P; i++) {
-    mx += theta[2 * i];
-    my += theta[2 * i + 1];
-  }
-  mx /= Math.max(1, P);
-  my /= Math.max(1, P);
-  let r2 = 0;
-  for (let i = 0; i < P; i++) r2 += (theta[2 * i] - mx) * (theta[2 * i] - mx) + (theta[2 * i + 1] - my) * (theta[2 * i + 1] - my);
-  return { r: Math.sqrt(r2 / Math.max(1, P)), mx, my };
 }
 
 /**
@@ -1448,8 +1426,8 @@ function finalize(prep, model, theta, nodeSpread, scaleConf) {
   const conf = new Float64Array(N);
   for (let i = 0; i < N; i++) {
     const node = nodeOf[i];
-    x[i] = Number.isFinite(theta[2 * node]) ? theta[2 * node] : 0;
-    y[i] = Number.isFinite(theta[2 * node + 1]) ? theta[2 * node + 1] : 0;
+    x[i] = finite(theta[2 * node]);
+    y[i] = finite(theta[2 * node + 1]);
     const spread = Number.isFinite(nodeSpread[node]) ? nodeSpread[node] : 3;
     conf[i] = clamp((hasObs[node] ? 1 : 0.4) / (1 + (spread / 1.5) * (spread / 1.5)), 0, 1);
   }

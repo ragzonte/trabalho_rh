@@ -597,8 +597,13 @@ export function overlapMHz(occA, occB) {
   return total;
 }
 
-/** Aceita uma ocupação ({segments}), um bloco/segmento ({lo, hi}) ou nada. */
-function segmentsOf(occ) {
+/**
+ * Trechos de espectro válidos de uma ocupação ({segments}), de um bloco/segmento ({lo, hi}) ou
+ * de nada: sempre uma lista de {lo, hi} numéricos com hi > lo (o que não servir é descartado).
+ * @param {{segments:{lo:number,hi:number}[]}|{lo:number,hi:number}|null} occ
+ * @returns {{lo:number, hi:number}[]}
+ */
+export function segmentsOf(occ) {
   if (occ === null || typeof occ !== 'object') return [];
   const list = Array.isArray(occ.segments) ? occ.segments : [occ];
   const out = [];
@@ -684,6 +689,16 @@ function maskArea(x, m) {
  * @returns {number}
  */
 export function interferenceFactor(txOcc, rxLo, rxHi) {
+  // Caso de sempre (um trecho contra uma banda, tudo numérico): direto na memória, sem montar listas
+  if (typeof rxLo === 'number' && typeof rxHi === 'number' && txOcc !== null && typeof txOcc === 'object') {
+    const segs = txOcc.segments;
+    const s = Array.isArray(segs) ? (segs.length === 1 ? segs[0] : null) : txOcc;
+    if (s !== null && typeof s === 'object' && typeof s.lo === 'number' && typeof s.hi === 'number' && s.hi > s.lo) {
+      if (rxLo < rxHi) return pairFactor(s.lo, s.hi, rxLo, rxHi);
+      if (rxHi < rxLo) return pairFactor(s.lo, s.hi, rxHi, rxLo);
+    }
+  }
+
   const tx = segmentsOf(txOcc);
   let rx;
   if (rxLo !== null && typeof rxLo === 'object') {
@@ -700,13 +715,72 @@ export function interferenceFactor(txOcc, rxLo, rxHi) {
   for (const s of tx) {
     const width = s.hi - s.lo;
     if (width < 4) continue;
-    const center = (s.lo + s.hi) / 2;
-    const m = maskShape(width);
-    const signedArea = (x) => Math.sign(x) * maskArea(Math.abs(x), m);
-    const whole = 2 * maskArea(Infinity, m);
     let inside = 0;
-    for (const r of rx) inside += signedArea(r.hi - center) - signedArea(r.lo - center);
-    factor += (width / totalWidth) * (inside / whole);
+    for (const r of rx) inside += insideArea(s.lo, s.hi, r.lo, r.hi);
+    factor += (width / totalWidth) * (inside / wholeArea(width));
   }
-  return Math.min(1, Math.max(0, factor));
+  return factor > 0 ? Math.min(1, factor) : 0; // a comparação também tira o NaN de larguras absurdas
+}
+
+/** Potência (em "MHz equivalentes") de um transmissor em [lo, hi] que cai dentro de [rxLo, rxHi]. */
+function insideArea(lo, hi, rxLo, rxHi) {
+  const center = (lo + hi) / 2;
+  const m = maskShape(hi - lo);
+  const signedArea = (x) => Math.sign(x) * maskArea(Math.abs(x), m);
+  return signedArea(rxHi - center) - signedArea(rxLo - center);
+}
+
+/** Potência total da máscara de um canal de `width` MHz, na mesma unidade de insideArea. */
+function wholeArea(width) {
+  return 2 * maskArea(Infinity, maskShape(width));
+}
+
+// A nota dos canais pede este número para cada vizinho de cada canal candidato, a cada varredura,
+// e os pares (canal do vizinho, canal candidato) são sempre os mesmos poucos milhares: a integral
+// é guardada. Só entram valores finitos (um par de números vira uma chave exata) e a memória é
+// zerada ao encher, para não crescer sem limite com dados estranhos.
+const FACTOR_MEMO = new Map(); // chave do transmissor -> Map(chave do receptor -> fator)
+const FACTOR_MEMO_MAX = 20000;
+const KEY_SPAN = 1 << 21; // frequências em passos de 0,25 MHz até 524 GHz: muito além do Wi-Fi
+let factorMemoSize = 0;
+
+/** Chave inteira exata para o par (lo, hi), ou -1 quando os valores não cabem nela. */
+function rangeKey(lo, hi) {
+  const a = lo * 4;
+  const b = hi * 4;
+  if (!(a >= 0 && b >= 0 && a < KEY_SPAN && b < KEY_SPAN) || a !== Math.floor(a) || b !== Math.floor(b)) return -1;
+  return a * KEY_SPAN + b;
+}
+
+/** interferenceFactor para um trecho [lo, hi] contra uma banda [rxLo, rxHi] (lo < hi, rxLo < rxHi). */
+function pairFactor(lo, hi, rxLo, rxHi) {
+  const width = hi - lo;
+  // As mesmas recusas do caminho geral: valor não finito ou canal com menos de 4 MHz não interfere
+  if (!(width >= 4) || !Number.isFinite(lo) || !Number.isFinite(hi) || !Number.isFinite(rxLo) || !Number.isFinite(rxHi)) return 0;
+  const txKey = rangeKey(lo, hi);
+  const rxKey = rangeKey(rxLo, rxHi);
+  if (txKey < 0 || rxKey < 0) return computePairFactor(lo, hi, rxLo, rxHi);
+  let byRx = FACTOR_MEMO.get(txKey);
+  if (byRx === undefined) {
+    byRx = new Map();
+    FACTOR_MEMO.set(txKey, byRx);
+  }
+  let factor = byRx.get(rxKey);
+  if (factor === undefined) {
+    if (factorMemoSize >= FACTOR_MEMO_MAX) {
+      FACTOR_MEMO.clear();
+      factorMemoSize = 0;
+      byRx = new Map();
+      FACTOR_MEMO.set(txKey, byRx);
+    }
+    factor = computePairFactor(lo, hi, rxLo, rxHi);
+    byRx.set(rxKey, factor);
+    factorMemoSize += 1;
+  }
+  return factor;
+}
+
+function computePairFactor(lo, hi, rxLo, rxHi) {
+  const factor = insideArea(lo, hi, rxLo, rxHi) / wholeArea(hi - lo);
+  return factor > 0 ? Math.min(1, factor) : 0;
 }

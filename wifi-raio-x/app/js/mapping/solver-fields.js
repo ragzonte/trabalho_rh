@@ -23,7 +23,7 @@
 // Custo: O(nós² x rádios) por iteração. É o motor que melhor aproveita vários roteadores próprios
 // (escritório, casa com malha).
 
-import { FLOOR_HEIGHT, SWEEP_MID_S, classicalMds, indexFloors, lbfgs, now, shortestPaths } from './solver-common.js';
+import { FLOOR_HEIGHT, SWEEP_MID_S, classicalMds, finite, flatCloudStats, indexFloors, lbfgs, now, placesOf, shortestPaths } from './solver-common.js';
 
 // ---------------------------------------------------------------------------
 // Constantes físicas e de comportamento (com a justificativa de cada uma)
@@ -135,21 +135,7 @@ function prepare(view) {
   const radios = cols.map((k) => view.radios[k]);
   const R = cols.length;
 
-  const nodeOfScan = new Int32Array(n);
-  const nodes = [];
-  const spotNode = new Map();
-  for (let i = 0; i < n; i++) {
-    const spot = view.spot[i];
-    let a;
-    if (spot !== null && spotNode.has(spot)) a = spotNode.get(spot);
-    else {
-      a = nodes.length;
-      nodes.push({ scans: [], floor: view.floor[i], spot });
-      if (spot !== null) spotNode.set(spot, a);
-    }
-    nodes[a].scans.push(i);
-    nodeOfScan[i] = a;
-  }
+  const { nodeOf: nodeOfScan, nodes } = placesOf(view);
   const M = nodes.length;
 
   // Impressão digital de cada nó: média das leituras frescas de cada rádio (NaN = não ouvido).
@@ -243,21 +229,7 @@ function stepScale(data, X, P) {
 }
 
 // Raio quadrático médio dos nós em torno do centro.
-function radiusOf(X) {
-  const n = X.length / 2;
-  if (!n) return 0;
-  let cx = 0;
-  let cy = 0;
-  for (let a = 0; a < n; a++) {
-    cx += X[2 * a];
-    cy += X[2 * a + 1];
-  }
-  cx /= n;
-  cy /= n;
-  let s = 0;
-  for (let a = 0; a < n; a++) s += (X[2 * a] - cx) ** 2 + (X[2 * a + 1] - cy) ** 2;
-  return Math.sqrt(s / n);
-}
+const radiusOf = (X) => flatCloudStats(X, X.length / 2).radius;
 
 // ---------------------------------------------------------------------------
 // Imersão inicial "desdobrada"
@@ -1126,7 +1098,6 @@ function finish(data, X, solved, P) {
       }
     }
   }
-  const finite = (v) => (Number.isFinite(v) ? v : 0);
   const conf = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     x[i] = finite(x[i]);

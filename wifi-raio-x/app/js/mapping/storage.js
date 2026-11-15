@@ -353,6 +353,10 @@ function kvBackend(storage) {
     const list = readJson(LS_INDEX);
     return Array.isArray(list) ? list : [];
   };
+  const writeIndex = (list) => {
+    if (list.length) storage.setItem(LS_INDEX, JSON.stringify(list));
+    else storage.removeItem(LS_INDEX); // lista vazia não ocupa chave
+  };
   return {
     async rows() {
       return { entries: readIndex(), ids: itemKeys().map((k) => k.slice(LS_ITEM.length)) };
@@ -365,7 +369,7 @@ function kvBackend(storage) {
       const before = storage.getItem(key);
       storage.setItem(key, JSON.stringify(record));
       try {
-        storage.setItem(LS_INDEX, JSON.stringify([...readIndex().filter((e) => !isObj(e) || e.id !== record.id), entry]));
+        writeIndex([...readIndex().filter((e) => !isObj(e) || e.id !== record.id), entry]);
       } catch (err) {
         // não coube a lista: desfaz o registro para os dois não ficarem em desacordo
         try {
@@ -378,11 +382,18 @@ function kvBackend(storage) {
       }
     },
     async writeEntry(entry) {
-      storage.setItem(LS_INDEX, JSON.stringify([...readIndex().filter((e) => !isObj(e) || e.id !== entry.id), entry]));
+      writeIndex([...readIndex().filter((e) => !isObj(e) || e.id !== entry.id), entry]);
+    },
+    async removeEntry(id) {
+      const rows = readIndex();
+      const kept = rows.filter((e) => !isObj(e) || e.id !== id);
+      if (kept.length !== rows.length) writeIndex(kept);
     },
     async remove(id) {
       storage.removeItem(LS_ITEM + id);
-      storage.setItem(LS_INDEX, JSON.stringify(readIndex().filter((e) => !isObj(e) || e.id !== id)));
+      const rows = readIndex();
+      const kept = rows.filter((e) => !isObj(e) || e.id !== id);
+      if (kept.length !== rows.length) writeIndex(kept);
     },
     async clear() {
       for (const key of itemKeys()) storage.removeItem(key);
@@ -545,6 +556,9 @@ function idbBackend(factory, firstDb, timeoutMs) {
     async writeEntry(entry) {
       await transact([STORE_INDEX], 'readwrite', (s) => void s[STORE_INDEX].put(entry));
     },
+    async removeEntry(id) {
+      await transact([STORE_INDEX], 'readwrite', (s) => void s[STORE_INDEX].delete(id));
+    },
     async remove(id) {
       await transact([STORE_MAPS, STORE_INDEX], 'readwrite', (s) => {
         s[STORE_MAPS].delete(id);
@@ -584,21 +598,43 @@ function idbBackend(factory, firstDb, timeoutMs) {
 // O armazenamento que as telas usam
 // ---------------------------------------------------------------------------
 
+/** Quantos registros ainda não conferidos uma chamada de list() abre para conferir. */
+const VERIFY_PER_LIST = 60;
+
 function makeStore(backend, kind, now) {
   let lastError = null;
   const note = (err) => {
     lastError = toStoreError(err);
     return lastError;
   };
+  // registros já lidos e conferidos por este armazenamento: id -> updatedAt
+  const verified = new Map();
 
   async function get(id) {
     if (typeof id !== 'string' || !ID_RE.test(id)) return null;
+    let raw;
     try {
-      return cleanRecord(await backend.read(id), now());
+      raw = await backend.read(id);
     } catch (err) {
       note(err);
       return null;
     }
+    const record = cleanRecord(raw, now());
+    if (record) {
+      verified.set(id, record.updatedAt);
+      return record;
+    }
+    verified.delete(id);
+    if (raw !== null && raw !== undefined) {
+      // Registro que existe mas não presta (ou é de uma versão mais nova do app): sai da lista,
+      // para ninguém tentar abrir de novo. Os dados ficam onde estão.
+      try {
+        await backend.removeEntry(id);
+      } catch {
+        // some da lista na próxima leitura, de qualquer jeito
+      }
+    }
+    return null;
   }
 
   async function list() {
@@ -614,6 +650,16 @@ function makeStore(backend, kind, now) {
     for (const raw of Array.isArray(rows.entries) ? rows.entries : []) {
       const entry = cleanEntry(raw);
       if (entry && ids.has(entry.id)) byId.set(entry.id, entry); // linha sem registro = mapa que não existe mais
+    }
+    // A linha da lista é só um resumo: o registro em si é aberto e conferido uma vez (por
+    // armazenamento aberto), dos mais recentes para os mais antigos. Registro estragado some daqui.
+    let budget = VERIFY_PER_LIST;
+    for (const entry of [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt)) {
+      if (verified.get(entry.id) === entry.updatedAt) continue;
+      if (budget-- <= 0) break;
+      const rec = await get(entry.id);
+      if (!rec) byId.delete(entry.id);
+      else if (rec.updatedAt !== entry.updatedAt || rec.name !== entry.name) byId.set(entry.id, entryOf(rec)); // linha desatualizada: vale o registro
     }
     // registro sem linha (lista estragada): refaz a linha a partir do registro, se ele estiver inteiro
     for (const id of ids) {
@@ -637,6 +683,7 @@ function makeStore(backend, kind, now) {
     } catch (err) {
       throw note(err);
     }
+    verified.set(record.id, record.updatedAt);
     return record.id;
   }
 

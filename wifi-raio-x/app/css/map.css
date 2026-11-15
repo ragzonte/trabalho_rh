@@ -881,6 +881,10 @@
   color: var(--muted);
 }
 
+.msv-level__blocker {
+  display: none;
+}
+
 /* Contadores */
 .msv-counts {
   display: grid;
@@ -1522,6 +1526,14 @@
   opacity: 0.45;
 }
 
+.mrs-tools__flat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
 .mrs-tools__reset {
   margin-left: auto;
   border: 1px solid var(--line);
@@ -1878,6 +1890,12 @@
   .mrs__float {
     right: calc(min(372px, 46%) + var(--sp-3));
   }
+  .mrs__save {
+    right: calc(min(372px, 46%) + var(--sp-3));
+  }
+  .mrs-tools__relief-long {
+    display: none;
+  }
 }
 
 /* Deitado: a prévia ocupa a esquerda inteira; controles e ações à direita */
@@ -1910,6 +1928,12 @@
   }
   .msv__bar-in > .btn--primary {
     min-height: 44px;
+  }
+  .msv__bar-note {
+    display: none;
+  }
+  .msv-level__blocker {
+    display: block;
   }
   .mproc {
     flex-direction: row;

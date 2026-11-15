@@ -1203,7 +1203,7 @@ function refineFields(data, X0, P, dbg, progress) {
     hopScale = Math.max(0.3, P.orderHop * rms * Math.SQRT2 * Math.sqrt(Math.PI / M));
     model = fitApModels(data, X, P, model, o < 2);
     inv2h2 = 1 / (2 * h * h);
-    (dbg.h ||= []).push(h);
+    (dbg.h = dbg.h || []).push(h);
     const r = lbfgs(cost, X, P.inner, P.deadline);
     X = r.x;
     hist.push(r.f);

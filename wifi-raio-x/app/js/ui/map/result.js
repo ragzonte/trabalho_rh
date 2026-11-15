@@ -904,7 +904,7 @@ export async function mountResult(root, env, { id }) {
         'div.mrs-tools',
         { key: 'tools' },
         is2d
-          ? null
+          ? h('span.mrs-tools__flat', null, icon('grid', { size: 18 }), 'Vista em planta')
           : h(
               'div.seg.seg--inline.mrs-tools__view',
               { role: 'radiogroup', 'aria-label': 'Vista do mapa' },
