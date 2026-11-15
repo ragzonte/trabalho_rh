@@ -213,7 +213,7 @@ public class MainActivityTest extends AllSdks {
     }
 
     @Test
-    public void foreignPageNeverGetsLoadedIntoTheMainFrame() {
+    public void foreignPageNeverGetsLoadedIntoTheMainFrame() throws Exception {
         MainActivity activity = launch();
         WebView web = activity.webView();
         WebViewClient client = shadowOf(web).getWebViewClient();
@@ -221,19 +221,34 @@ public class MainActivityTest extends AllSdks {
         // caminho que não passa por shouldOverrideUrlLoading (ex.: formulário POST)
         WebResourceResponse blocked = client.shouldInterceptRequest(web, request("https://evil.example/login", true));
         assertNotNull(blocked);
-        assertEquals(403, blocked.getStatusCode());
+        assertEquals("o conteúdo de fora nunca é entregue", 403, blocked.getStatusCode());
+        assertEquals(0, blocked.getData().available());
         Fixtures.idle();
         assertEquals("https://evil.example/login", shadowOf(activity).getNextStartedActivity().getDataString());
-        assertTrue("a ponte se fecha na hora", activity.bridge().call("info", "{}").contains("error"));
 
         // recursos de terceiros (imagem, fetch) não são da nossa conta
         assertNull(client.shouldInterceptRequest(web, request("https://cdn.example/lib.js", false)));
 
-        // se mesmo assim a página externa "começar", o app volta para a própria interface
+        // se a página principal chegar a trocar de endereço: a ponte se fecha e o app recarrega a própria interface
         client.onPageStarted(web, "https://evil.example/login", null);
+        assertTrue(activity.bridge().call("info", "{}").contains("error"));
         assertEquals(WebClient.START_URL, shadowOf(web).getLastLoadedUrl());
         client.onPageStarted(web, WebClient.START_URL, null);
         assertFalse(activity.bridge().call("info", "{}").contains("error"));
+    }
+
+    @Test
+    public void aPageThatKeepsLeavingDoesNotCauseAReloadLoop() {
+        MainActivity activity = launch();
+        WebView web = activity.webView();
+        WebViewClient client = shadowOf(web).getWebViewClient();
+        for (int i = 0; i < 10; i++) {
+            shadowOf(web).pushEntryToHistory("https://evil.example/" + i);
+            client.onPageStarted(web, "https://evil.example/" + i, null);
+        }
+        // só as primeiras tentativas recarregam o app; depois ele para de insistir
+        assertEquals("https://evil.example/9", web.getUrl());
+        Fixtures.idle();
     }
 
     // ------------------------------------------------------------ ciclo de vida
@@ -423,6 +438,76 @@ public class MainActivityTest extends AllSdks {
         activity.onRequestPermissionsResult(Permissions.REQUEST_LOCATION, new String[] {Fixtures.FINE, Fixtures.COARSE}, new int[] {0, 0});
         Fixtures.idle();
         assertEquals(0, bridge.pendingCalls());
+    }
+
+    // ------------------------------------------------------------ tema claro/escuro
+
+    /** O que o WebView consulta (Android 10+) para responder "prefers-color-scheme" à página. */
+    private static boolean themeIsLight(MainActivity activity) {
+        android.content.res.TypedArray a = activity.getTheme().obtainStyledAttributes(new int[] {android.R.attr.isLightTheme});
+        try {
+            return a.getBoolean(0, true);
+        } finally {
+            a.recycle();
+        }
+    }
+
+    private static int themeColor(MainActivity activity, int attr) {
+        android.util.TypedValue v = new android.util.TypedValue();
+        assertTrue(activity.getTheme().resolveAttribute(attr, v, true));
+        return v.data;
+    }
+
+    @Test
+    public void lightPhoneGetsALightWindowAndTellsThePageSo() {
+        MainActivity activity = launch();
+        assertEquals(0xFFF3F5F9, themeColor(activity, android.R.attr.statusBarColor));
+        assertEquals(0xFFF3F5F9, activity.getColor(R.color.page));
+        if (Build.VERSION.SDK_INT >= 29) assertTrue(themeIsLight(activity));
+        // Antes do Android 8.1 a barra de navegação não aceita ícones escuros: fica preta.
+        int nav = themeColor(activity, android.R.attr.navigationBarColor);
+        assertEquals(Build.VERSION.SDK_INT >= 27 ? 0xFFF3F5F9 : 0xFF000000, nav);
+    }
+
+    @Test
+    @org.robolectric.annotation.Config(qualifiers = "night")
+    public void darkPhoneGetsADarkWindowAndTellsThePageSo() {
+        MainActivity activity = launch();
+        assertEquals(0xFF0A0F1C, themeColor(activity, android.R.attr.statusBarColor));
+        assertEquals(0xFF0A0F1C, activity.getColor(R.color.page));
+        if (Build.VERSION.SDK_INT >= 29) assertFalse(themeIsLight(activity));
+    }
+
+    @Test
+    public void switchingTheSystemThemeDoesNotRecreateTheScreenButUpdatesTheAnswer() {
+        MainActivity activity = launch();
+        WebView web = activity.webView();
+        Bridge bridge = activity.bridge();
+        if (Build.VERSION.SDK_INT >= 29) assertTrue(themeIsLight(activity));
+
+        org.robolectric.RuntimeEnvironment.setQualifiers("+night");
+        controller.configurationChange();
+
+        assertSame("uiMode está em configChanges: a mesma tela continua", activity, controller.get());
+        assertSame(web, activity.webView());
+        assertFalse(bridge.isDestroyed());
+        assertFalse(shadowOf(web).wasDestroyCalled());
+        if (Build.VERSION.SDK_INT >= 29) {
+            assertFalse("o valor é uma referência: relido no modo novo, sem recriar o tema", themeIsLight(activity));
+        }
+        assertEquals(0xFF0A0F1C, activity.getColor(R.color.page));
+    }
+
+    @Test
+    public void rotatingDoesNotReloadThePage() {
+        MainActivity activity = launch();
+        WebView web = activity.webView();
+        org.robolectric.RuntimeEnvironment.setQualifiers("+land");
+        controller.configurationChange();
+        assertSame(web, activity.webView());
+        assertFalse(shadowOf(web).wasDestroyCalled());
+        assertEquals(0, shadowOf(web).getReloadInvocations());
+        assertFalse(activity.bridge().isDestroyed());
     }
 
     // ------------------------------------------------------------ manifesto

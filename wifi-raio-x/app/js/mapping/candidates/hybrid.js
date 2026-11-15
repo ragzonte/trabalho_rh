@@ -10,13 +10,23 @@ const SWEEP_MID_S = 1.3; // a posição da varredura vale no meio da varredura, 
 
 const DEFAULTS = {
   smoothW: 0.5, // peso dos vizinhos no tempo ao suavizar a impressão digital de quem está andando
-  floorFrac: 0.8, // fração do piso de ruído descontada de D²
+  isoK: 5, // vizinhos por impressão digital no grafo da geometria grossa
+  isoExclude: 3, // não liga por impressão digital quem está a até 3 varreduras no tempo (já há a barra)
+  isoLen0: 0.8, // comprimento da aresta do vizinho mais parecido (m) e acréscimo por posto
+  isoLenStep: 0.3,
+  isoRank: 1, // comprimento das arestas por impressão digital calibrado pela densidade do levantamento
+  calibLag: 1, // defasagem (em varreduras) dos pares que calibram a densidade
+  isoKappa: 1.4, // a ordem por impressão digital é ruidosa: o "mais parecido" raramente é o mais próximo
+  stressIters: 0, // iterações do acerto das distâncias curtas (SMACOF local) depois do MDS
+  stressRadius: 3, // até que distância do grafo (m) o acerto olha
+  isoFree: 2.5, // ponte entre pontos marcados seguidos quando o tempo não informa nada (modo de 30 s)
   // Passo de quem anda (corda entre varreduras seguidas, m/s): média, largura e teto.
   walkSpeed: 0.45,
   walkSigma: 0.2,
   walkRms: 0.47, // rms do deslocamento / tempo em 1, 2 e 3 varreduras (cai porque o caminho faz curvas)
   walkRms2: 0.39,
   walkRms3: 0.32,
+  scaleLags: 1, // quais defasagens entram na escala (bits: 1 = 1 varredura, 2 = 2, 4 = 3)
   hopRms: 0.35, // pulo entre pontos marcados: rms da corda / (intervalo - tempo perdido parado)
   hopLost: 3.5,
   leaveSpeed: 0.26, // primeira varredura depois de sair de um ponto marcado: só parte do tempo foi andando
@@ -26,9 +36,9 @@ const DEFAULTS = {
   vMax: 1.2,
   pauseProb: 0.08,
   iters: 0, // voltas de relocalização numa grade (forward-backward)
-  roundsB: 6,
+  roundsB: 0,
   sweepsB: 6,
-  roundsC: 6,
+  roundsC: 0,
   sweepsC: 8,
   accSigma: 1.0, // desvio típico da "aceleração" entre três varreduras seguidas de quem anda (m)
   damping: 0.3,
@@ -48,9 +58,10 @@ const DEFAULTS = {
   zCap: 3, // resíduo (em desvios) a partir do qual a leitura é tratada como aberrante
   densityPow: 1, // força do a priori "fique perto de onde há outras varreduras"
   densityEps: 0.05,
-  metric: 1, // 1 = corrige escala e anisotropia pelo passo a cada volta; 2 = só a escala; 0 = não corrige
-  metricCoarse: 1,
+  metric: 2, // 1 = corrige escala e anisotropia pelo passo a cada volta; 2 = só a escala; 0 = não corrige
+  metricCoarse: 0,
   anisoMax: 2.2,
+  anisoPow: 1,
 };
 
 /**
@@ -85,7 +96,7 @@ function solveSurvey(survey, options) {
   if (N === 0) return fallbackSolution(survey, 'sem varreduras');
 
   const model = buildModel(prep);
-  let X = coarseEmbedding(model, T);
+  let X = coarseEmbedding(model, T, info);
   if (T.metricCoarse) X = metricCorrection(model, X, T, info, 'coarse');
   stages.coarse = nodePointsToScans(prep, X);
   if (T.initTruth) X = nodes.map((nd) => [T.initTruth[nd.scans[0]].x, T.initTruth[nd.scans[0]].y]); // só diagnóstico
@@ -286,16 +297,15 @@ function displacementPairs(model, T) {
     for (let q = a; q < b; q++) if (trans[q].type !== 'walk' || !trans[q].sameFloor) return false;
     return true;
   };
-  for (const [L, rms] of [
-    [2, T.walkRms2],
-    [3, T.walkRms3],
-  ]) {
+  const lagRms = [0, T.walkRms, T.walkRms2, T.walkRms3];
+  for (let L = 1; L <= 3; L++) {
+    if (!(T.scaleLags & (1 << (L - 1)))) continue;
     for (let a = 0; a + L < M; a++) {
       if (!walkRun(a, a + L)) continue;
-      pairs.push({ a, b: a + L, len: rms * (nodes[a + L].t - nodes[a].t) });
+      pairs.push({ a, b: a + L, len: lagRms[L] * (nodes[a + L].t - nodes[a].t) });
     }
   }
-  if (pairs.length < 12) {
+  if (pairs.length < 12 && !(T.scaleLags & 1)) {
     for (let a = 0; a + 1 < M; a++) if (walkRun(a, a + 1)) pairs.push({ a, b: a + 1, len: T.walkRms * trans[a].dt });
   }
   // Pulos entre pontos marcados seguidos (com ou sem varreduras andando no meio).
@@ -352,9 +362,9 @@ function nodeFingerprints(model, T) {
   return out;
 }
 
-function coarseEmbedding(model, T) {
+// D² entre impressões digitais (média dos quadrados das diferenças por rádio, em dB²).
+function fingerprintDistances(model, T) {
   const { M, K, nodes, floors } = model;
-  if (M === 1) return [[0, 0]];
   const fp = nodeFingerprints(model, T);
   // Desconto por andar: a laje muda o nível de cada rádio; tira-se a média de cada (rádio, andar).
   if (floors.length > 1) {
@@ -394,20 +404,187 @@ function coarseEmbedding(model, T) {
       D2[a * M + b] = D2[b * M + a] = c ? s / c : 0;
     }
   }
-  // Piso de ruído: o menor nível típico de D² entre vizinhos no tempo.
-  const lag1 = [];
-  for (let a = 0; a + 1 < M; a++) lag1.push(D2[a * M + a + 1]);
-  lag1.sort((p, q) => p - q);
-  const floorD2 = lag1.length ? lag1[Math.floor(lag1.length * 0.2)] * T.floorFrac : 0;
+  return D2;
+}
+
+// Geometria grossa. Grafo com dois tipos de aresta:
+//   - "barras" entre nós seguidos no tempo, do tamanho do passo esperado (metros de verdade);
+//   - cada nó ligado aos k nós de impressão digital mais parecida (fora da vizinhança no tempo),
+//     com comprimento só pelo posto (o mais parecido está a ~0,8 m, o seguinte um pouco mais...).
+// A distância entre dois nós quaisquer é o caminho mais curto no grafo (Isomap) e o mapa sai do MDS
+// clássico dessas distâncias. A distância direta entre impressões digitais não serve para pares
+// distantes (satura e exagera as paredes); o caminho pelo grafo soma passos curtos, que são confiáveis.
+function coarseEmbedding(model, T, info) {
+  const { M, trans } = model;
+  if (M === 1) return [[0, 0]];
+  if (M === 2) return [[0, 0], [1, 0]];
+  const D2 = fingerprintDistances(model, T);
+  const timed = trans.some((tr) => tr.type !== 'free'); // há passos com tempo útil (modos de 3,5 s)
+  // Vizinhos por impressão digital de cada nó, do mais parecido para o menos.
+  const excl = timed ? T.isoExclude : 0;
+  const kMax = Math.min(T.isoK, Math.max(1, M - 2 * excl - 1));
+  const neigh = new Int32Array(M * kMax).fill(-1);
+  const cand = [];
+  for (let a = 0; a < M; a++) {
+    cand.length = 0;
+    for (let b = 0; b < M; b++) if (Math.abs(a - b) > excl) cand.push(b);
+    cand.sort((p, q) => D2[a * M + p] - D2[a * M + q]);
+    for (let r = 0; r < kMax && r < cand.length; r++) neigh[a * kMax + r] = cand[r];
+  }
+  // Quanto mede a aresta do vizinho de posto r? Depende de quão denso foi o levantamento. Calibra com
+  // pares de distância conhecida pelo tempo (3 varreduras andando, ou um pulo entre pontos marcados):
+  // se um nó a ~d metros costuma ter R nós mais parecidos do que ele, então (em 2D a contagem cresce
+  // com o quadrado da distância) o vizinho de posto r está a ~d·sqrt((r+1)/(R+1)).
+  let unit = NaN; // distância do vizinho de posto 0 ("espaçamento" efetivo), em metros
+  if (timed) {
+    const est = [];
+    // Para pares vizinhos no tempo a suavização mistura as duas impressões digitais: usa as cruas.
+    const Dc = T.calibLag < 3 ? fingerprintDistances(model, { ...T, smoothW: 0 }) : D2;
+    const sameFloor = (a, c) => model.floorIdx[a] === model.floorIdx[c];
+    for (const pr of calibrationPairs(model, T)) {
+      const ref = Dc[pr.a * M + pr.b];
+      let rank = 0;
+      for (let c = 0; c < M; c++) if (Math.abs(c - pr.a) > excl && c !== pr.b && sameFloor(c, pr.a) && Dc[pr.a * M + c] < ref) rank++;
+      est.push(pr.len / Math.sqrt(rank + 1));
+      let rank2 = 0;
+      for (let c = 0; c < M; c++) if (Math.abs(c - pr.b) > excl && c !== pr.a && sameFloor(c, pr.b) && Dc[pr.b * M + c] < ref) rank2++;
+      est.push(pr.len / Math.sqrt(rank2 + 1));
+    }
+    if (est.length >= 6) {
+      est.sort((p, q) => p - q);
+      unit = est[est.length >> 1];
+    }
+  }
+  if (info) info.unit = Number.isNaN(unit) ? null : Number(unit.toFixed(2));
+  const lenOf = new Float64Array(kMax);
+  for (let r = 0; r < kMax; r++) {
+    lenOf[r] = Number.isNaN(unit) || !T.isoRank ? T.isoLen0 + T.isoLenStep * r : T.isoKappa * unit * Math.sqrt(r + 1);
+  }
+  return isomapEmbed(model, neigh, kMax, lenOf, T);
+}
+
+// Pares de nós com distância esperada conhecida pelo tempo, longe o bastante para não dividirem
+// varreduras na suavização: 3 varreduras seguidas andando e pulos entre pontos marcados.
+function calibrationPairs(model, T) {
+  const { M, nodes, trans } = model;
+  const pairs = [];
+  const L = T.calibLag;
+  const rms = [0, T.walkRms, T.walkRms2, T.walkRms3][L];
+  for (let a = 0; a + L < M; a++) {
+    let ok = true;
+    for (let q = a; q < a + L; q++) if (trans[q].type !== 'walk' || !trans[q].sameFloor) ok = false;
+    if (ok) pairs.push({ a, b: a + L, len: rms * (nodes[a + L].t - nodes[a].t) });
+  }
+  let last = -1;
+  for (let a = 0; a < M; a++) {
+    if (nodes[a].spot == null) continue;
+    if (last >= 0 && nodes[last].spot !== nodes[a].spot && nodes[last].floor === nodes[a].floor) {
+      const gap = nodes[a].t0 - nodes[last].t1;
+      let ok = gap < 60;
+      for (let q = last; q < a; q++) if (trans[q].type === 'free') ok = false;
+      if (ok) pairs.push({ a: last, b: a, len: T.hopRms * Math.max(1.5, gap - T.hopLost) });
+    }
+    last = a;
+  }
+  return pairs;
+}
+
+// Geometria grossa. Grafo com dois tipos de aresta:
+//   - "barras" entre nós seguidos no tempo, do tamanho do passo esperado (metros de verdade);
+//   - cada nó ligado aos k nós de impressão digital mais parecida (fora da vizinhança no tempo),
+//     com comprimento só pelo posto (o mais parecido está mais perto, o seguinte um pouco mais...).
+// A distância entre dois nós quaisquer é o caminho mais curto no grafo (Isomap) e o mapa sai do MDS
+// clássico dessas distâncias. A distância direta entre impressões digitais não serve para pares
+// distantes (satura e exagera as paredes); o caminho pelo grafo soma passos curtos, que são confiáveis.
+function isomapEmbed(model, neigh, kMax, lenOf, T) {
+  const { M, nodes, trans } = model;
+  const G = new Float64Array(M * M).fill(Infinity);
+  const link = (a, b, len) => {
+    if (len < G[a * M + b]) G[a * M + b] = G[b * M + a] = len;
+  };
+  for (let a = 0; a < M; a++) G[a * M + a] = 0;
+  for (let a = 0; a + 1 < M; a++) {
+    const tr = trans[a];
+    let len;
+    if (tr.type === 'walk') len = T.walkSpeed * tr.dt;
+    else if (tr.type === 'leave') len = T.leaveSpeed * tr.dt;
+    else if (tr.type === 'arrive') len = 0.1 * tr.dt;
+    else len = T.isoFree * lenOf[0]; // sem informação de tempo: só uma ponte frouxa entre pontos seguidos
+    link(a, a + 1, Math.max(0.05, len));
+  }
+  // Nós do mesmo ponto marcado (revisita): mesmo lugar.
+  const bySpot = new Map();
+  for (let a = 0; a < M; a++) {
+    if (nodes[a].spot == null) continue;
+    const key = `${nodes[a].spot}|${nodes[a].floor}`;
+    if (bySpot.has(key)) link(bySpot.get(key), a, 0.05);
+    else bySpot.set(key, a);
+  }
+  for (let a = 0; a < M; a++) {
+    for (let r = 0; r < kMax; r++) {
+      const b = neigh[a * kMax + r];
+      if (b >= 0) link(a, b, lenOf[r]);
+    }
+  }
+  // Caminhos mais curtos (Floyd-Warshall).
+  for (let k = 0; k < M; k++) {
+    const rowK = k * M;
+    for (let i = 0; i < M; i++) {
+      const gik = G[i * M + k];
+      if (gik === Infinity) continue;
+      const rowI = i * M;
+      for (let j = 0; j < M; j++) {
+        const v = gik + G[rowK + j];
+        if (v < G[rowI + j]) G[rowI + j] = v;
+      }
+    }
+  }
+  let far = 0;
+  for (let i = 0; i < M * M; i++) if (G[i] !== Infinity && G[i] > far) far = G[i];
   const E2 = new Float64Array(M * M);
-  for (let i = 0; i < M * M; i++) E2[i] = Math.max(0, D2[i] - floorD2);
-  for (let a = 0; a < M; a++) E2[a * M + a] = 0;
+  for (let i = 0; i < M * M; i++) {
+    const g = G[i] === Infinity ? far : G[i];
+    E2[i] = g * g;
+  }
   const { vectors, values } = topEigen(doubleCentre(E2, M), M, 2);
-  const X = [];
-  // 0,45 m por dB: só um chute de escala; a correção da métrica acerta depois.
-  const s0 = 0.45 * Math.sqrt(Math.max(values[0], 0));
-  const s1 = 0.45 * Math.sqrt(Math.max(values[1], 0));
+  const s0 = Math.sqrt(Math.max(values[0], 0));
+  const s1 = Math.sqrt(Math.max(values[1], 0));
+  let X = [];
   for (let a = 0; a < M; a++) X.push([vectors[0][a] * s0, vectors[1][a] * s1]);
+  if (T.stressIters > 0) X = localStress(M, G, far, X, T);
+  return X;
+}
+
+// Acerta as distâncias CURTAS do mapa (as do grafo até stressRadius) sem mexer na disposição geral:
+// o MDS clássico é fiel às distâncias grandes (que o caminho pelo grafo exagera) e distorce as pequenas.
+function localStress(M, G, far, X0, T) {
+  let X = X0;
+  const R = T.stressRadius;
+  for (let it = 0; it < T.stressIters; it++) {
+    const Y = new Array(M);
+    for (let i = 0; i < M; i++) {
+      let sw = 0;
+      let bx = 0;
+      let by = 0;
+      const xi = X[i][0];
+      const yi = X[i][1];
+      for (let j = 0; j < M; j++) {
+        if (i === j) continue;
+        const g = G[i * M + j];
+        if (!(g <= R)) continue;
+        const w = 1 / (g * g + 0.09);
+        const dx = xi - X[j][0];
+        const dy = yi - X[j][1];
+        const d = Math.hypot(dx, dy) || 1e-9;
+        const r = g / d;
+        bx += w * (X[j][0] + r * dx);
+        by += w * (X[j][1] + r * dy);
+        sw += w;
+      }
+      Y[i] = sw > 0 ? [bx / sw, by / sw] : [xi, yi];
+    }
+    X = Y;
+  }
   return X;
 }
 
@@ -555,8 +732,14 @@ function metricCorrection(model, X, T, info, label) {
     l1 = g * T.anisoMax;
     l2 = g / T.anisoMax;
   }
-  const s1 = Math.sqrt(l1);
-  const s2 = Math.sqrt(l2);
+  let s1 = Math.sqrt(l1);
+  let s2 = Math.sqrt(l2);
+  if (T.metric === 3) {
+    // Só o achatamento (a escala fica como está), e só em parte: quem anda também tem direções preferidas.
+    const g = Math.sqrt(s1 * s2);
+    s1 = Math.pow(s1 / g, T.anisoPow);
+    s2 = Math.pow(s2 / g, T.anisoPow);
+  }
   const c = Math.cos(ang);
   const s = Math.sin(ang);
   // B = R diag(s1, s2) Rᵀ

@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+      O tema acompanha o modo claro/escuro do celular por meio de recursos (@color/page e
+      @bool/light_theme têm versões em values-night), e não por dois estilos diferentes: a tela não é
+      recriada quando o modo muda (configChanges="uiMode"), e um valor que é referência é relido na hora.
+    -->
     <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/page</item>
         <item name="android:statusBarColor">@color/page</item>
-        <item name="android:navigationBarColor">@color/page</item>
+        <item name="android:windowLightStatusBar">@bool/light_theme</item>
+        <!-- Antes do Android 8.1 os botões da barra de navegação são sempre brancos: ela fica preta. -->
+        <item name="android:navigationBarColor">@android:color/black</item>
     </style>
 </resources>

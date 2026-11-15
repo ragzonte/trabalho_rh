@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Android 10+: isLightTheme é o que o WebView consulta para responder "prefers-color-scheme" à
+      página. Com ele preso ao modo do celular, o ajuste de tema "sistema" da interface funciona.
+    -->
+    <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/page</item>
+        <item name="android:statusBarColor">@color/page</item>
+        <item name="android:windowLightStatusBar">@bool/light_theme</item>
+        <item name="android:navigationBarColor">@color/page</item>
+        <item name="android:windowLightNavigationBar">@bool/light_theme</item>
+        <item name="android:isLightTheme">@bool/light_theme</item>
+    </style>
+</resources>

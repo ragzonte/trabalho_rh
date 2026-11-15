@@ -415,7 +415,7 @@ function prepare(survey, scanIdx) {
  * Cada rádio é centrado POR ANDAR antes de comparar: a laje derruba o nível de tudo e, sem
  * isso, os dois andares se espalham lado a lado em vez de ficarem um sobre o outro.
  */
-function initNodes(prep) {
+function initNodes(prep, cfg) {
   const { P, R, NF, obs, radioCount, nodeFloor } = prep;
   const FILL = DETECT_DBM - 4;
   const used = [];
@@ -443,7 +443,37 @@ function initNodes(prep) {
     }
     for (let i = 0; i < P; i++) Z[i * K + k] -= sum[nodeFloor[i]] / Math.max(1, cnt[nodeFloor[i]]);
   }
+  if (cfg.initStd > 0) {
+    // Cada rádio com a mesma variância: os vizinhos fracos (pouca variação) ganham voz.
+    for (let k = 0; k < K; k++) {
+      let v = 0;
+      for (let i = 0; i < P; i++) v += Z[i * K + k] * Z[i * K + k];
+      const sd = Math.sqrt(v / P) || 1;
+      const f = Math.pow(sd, -cfg.initStd);
+      for (let i = 0; i < P; i++) Z[i * K + k] *= f;
+    }
+  }
+  if (cfg.initSmooth > 0) {
+    // Média com os vizinhos no tempo: tira ruído das impressões digitais antes de comparar.
+    const order = prep.visits.map((v) => v.node);
+    const acc = new Float64Array(P * K);
+    const wsum = new Float64Array(P);
+    for (let v = 0; v < order.length; v++) {
+      for (let d = -cfg.initSmooth; d <= cfg.initSmooth; d++) {
+        const u = v + d;
+        if (u < 0 || u >= order.length) continue;
+        if (d !== 0 && (prep.links[Math.min(u, v)] === undefined || prep.links[Math.min(u, v)].dt > 8)) continue;
+        const w = Math.exp(-0.5 * d * d);
+        const a = order[v];
+        const b = order[u];
+        for (let k = 0; k < K; k++) acc[a * K + k] += w * Z[b * K + k];
+        wsum[a] += w;
+      }
+    }
+    for (let i = 0; i < P; i++) if (wsum[i] > 0) for (let k = 0; k < K; k++) Z[i * K + k] = acc[i * K + k] / wsum[i];
+  }
   const D2 = new Float64Array(P * P);
+  const half = 0.5 * cfg.initPower;
   for (let i = 0; i < P; i++) {
     for (let j = i + 1; j < P; j++) {
       let s = 0;
@@ -454,7 +484,7 @@ function initNodes(prep) {
         s += d * d;
         c++;
       }
-      const v = c ? s / c : 0;
+      const v = c ? Math.pow(s / c, half * 2) : 0;
       D2[i * P + j] = D2[j * P + i] = v;
     }
   }
@@ -1853,6 +1883,33 @@ function diagnostics(survey, prep, model, cfg, theta) {
   out.accelRms = Math.sqrt(accel / Math.max(1, accN));
   const steps = [];
   for (const e of prep.edges) if (e.kind === 0 && e.dt < 8) steps.push(Math.hypot(theta[2 * e.a] - theta[2 * e.b], theta[2 * e.a + 1] - theta[2 * e.b + 1]));
+  {
+    const base = costAndGrad(model, cfg, theta, null);
+    const without = (patch) => base - costAndGrad(model, { ...cfg, ...patch }, theta, null);
+    out.cost = base;
+    out.cCensor = without({ censor: 0 });
+    out.cStep = without({ stepWeight: 0, speedWeight: 0 });
+    // por rádio: soma do custo das leituras
+    const per = [];
+    for (let a = 0; a < RA; a++) {
+      let c = 0;
+      let n = 0;
+      for (let m = 0; m < M; m++) {
+        if (oRad[m] !== a) continue;
+        const i = oNode[m];
+        const d3 = oA + 3 * radDev[a];
+        const dx = theta[d3] - theta[2 * i];
+        const dy = theta[d3 + 1] - theta[2 * i + 1];
+        const dz = zFloor[oFloor[m]] - theta[d3 + 2];
+        const q = dx * dx + dy * dy + dz * dz + eps2;
+        const e = Math.abs(oY[m] - (theta[p0Index[a * NF + oFloor[m]]] - (5 * theta[oR + 2 * a] * Math.log(q)) / LN10 - theta[oR + 2 * a + 1] * Math.sqrt(q))) / model.sigA[a];
+        c += model.oW[m] * (e <= cfg.huber ? 0.5 * e * e : cfg.huber * (e - 0.5 * cfg.huber));
+        n++;
+      }
+      per.push({ id: prep.radios[model.list[a]].ids[0], n, c });
+    }
+    out.perRadio = per;
+  }
   out.stepCv = steps.length ? Math.sqrt(steps.reduce((t, v) => t + v * v, 0) / steps.length - (steps.reduce((t, v) => t + v, 0) / steps.length) ** 2) / (steps.reduce((t, v) => t + v, 0) / steps.length) : NaN;
   return out;
 }
@@ -1890,7 +1947,7 @@ const DEFAULT_CFG = {
   stepWeight: 6,
   stepMaxDt: 8, // s: acima disto o intervalo não diz nada sobre o passo
   vTop: 1.3, // teto = vTop·pace (trecho reto no passo mais rápido)
-  partFactor: 0.75, // par com uma ponta parada: parte do intervalo foi parado
+  partFactor: 0.55, // par com uma ponta parada: parte do intervalo foi parado
   dwellS: 3, // dois pontos marcados seguidos: varredura + sair + chegar
   speedWeight: 1,
   accelWeight: 0,
@@ -1907,12 +1964,15 @@ const DEFAULT_CFG = {
   farSigma: 60,
   roomWeight: 0, // pontos do mesmo cômodo (nome dado pelo usuário) ficam juntos
   roomK: 0.6, // raio livre do cômodo = roomK · espaçamento · raiz(nº de pontos)
+  initStd: 0,
+  initSmooth: 0,
+  initPower: 1,
   maxIter: 300,
   rounds: 3,
   ensemble: 1,
   ensembleNoise: 1.0, // m de ruído na partida de cada membro
   // HMM
-  emissionWeight: 1,
+  emissionWeight: 0.5,
   sigmaMin: 3.5,
   sigmaMax: 9,
   hmmQ: 1.25, // m: desvio por eixo do passo em 3,5 s (corda rms ~0,5 m/s)
@@ -1943,6 +2003,7 @@ const DEFAULT_CFG = {
   evHopSd: 0.5,
   sizeWeight: 400,
   minStepEdges: 10, // abaixo disto a caminhada não ancora a escala
+  finalScale: 1,
   turnCorrection: 1, // 0 desliga a correção de tortuosidade
   turnKappa: 0.5,
   turnTop: 1.5,
@@ -2026,7 +2087,7 @@ function solveInner(survey, options) {
   }
 
   const theta = new Float64Array(model.size);
-  const X0 = initNodes(prep);
+  const X0 = initNodes(prep, cfg);
   rescaleInit(prep, X0, cfg.pace);
   theta.set(X0, 0);
   const warm = options.warmStart;
@@ -2253,7 +2314,7 @@ function solveInner(survey, options) {
   {
     const now_ = cloudRadius(theta, P);
     if (now_.r > 1e-6 && sizeAfterSlam > 1e-6) {
-      const k = sizeAfterSlam / now_.r;
+      const k = (cfg.finalScale * sizeAfterSlam) / now_.r;
       const tmp = new Float64Array(model.size);
       applyScale(model, theta, k, tmp);
       theta.set(tmp);

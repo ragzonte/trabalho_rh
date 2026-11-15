@@ -30,6 +30,8 @@ final class RttRanger {
 
     /** O Android costuma responder em 1 a 2 s; depois disto desistimos para não deixar a página esperando. */
     static final long TIMEOUT_MS = 8000;
+    /** Tempo para o usuário responder ao diálogo de permissão (Android 13+) antes de a medição começar. */
+    static final long DIALOG_TIMEOUT_MS = 120_000;
     private static final int MAX_REQUESTED = 64;
 
     private final Context context;
@@ -61,10 +63,13 @@ final class RttRanger {
             return;
         }
         sessions.add(session);
-        main.postDelayed(session.timeout, TIMEOUT_MS);
+        main.postDelayed(session.timeout, DIALOG_TIMEOUT_MS);
         // Android 13+: "Dispositivos por perto" é pedida uma única vez; seguimos com qualquer resposta.
         permissions.requestNearbyOnce(() -> {
             if (session.done) return;
+            // Só agora corre o prazo curto: o tempo que a pessoa levou lendo o diálogo não conta.
+            main.removeCallbacks(session.timeout);
+            main.postDelayed(session.timeout, TIMEOUT_MS);
             try {
                 if (Build.VERSION.SDK_INT < 28 || !Api28.range(context, targets, session::finish)) session.finish(null);
             } catch (RuntimeException e) {

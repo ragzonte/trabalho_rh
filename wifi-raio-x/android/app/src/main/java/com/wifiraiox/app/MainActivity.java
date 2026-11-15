@@ -28,8 +28,10 @@ import androidx.webkit.WebViewAssetLoader;
 public class MainActivity extends Activity implements JsSink, WebClient.Host {
 
     private static final String TAG = "WifiRaioX";
-    /** Evita um vaivém infinito caso a página inicial tente, ela mesma, navegar para fora. */
-    private static final long RESTORE_GAP_MS = 3000;
+    /** Evita um vaivém infinito caso a página inicial insista, ela mesma, em navegar para fora. */
+    private static final long RESTORE_WINDOW_MS = 10_000;
+    private static final int MAX_RESTORES = 3;
+    private static final long RESTORE_CHECK_MS = 400;
     private static final long RENDERER_LOOP_MS = 10_000;
     /** Estático: precisa sobreviver à recriação da tela. */
     static long lastRendererGoneAt = -1;
@@ -38,7 +40,8 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     private WebView web;
     private Bridge bridge;
     private boolean backPending;
-    private long lastRestoreAt = -RESTORE_GAP_MS;
+    private long restoreWindowStart = -RESTORE_WINDOW_MS;
+    private int restores;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -204,15 +207,21 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     @Override
     public void onPageUrl(String url) {
         if (bridge != null) bridge.setPageUrl(url);
-        // Um site externo conseguiu ocupar a página principal (o conteúdo dele já foi barrado): volta para o app.
-        if (web != null && url != null && (url.startsWith("http:") || url.startsWith("https:")) && !WebClient.isAppUrl(url)) {
-            long now = SystemClock.elapsedRealtime();
-            if (now - lastRestoreAt < RESTORE_GAP_MS) return;
-            lastRestoreAt = now;
-            web.stopLoading();
-            if (web.canGoBack()) web.goBack();
-            else web.loadUrl(WebClient.START_URL);
+        // Um site externo ocupou a página principal (o conteúdo dele foi barrado, sobrou uma página vazia): volta para o app.
+        if (url != null && (url.startsWith("http:") || url.startsWith("https:")) && !WebClient.isAppUrl(url)) restoreAppPage();
+    }
+
+    /** Recarrega a interface do app, a menos que isso já tenha acontecido várias vezes em poucos segundos. */
+    private void restoreAppPage() {
+        if (web == null) return;
+        long now = SystemClock.elapsedRealtime();
+        if (now - restoreWindowStart > RESTORE_WINDOW_MS) {
+            restoreWindowStart = now;
+            restores = 0;
         }
+        if (++restores > MAX_RESTORES) return;
+        web.stopLoading();
+        web.loadUrl(WebClient.START_URL);
     }
 
     @Override
@@ -224,8 +233,12 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     public void onForeignMainFrame(final Uri uri) {
         main.post(() -> {
             if (web == null) return;
-            if (bridge != null) bridge.setPageUrl(uri.toString());
             openExternal(uri);
+            web.stopLoading(); // se ainda der tempo, a página do app nem chega a sair
+            // Se não deu, o WebView ficou numa página de erro com o endereço de fora: confere e recarrega.
+            main.postDelayed(() -> {
+                if (web != null && !WebClient.isAppUrl(web.getUrl())) restoreAppPage();
+            }, RESTORE_CHECK_MS);
         });
     }
 

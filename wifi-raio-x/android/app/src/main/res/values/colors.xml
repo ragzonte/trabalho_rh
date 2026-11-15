@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="page">#0B1220</color>
+    <!-- Fundo da janela enquanto a página não pinta: a cor de fundo do tema claro de app/css/app.css
+         (a do tema escuro está em values-night). -->
+    <color name="page">#F3F5F9</color>
     <color name="iconBackground">#0B1220</color>
 </resources>

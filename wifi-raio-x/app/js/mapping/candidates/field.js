@@ -3,6 +3,7 @@
 
 import { FLOOR_HEIGHT } from '../types.js';
 
+const SWEEP_MID_S = 1.35; // a posição de uma varredura é a do meio dela: ~1,35 s antes da entrega da lista
 const FRESH_MS = 3400; // leitura mais velha que isto é repetição do Android (descreve um lugar anterior)
 
 const DEFAULTS = {
@@ -11,7 +12,7 @@ const DEFAULTS = {
   smacofIters: 120,
   weightPower: 2,
   crossFloorWeight: 0.3,
-  walkSpeed: 0.48, // m/s: corda mediana entre varreduras seguidas de quem anda fazendo o levantamento
+  walkSpeed: 0.43, // m/s: corda mediana entre varreduras seguidas de quem anda fazendo o levantamento
   dbToM: 0.45,
   defaultRadius: 3.5,
   initMode: 1, // 0: MDS direto; 1: desdobrado (Isomap)
@@ -21,9 +22,14 @@ const DEFAULTS = {
   isoLen: 0,
   isoFloorQ: 0.1,
   isoWeightPower: 2,
+  shiftGain: 0.5,
+  orderW: 0.3,
+  probeStep: 0.5,
+  debias: 0,
+  sigmaMax: 4,
   refine: 1,
   h: 1.0, // largura do núcleo dos campos (m)
-  hRel: 0,
+  hRel: 1.6,
   hMin: 0.6,
   hMax: 4,
   hStart: 0, // fator inicial (>1: começa com campos mais lisos)
@@ -36,7 +42,6 @@ const DEFAULTS = {
   motionPad: 0,
   targetRadius: 0,
   springW: 1,
-  orderW: 0,
   orderHop: 1.0,
   labelW: 0,
   labelRadius: 1.2,
@@ -44,6 +49,7 @@ const DEFAULTS = {
   springShort: 0.5,
   outer: 4,
   inner: 40,
+  innerSparse: 40,
   missW: 0.5,
   wCap: 2,
   meanMode: 1,
@@ -54,10 +60,10 @@ const DEFAULTS = {
   apDz: 0.6,
   farPenalty: 0.02,
   registerRounds: 2,
-  physW: 0.3,
+  physW: 0.15,
   physN: 2.2,
   physQ: 0.85,
-  physP0: -41, // dBm a 1 m em 2,4 GHz (típico, já com um pouco de obstrução)
+  physP0: -43, // dBm a 1 m em 2,4 GHz (típico, já com um pouco de obstrução)
   physMinPeak: -52,
   physDamp: 0.7,
 };
@@ -90,7 +96,7 @@ function solveInner(survey, options) {
   X = rescale(data, X, diss, P);
   const dbg = {};
   if (P.refine) X = refineFields(data, X, P, dbg, diss);
-  const out = finish(survey, data, X);
+  const out = finish(survey, data, X, P);
   out.debug = dbg;
   if (P.keepData) {
     dbg.data = data;
@@ -156,11 +162,18 @@ function prepare(survey) {
   const cnt = new Float64Array(M * R);
   const sum = new Float64Array(M * R);
   const all = [];
+  const meanAge = new Float64Array(scans.length).fill(SWEEP_MID_S);
   scans.forEach((s, i) => {
     const a = nodeOfScan[i];
     const acc = new Map();
+    let ageSum = 0;
+    let ageN = 0;
     for (const r of s.readings || []) {
       if (!Number.isFinite(r.rssi) || (r.ageMs ?? 0) > FRESH_MS) continue;
+      if (Number.isFinite(r.ageMs)) {
+        ageSum += r.ageMs / 1000;
+        ageN++;
+      }
       const k = idRadio.get(r.id);
       const e = acc.get(k) || [0, 0];
       e[0] += r.rssi;
@@ -172,6 +185,7 @@ function prepare(survey) {
       sum[a * R + k] += e[0] / e[1];
       cnt[a * R + k]++;
     }
+    if (ageN > 0) meanAge[i] = ageSum / ageN;
   });
   for (let q = 0; q < M * R; q++) if (cnt[q] > 0) F[q] = sum[q] / cnt[q];
   all.sort((p, q) => p - q);
@@ -212,7 +226,7 @@ function prepare(survey) {
       floorMean[k * NF + f] = c ? s / c : floorLevel;
     }
   }
-  return { scans, nodes, nodeOfScan, radios, idRadio, R, M, F, cnt, floorLevel, floorList, floorIdx, floorNodes, floorMean, groups, groupOf };
+  return { scans, nodes, nodeOfScan, radios, idRadio, R, M, F, cnt, floorLevel, floorList, floorIdx, floorNodes, floorMean, groups, groupOf, meanAge };
 }
 
 // ---------------------------------------------------------------------------
@@ -1229,6 +1243,8 @@ function refineFields(data, X0, P, dbg, diss) {
     }
     return c;
   };
+  // Sem nenhum trecho cronometrado (um ponto marcado a cada 30 s): poucos pontos, cada um com uma leitura só.
+  const sparse = !edges.some((e) => e.informative);
   let hopScale = 1;
   let roomScale = 1;
   const gcx = new Float64Array(data.groups.length);
@@ -1266,7 +1282,7 @@ function refineFields(data, X0, P, dbg, diss) {
       }
       dbg.gradCheck = out;
     }
-    const r = lbfgs(cost, X, P.inner);
+    const r = lbfgs(cost, X, sparse ? P.innerSparse : P.inner);
     X = r.x;
     // Escala: passo de quem anda (quando há) combinado com a física; sem nenhum dos dois, mantém o tamanho.
     let kStep = P.targetRadius > 0 ? null : stepScale(data, X, P);
@@ -1283,6 +1299,89 @@ function refineFields(data, X0, P, dbg, diss) {
     hist.push(r.f);
   }
   if (P.meanMode) model = fitApModels(data, X, P, model);
+  if (sparse && model && P.physW > 0 && !(P.targetRadius > 0)) {
+    // Sem relógio, a física é a única régua: aplica o que faltou do último ajuste (os passos acima são amortecidos).
+    const kPhys = physScale(data, X, model, P);
+    if (kPhys != null) {
+      const kk = Math.max(0.5, Math.min(2, kPhys));
+      for (let q = 0; q < X.length; q++) X[q] *= kk;
+      model = fitApModels(data, X, P, model);
+    }
+  }
+  // Incerteza de cada nó: curvatura do custo dos dados em torno da posição final (os outros nós parados).
+  // Campo plano em volta = posição mal determinada.
+  {
+    const G = new Float64Array(2 * M);
+    cost(X, G); // deixa val[] (resíduos dos vizinhos) coerente com a posição final
+    const tmpNum = new Float64Array(R);
+    const tmpDen = new Float64Array(R);
+    const localCost = (a, xa, ya) => {
+      tmpNum.fill(0);
+      tmpDen.fill(0);
+      const f = fi[a];
+      for (let b = 0; b < M; b++) {
+        if (b === a || fi[b] !== f) continue;
+        const dx = xa - X[2 * b];
+        const dy = ya - X[2 * b + 1];
+        const w = Math.exp(-(dx * dx + dy * dy) * inv2h2);
+        if (w < 1e-4) continue;
+        const rb = b * R;
+        for (let k = 0; k < R; k++) {
+          const wb = w * wgt[rb + k];
+          tmpNum[k] += wb * val[rb + k];
+          tmpDen[k] += wb;
+        }
+      }
+      let c = 0;
+      for (let k = 0; k < R; k++) {
+        const q = a * R + k;
+        let m = data.floorMean[k * NF + f];
+        if (model) {
+          const dx = xa - model.ax[k];
+          const dy = ya - model.ay[k];
+          m = model.p0[k * NF + f] - 5 * model.n[k] * Math.log10(dx * dx + dy * dy + model.h2[k * NF + f]);
+        }
+        let e = obs[q] - m - tmpNum[k] / (tmpDen[k] + P.lambda);
+        if (miss[q] && e > 0) e = 0;
+        const ae = Math.abs(e);
+        c += ae <= cut ? (wgt[q] * e * e) / (2 * s2) : (wgt[q] * (cut * ae - 0.5 * cut * cut)) / s2;
+      }
+      return c;
+    };
+    const sigma = new Float64Array(M);
+    const step = P.probeStep;
+    for (let a = 0; a < M; a++) {
+      const xa = X[2 * a];
+      const ya = X[2 * a + 1];
+      const c0 = localCost(a, xa, ya);
+      const hxx = (localCost(a, xa + step, ya) + localCost(a, xa - step, ya) - 2 * c0) / (step * step);
+      const hyy = (localCost(a, xa, ya + step) + localCost(a, xa, ya - step) - 2 * c0) / (step * step);
+      // Variância por eixo ~ 1/curvatura (com piso: curvatura negativa ou nula = "não sei").
+      const vx = 1 / Math.max(hxx, 1 / (P.sigmaMax * P.sigmaMax));
+      const vy = 1 / Math.max(hyy, 1 / (P.sigmaMax * P.sigmaMax));
+      sigma[a] = Math.sqrt(vx + vy);
+    }
+    data.sigma = sigma;
+    // O ruído de posição estica as cordas entre varreduras seguidas (e a escala pelo passo encolhe o mapa):
+    // desconta a parte do comprimento que é só incerteza.
+    if (P.debias > 0 && !(P.targetRadius > 0)) {
+      let raw = 0;
+      let clean = 0;
+      for (const e of edges) {
+        if (!e.informative) continue;
+        const d2 = (X[2 * e.a] - X[2 * e.b]) ** 2 + (X[2 * e.a + 1] - X[2 * e.b + 1]) ** 2;
+        raw += Math.sqrt(d2);
+        clean += Math.sqrt(Math.max(0.25 * d2, d2 - P.debias * (sigma[e.a] * sigma[e.a] + sigma[e.b] * sigma[e.b])));
+      }
+      if (clean > 0 && raw > 0) {
+        const kk = Math.pow(raw / clean, 1 - P.physW);
+        for (let q = 0; q < X.length; q++) X[q] *= kk;
+        for (let a = 0; a < M; a++) sigma[a] *= kk;
+        if (model) model = fitApModels(data, X, P, model);
+        dbg.debiasK = kk;
+      }
+    }
+  }
   dbg.costHist = hist;
   dbg.note = `cost ${hist[hist.length - 1].toFixed(0)}`;
   data.model = model;
@@ -1392,8 +1491,9 @@ function lbfgs(fn, x0, maxIter, mem = 8) {
 // Saída
 // ---------------------------------------------------------------------------
 
-function finish(survey, data, X) {
-  const { scans, nodeOfScan, M } = data;
+function finish(survey, data, X, P) {
+  const { scans, nodeOfScan, M, R, nodes } = data;
+  const NF = data.floorList.length;
   let cx = 0;
   let cy = 0;
   for (let a = 0; a < M; a++) {
@@ -1402,34 +1502,73 @@ function finish(survey, data, X) {
   }
   cx /= M;
   cy /= M;
-  const points = scans.map((s, i) => {
+  const px = new Float64Array(scans.length);
+  const py = new Float64Array(scans.length);
+  for (let i = 0; i < scans.length; i++) {
     const a = nodeOfScan[i];
-    const x = X[2 * a] - cx;
-    const y = X[2 * a + 1] - cy;
-    return { x: Number.isFinite(x) ? x : 0, y: Number.isFinite(y) ? y : 0, z: (Number(s.floor) || 0) * FLOOR_HEIGHT, conf: 0.3 };
-  });
-  const aps = {};
-  for (const id of Object.keys(survey.aps || {})) {
-    const seen = [];
-    scans.forEach((s, i) => {
-      const r = (s.readings || []).find((q) => q.id === id);
-      if (r && (r.ageMs ?? 0) <= FRESH_MS) seen.push({ rssi: r.rssi, i });
-    });
-    if (seen.length < 3) continue;
-    seen.sort((p, q) => q.rssi - p.rssi);
-    const top = seen.slice(0, 5);
-    let w = 0;
-    let x = 0;
-    let y = 0;
-    for (const t of top) {
-      const wt = 10 ** (t.rssi / 20);
-      w += wt;
-      x += wt * points[t.i].x;
-      y += wt * points[t.i].y;
-    }
-    aps[id] = { x: x / w, y: y / w, z: points[top[0].i].z + 1, p0: top[0].rssi + 3, n: 2.5, conf: 0.2 };
+    px[i] = X[2 * a] - cx;
+    py[i] = X[2 * a + 1] - cy;
   }
-  return { points, aps, scaleConf: 0.2 };
+  // Andando, as leituras de uma varredura são mais velhas que o meio dela (2,4 GHz é ouvido primeiro):
+  // a posição estimada é a de um instante anterior. Avança ao longo do caminho até o meio da varredura.
+  const outX = Float64Array.from(px);
+  const outY = Float64Array.from(py);
+  if (P.shiftGain > 0) {
+    for (let i = 0; i < scans.length; i++) {
+      if (nodes[nodeOfScan[i]].spot != null) continue;
+      const lag = (data.meanAge[i] - SWEEP_MID_S) * P.shiftGain;
+      if (!(lag > 0)) continue;
+      const j = i + 1 < scans.length ? i + 1 : -1;
+      const h = i > 0 ? i - 1 : -1;
+      let vx = 0;
+      let vy = 0;
+      let n = 0;
+      // Velocidade local: média dos trechos vizinhos (mesmo andar, intervalo curto).
+      for (const [p, q] of [[i, j], [h, i]]) {
+        if (p < 0 || q < 0) continue;
+        const dt = scans[q].t - scans[p].t;
+        if (!(dt > 0.5 && dt < 8) || scans[p].floor !== scans[q].floor) continue;
+        const w = p === i ? 2 : 1; // o trecho seguinte pesa mais: é para lá que o usuário está indo
+        vx += (w * (px[q] - px[p])) / dt;
+        vy += (w * (py[q] - py[p])) / dt;
+        n += w;
+      }
+      if (n > 0) {
+        outX[i] += (vx / n) * lag;
+        outY[i] += (vy / n) * lag;
+      }
+    }
+  }
+  const points = scans.map((s, i) => ({
+    x: Number.isFinite(outX[i]) ? outX[i] : 0,
+    y: Number.isFinite(outY[i]) ? outY[i] : 0,
+    z: (Number(s.floor) || 0) * FLOOR_HEIGHT,
+    conf: 0.3,
+  }));
+  // Roteadores: posição e curva do modelo físico ajustado.
+  const aps = {};
+  const model = data.model;
+  if (model) {
+    const devOf = new Map();
+    for (const d of model.devs) for (const k of d.radios) devOf.set(k, d);
+    for (const [id, k] of data.idRadio) {
+      const d = devOf.get(k);
+      if (!d) continue;
+      const f = model.apFloor[k];
+      const x = model.ax[k] - cx;
+      const y = model.ay[k] - cy;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      aps[id] = {
+        x,
+        y,
+        z: data.floorList[f] * FLOOR_HEIGHT + 1,
+        p0: model.p0[k * NF + f],
+        n: model.n[k],
+        conf: Math.max(0, Math.min(1, d.explained)) * Math.min(1, d.nObs / 40),
+      };
+    }
+  }
+  return { points, aps, scaleConf: 0.3 };
 }
 
 // (desenvolvimento) acesso às etapas internas para os diagnósticos; sai na versão final.

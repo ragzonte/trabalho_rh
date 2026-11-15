@@ -14,6 +14,7 @@ import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowNetwork;
 
 import java.io.IOException;
@@ -68,6 +69,7 @@ public class SpeedTest extends AllSdks {
     }
 
     @Test
+    @Config(sdk = 34) // a parte HTTP não depende da versão do Android
     public void lightTestMeasuresLatencyDownloadAndUpload() throws Exception {
         JSONObject s = tester(null).run("light", wifi, events::add);
         assertEquals(s.toString(), true, s.get("ok"));
@@ -117,6 +119,7 @@ public class SpeedTest extends AllSdks {
     }
 
     @Test
+    @Config(sdk = 34) // a parte HTTP não depende da versão do Android
     public void phaseEndsByTimeWhenTheLinkIsSlow() throws Exception {
         server.chunkPauseMs = 20; // ~1,6 MB/s por conexão: o teto de dados nunca é alcançado
         SpeedTester.Plan quick = new SpeedTester.Plan(1.0, 0.3, Long.MAX_VALUE, Long.MAX_VALUE, 3, 2, 2, 50_000_000L, 50_000_000L);
@@ -135,6 +138,7 @@ public class SpeedTest extends AllSdks {
     }
 
     @Test
+    @Config(sdk = 34) // a parte HTTP não depende da versão do Android
     public void cancelStopsQuicklyWithCancelledAndTheBytesSpent() throws Exception {
         server.chunkPauseMs = 20;
         final SpeedTester t = tester(null);
@@ -159,6 +163,7 @@ public class SpeedTest extends AllSdks {
     }
 
     @Test
+    @Config(sdk = 34) // a parte HTTP não depende da versão do Android
     public void aSecondTestCancelsTheFirst() throws Exception {
         server.chunkPauseMs = 20;
         final SpeedTester t = tester(null);
@@ -176,6 +181,7 @@ public class SpeedTest extends AllSdks {
     }
 
     @Test
+    @Config(sdk = 34) // a parte HTTP não depende da versão do Android
     public void withoutWifiTheTestIsOffline() throws Exception {
         JSONObject s = tester(null).run("full", null, events::add);
         assertEquals(false, s.get("ok"));
@@ -187,6 +193,7 @@ public class SpeedTest extends AllSdks {
     }
 
     @Test
+    @Config(sdk = 34) // a parte HTTP não depende da versão do Android
     public void unreachableServerIsOffline() throws Exception {
         SpeedTester.Openers noDns = network -> url -> {
             throw new UnknownHostException("speed.cloudflare.com");
@@ -202,6 +209,7 @@ public class SpeedTest extends AllSdks {
     }
 
     @Test
+    @Config(sdk = 34) // a parte HTTP não depende da versão do Android
     public void serverErrorIsAFailedTest() throws Exception {
         server.downStatus = 429; // limite de uso do serviço
         JSONObject s = tester(null).run("light", wifi, events::add);
@@ -210,6 +218,7 @@ public class SpeedTest extends AllSdks {
     }
 
     @Test
+    @Config(sdk = 34) // a parte HTTP não depende da versão do Android
     public void uploadRefusedByTheServerFailsInsteadOfInventingANumber() throws Exception {
         server.upStatus = 403;
         JSONObject s = tester(null).run("light", wifi, events::add);
@@ -220,6 +229,7 @@ public class SpeedTest extends AllSdks {
     }
 
     @Test
+    @Config(sdk = 34) // a parte HTTP não depende da versão do Android
     public void helpers() {
         assertEquals(3.0, SpeedTester.median(Arrays.asList(9.0, 1.0, 3.0)), 1e-9);
         assertEquals(5.0, SpeedTester.median(Arrays.asList(5.0)), 1e-9);

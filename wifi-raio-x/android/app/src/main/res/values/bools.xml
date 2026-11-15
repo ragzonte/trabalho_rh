@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Celular em modo claro: fundo claro, ícones escuros nas barras. Em values-night vale o contrário. -->
+    <bool name="light_theme">true</bool>
+</resources>

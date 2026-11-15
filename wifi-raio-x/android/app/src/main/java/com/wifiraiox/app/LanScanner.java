@@ -46,6 +46,10 @@ final class LanScanner {
 
         /** IP -> MAC pela tabela de vizinhos (vazio no Android 10+). */
         Map<String, String> arp();
+
+        /** Libera threads próprias, se houver. */
+        default void close() {
+        }
     }
 
     static final int THREADS = 48;
@@ -66,6 +70,12 @@ final class LanScanner {
     LanScanner(Net net, int threads) {
         this.net = net;
         this.threads = Math.max(1, threads);
+    }
+
+    /** A tela está sendo encerrada: para tudo e solta as threads. */
+    void close() {
+        cancel();
+        net.close();
     }
 
     /** Interrompe a varredura em andamento; quem a pediu recebe o que já foi encontrado. */
@@ -281,7 +291,7 @@ final class LanScanner {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return null;
-            } catch (Exception e) {
+            } catch (Exception e) { // prazo estourado, consulta falhou ou o pool já foi encerrado
                 if (future != null) future.cancel(true);
                 return null;
             }
@@ -295,6 +305,11 @@ final class LanScanner {
         @Override
         public Map<String, String> arp() {
             return ArpTable.read();
+        }
+
+        @Override
+        public void close() {
+            names.shutdownNow();
         }
     }
 }

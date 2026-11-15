@@ -495,6 +495,7 @@ public final class Bridge implements Emitter {
         destroyed = true;
         rssi.unwatch();
         onStop();
+        lan.close();
         io.shutdownNow();
         timer.shutdownNow();
         if (ownedScanWorker != null) ownedScanWorker.shutdownNow();

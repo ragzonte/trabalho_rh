@@ -231,9 +231,10 @@ public class RttTest extends AllSdks {
         bridge.callAsync(1, "rtt", "{\"bssids\":[\"" + AP_MC + "\"]}");
         Fixtures.idle();
         assertNull(page.resolved(1));
-        ShadowLooper.idleMainLooper(RttRanger.TIMEOUT_MS - 500, TimeUnit.MILLISECONDS);
+        // enquanto a pessoa lê o diálogo de permissão o prazo é longo
+        ShadowLooper.idleMainLooper(RttRanger.TIMEOUT_MS + 5000, TimeUnit.MILLISECONDS);
         assertNull(page.resolved(1));
-        ShadowLooper.idleMainLooper(600, TimeUnit.MILLISECONDS);
+        ShadowLooper.idleMainLooper(RttRanger.DIALOG_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         JSONObject r = page.resolved(1);
         assertNotNull("depois do prazo a promessa resolve de qualquer jeito", r);
         assertEquals(false, r.getJSONArray("results").getJSONObject(0).get("ok"));
