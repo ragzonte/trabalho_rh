@@ -108,6 +108,7 @@ export {
   asApList,
   groupByDevice,
   groupBySsid,
+  securityFamily,
   ApTracker,
   normalizeBssid,
   parseMac,

@@ -733,7 +733,9 @@ export function rankNetworks(aps, options) {
       warnings: top.result.warnings,
       detail: top.result.detail,
       connected: current !== undefined,
-      favorite: !net.hidden && favorites.has(net.ssid),
+      // "minha" vem do nome marcado; quando os Ap já trazem a decisão do app (`favorite`, posta pelo
+      // store), ela vale: uma rede aberta com o nome de uma rede protegida do usuário não é dele
+      favorite: !net.hidden && favorites.has(net.ssid) && (!net.aps.some((ap) => typeof ap.favorite === 'boolean') || net.aps.some((ap) => ap.favorite === true)),
       others: entries.slice(1).map(strip),
       deviceId: top.deviceId,
       current: current ? strip(current) : null,

@@ -947,3 +947,61 @@ describe('conjunto', () => {
     for (const input of odd) assertShape(buildInsights(input));
   });
 });
+
+describe('alguém se passando pela rede do usuário', () => {
+  // um aparelho sem parentesco de MAC com o roteador da casa
+  const twin = (capabilities, more = {}) => makeAp('02:13:37:00:00:01', 'Casa', -40, 2462, { wifiStandard: 4, capabilities, ...more });
+
+  test('rede aberta com o nome da rede em uso (que tem senha): aviso, e ela não vira "a sua rede"', () => {
+    const out = run({ aps: home({ extra: [twin(CAPS.open)] }) });
+    assertShape(out);
+    const warn = get(out, 'open-twin');
+    assert.ok(warn, ids(out).join(', '));
+    assert.equal(warn.severity, 'warning');
+    assert.match(warn.title, /rede aberta com o mesmo nome/);
+    assert.match(warn.text, /“Casa”/);
+    assert.match(warn.text, /canal 11 de 2,4 GHz/);
+    assert.match(warn.text, /não é o seu roteador/);
+    // o aviso de "rede aberta" é sobre a rede em uso, e ela tem senha
+    assert.equal(get(out, 'weak-security'), undefined);
+    assert.equal(get(out, 'all-good'), undefined, 'com aviso não há "tudo certo"');
+  });
+
+  test('sem gêmea aberta, ou quando a rede em uso é ela mesma aberta, não há esse aviso', () => {
+    assert.equal(get(run(), 'open-twin'), undefined);
+    // outro ponto de acesso com o mesmo nome e senha: pode ser um repetidor
+    assert.equal(get(run({ aps: home({ extra: [twin(CAPS.wpa2)] }) }), 'open-twin'), undefined);
+    // rede aberta de outro nome
+    assert.equal(get(run({ aps: home({ extra: [neighbour(0, -50, 2462, { capabilities: CAPS.open })] }) }), 'open-twin'), undefined);
+    // a rede em uso já é aberta (o aviso de segurança cobre)
+    const allOpen = run({ aps: home({ r24: { capabilities: CAPS.open }, r5: { capabilities: CAPS.open }, extra: [twin(CAPS.open)] }) });
+    assert.equal(get(allOpen, 'open-twin'), undefined);
+    assert.ok(get(allOpen, 'weak-security'));
+    // sem conexão não há "sua rede"
+    assert.equal(get(run({ aps: home({ extra: [twin(CAPS.open)] }), connection: { connected: false } }), 'open-twin'), undefined);
+  });
+
+  test('outro aparelho com o BSSID do roteador em uso (anotado pelo app em `clone`)', () => {
+    const list = normalizeScan({ ts: TS, fresh: true, source: 'request', aps: home() });
+    const base = { aps: list, connection: on5(), device: PHONE, status: STATUS };
+    const out = buildInsights({ ...base, clone: { bssid: HOME_5.toUpperCase(), ssids: ['Free_WiFi', '<img src=x>', 'terceira'] } });
+    assertShape(out);
+    const warn = get(out, 'bssid-clone');
+    assert.ok(warn, ids(out).join(', '));
+    assert.equal(warn.severity, 'warning');
+    assert.match(warn.text, /“Free_WiFi” e “<img src=x>”/, 'cita no máximo dois nomes, como texto');
+    assert.doesNotMatch(warn.text, /terceira/);
+    assert.match(warn.text, /mesmo endereço \(BSSID\)/);
+    assert.equal(get(out, 'all-good'), undefined);
+
+    // sem a anotação, de outro BSSID, sem conexão ou com lixo: nada
+    assert.equal(get(buildInsights(base), 'bssid-clone'), undefined);
+    assert.equal(get(buildInsights({ ...base, clone: { bssid: HOME_24, ssids: ['x'] } }), 'bssid-clone'), undefined);
+    assert.equal(get(buildInsights({ ...base, connection: { connected: false }, clone: { bssid: HOME_5, ssids: ['x'] } }), 'bssid-clone'), undefined);
+    for (const junk of [null, 7, 'x', [], {}, { bssid: 5 }, { bssid: HOME_5, ssids: 'x' }, { bssid: HOME_5, ssids: [null, 3, ''] }]) {
+      assertShape(buildInsights({ ...base, clone: junk }));
+    }
+    // sem nome para citar o aviso sai do mesmo jeito
+    assert.match(get(buildInsights({ ...base, clone: { bssid: HOME_5, ssids: [] } }), 'bssid-clone').text, /transmite uma rede com o mesmo endereço/);
+  });
+});

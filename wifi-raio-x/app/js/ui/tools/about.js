@@ -61,9 +61,15 @@ export function mount(root, ctx) {
       h(
         'div.prose',
         null,
-        p(b('Nada sai do seu celular. '), 'O app não tem cadastro, anúncios nem estatísticas de uso. As redes, os mapas e os ajustes ficam guardados só aqui.'),
+        p(b('O que o app encontra fica no seu celular. '), 'Ele não tem cadastro, anúncios nem estatísticas de uso. As redes, os mapas e os ajustes ficam guardados só aqui.'),
         p('A permissão de ', b('Localização'), ' é uma exigência do Android para listar redes Wi-Fi. O app não usa GPS e não registra onde você está.'),
-        p('A única função que usa a internet é o ', b('teste de velocidade'), ': ele troca dados com servidores da Cloudflare (speed.cloudflare.com) e só quando você toca em iniciar.'),
+        p(
+          'O app só usa a internet quando você pede: no ',
+          b('teste de velocidade'),
+          ' (servidores da Cloudflare, speed.cloudflare.com) e no ',
+          b('teste de latência'),
+          ' até a internet (o destino que você escolher: Cloudflare 1.1.1.1, Google 8.8.8.8 ou um site). Nada do que o app analisa é enviado.',
+        ),
       ),
     ),
 

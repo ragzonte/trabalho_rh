@@ -867,6 +867,19 @@ test('níveis: sinal que não varia = a pessoa não saiu do lugar, por mais varr
   const moving = started();
   for (let i = 0; i < 70; i++) feed(moving.rec, moving.clock, i);
   assert.ok(moving.rec.stats().spreadDb > 15);
+
+  // Casa com o roteador perto e os vizinhos todos distantes: andando, só o sinal do roteador muda
+  // de verdade (os vizinhos oscilam ±1 dB). Isso é andar, não ficar parado.
+  const lonely = started();
+  for (let i = 0; i < 70; i++) {
+    lonely.clock.advance(3000);
+    const own = -42 - Math.abs((i % 20) - 10) * 2.2; // de -42 a -64 dBm conforme o cômodo
+    lonely.rec.onScan(scanEvent(lonely.clock, [ap(mac(1), Math.round(own)), ...[2, 3, 4, 5, 6, 7].map((k) => ap(mac(k), -70 - k * 2 + ((i + k) % 3) - 1))]));
+  }
+  const ls = lonely.rec.stats();
+  assert.ok(ls.spreadDb >= 12, `variação ${ls.spreadDb} dB`);
+  assert.notEqual(ls.level, 'insuficiente');
+  assert.doesNotMatch(ls.hint, /quase não mudou/);
 });
 
 test('dicas: uma frase para cada momento', () => {

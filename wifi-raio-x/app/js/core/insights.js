@@ -1,7 +1,7 @@
 // Diagnóstico automático: olha a varredura, a conexão e o celular e diz, em português claro, o
 // que está errado (ou que está tudo certo).
 //
-// O que oferece: buildInsights({ aps, connection, device, status }) -> Insight[] (do mais grave
+// O que oferece: buildInsights({ aps, connection, device, status, clone }) -> Insight[] (do mais grave
 // para o mais leve; a lista de ids possíveis está na documentação da função).
 //
 // Regra de ouro: cada aviso só aparece quando o dado que o sustenta veio do celular. Sem os
@@ -143,6 +143,7 @@ function gather(input) {
     device,
     client: clientProfile(device),
     status: isObj(input.status) ? input.status : null,
+    clone: isObj(input.clone) ? input.clone : null,
     name,
     // O sinal da conexão é lido a cada segundo; o da varredura pode ter meio minuto
     rssi: liveRssi ?? (cur ? rssiOf(cur) : null),
@@ -195,6 +196,47 @@ function weakSecurity(f) {
   if (!issue) return null;
   const [severity, title, extra] = table[issue.code];
   return { id: 'weak-security', severity, title, text: `${issue.text}${extra}` };
+}
+
+/**
+ * Outro aparelho transmitindo com o endereço (BSSID) do roteador em uso e OUTRO nome de rede.
+ * Quem percebe é o app (o store tira essa entrada das listas e avisa por `clone`): a varredura
+ * guarda uma entrada por BSSID, então aqui ela já não aparece.
+ */
+function bssidClone(f) {
+  if (!f.conn || !f.clone || normalizeBssid(f.clone.bssid) !== f.curId || f.curId === '') return null;
+  const names = (Array.isArray(f.clone.ssids) ? f.clone.ssids : []).filter((x) => typeof x === 'string' && x !== '').slice(0, 2);
+  const who = names.length ? ` (com o nome ${names.map(quoted).join(' e ')})` : '';
+  return {
+    id: 'bssid-clone',
+    severity: 'warning',
+    title: 'Outro aparelho usa o endereço do seu roteador',
+    text:
+      `Um aparelho por perto transmite uma rede${who} com o mesmo endereço (BSSID) do roteador em que você está conectado. ` +
+      'Ela não é a sua rede e ficou fora das listas e das análises do app. Pode ser um equipamento mal configurado ou alguém tentando se passar pelo seu roteador: ' +
+      'se a conexão cair sem motivo ou o celular pedir a senha de novo, desconfie.',
+  };
+}
+
+/** Uma rede ABERTA por perto com o nome da rede em uso, que tem senha: não é o roteador da pessoa. */
+function openTwin(f) {
+  if (!f.conn || !f.cur || f.cur.hidden || f.name === '') return null;
+  const mine = f.cur.security;
+  if (!isObj(mine) || mine.known !== true || mine.open === true) return null;
+  const twins = f.list.filter(
+    (ap) => ap !== f.cur && !ap.hidden && ap.ssid === f.name && isObj(ap.security) && ap.security.known === true && ap.security.open === true && ap.security.encrypted !== true,
+  );
+  if (!twins.length) return null;
+  twins.sort((a, b) => (rssiOf(b) ?? -Infinity) - (rssiOf(a) ?? -Infinity));
+  const where = isNum(twins[0].channel) && BAND_NAME[twins[0].band] ? `, no canal ${twins[0].channel} de ${BAND_NAME[twins[0].band]}` : '';
+  return {
+    id: 'open-twin',
+    severity: 'warning',
+    title: 'Há uma rede aberta com o mesmo nome da sua',
+    text:
+      `Um aparelho por perto anuncia ${quoted(f.name)} sem senha${where}. A sua rede tem senha: essa outra não é o seu roteador. ` +
+      'Não entre nela; se o celular entrar sozinho, quem a criou pode ver o que você acessa. O app não a conta como sua rede.',
+  };
 }
 
 /** Sinal fraco na conexão atual. */
@@ -651,6 +693,8 @@ function allGood(f) {
 // A ordem aqui é a ordem dentro de cada gravidade: primeiro o que mais afeta a pessoa agora.
 const RULES = [
   weakSecurity,
+  bssidClone,
+  openTwin,
   weakSignal,
   strongerAp,
   bandUpgrade,
@@ -682,13 +726,15 @@ function tidy(insight) {
  * Diagnóstico da situação atual.
  *
  * @param {{aps?: import('./model.js').Ap[], connection?: import('../bridge.js').Connection,
- *          device?: import('../bridge.js').DeviceInfo, status?: import('../bridge.js').Status}} input
- *        aps = lista do ApTracker/store (ou ScanAp crus); o resto vem direto da ponte
+ *          device?: import('../bridge.js').DeviceInfo, status?: import('../bridge.js').Status,
+ *          clone?: {bssid:string, ssids:string[]}|null}} input
+ *        aps = lista do ApTracker/store (ou ScanAp crus); clone = `clone` do store (outro aparelho
+ *        com o BSSID do roteador em uso); o resto vem direto da ponte
  * @returns {Insight[]}  do mais grave para o mais leve ('critical', 'warning', 'info', 'good').
  *          O aviso 'good' (id 'all-good') só aparece, sozinho ou junto de notas 'info', quando
  *          há conexão com sinal medido e nenhum 'critical' ou 'warning'.
  *
- * Ids possíveis: weak-security, weak-signal, stronger-ap, band-upgrade, nonstandard-channel,
+ * Ids possíveis: weak-security, bssid-clone, open-twin, weak-signal, stronger-ap, band-upgrade, nonstandard-channel,
  * crowded-channel-24 | -5 | -6, wide-channel-24, busy-ap, slow-link, wps-on, not-connected,
  * old-router, legacy-11b, dfs-channel, no-pmf, hidden-ssid, phone-no-5ghz, phone-no-6ghz,
  * scan-throttled, all-good.

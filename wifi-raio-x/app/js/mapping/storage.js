@@ -22,6 +22,7 @@
 //                                               REJEITA com MapStoreError: code 'quota' (sem espaço),
 //                                               'invalid' (dados que não são um mapa) ou 'failed'.
 //   await maps.rename(id, name) -> boolean
+//   await maps.setThumb(id, dataUrl) -> boolean  troca só a miniatura (a data do mapa não muda)
 //   await maps.remove(id)       -> boolean
 //   await maps.clear()                          apaga todos os mapas e o rascunho
 //
@@ -61,6 +62,12 @@ const MAX_THUMB_CHARS = 400_000; // ~300 kB de imagem
 const MAX_META_CHARS = 20_000;
 const MAX_OWN = 400;
 const MAX_IMPORT_CHARS = 16_000_000;
+// Um arquivo de fora pode caber no tamanho e ainda assim ser feito para travar o app ao abrir:
+// dezenas de milhares de "redes" diferentes ou milhares de lugares marcados. Os tetos abaixo
+// ficam muito acima de qualquer levantamento de verdade (o mais carregado medido tinha ~1.500
+// BSSIDs; ninguém marca 500 lugares andando pela casa).
+export const MAX_IMPORT_APS = 5000;
+export const MAX_IMPORT_SPOTS = 500;
 const MAX_DRAFT_CHARS = 12_000_000;
 const OPEN_TIMEOUT_MS = 4000;
 const ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
@@ -263,7 +270,7 @@ export function serializeMap(record, now = Date.now()) {
       stats: record.stats,
       own: record.own,
       meta: record.meta,
-      thumb: record.thumb || null,
+      // (a miniatura não vai no arquivo: quem importa refaz a dele; veja parseMapFile)
       survey: record.survey,
       solution: record.solution,
     },
@@ -303,13 +310,18 @@ export function parseMapFile(text, options = {}) {
       own: map.own,
       meta: map.meta,
       stats: map.stats,
-      thumb: map.thumb,
+      // A miniatura de um arquivo NUNCA é aproveitada: é uma imagem escolhida por quem mandou o
+      // arquivo, e um PNG de poucos kB pode ter dezenas de megapixels (centenas de MB de memória
+      // cada vez que a lista de mapas aparece). A tela refaz a miniatura quando o mapa é aberto.
+      thumb: null,
       demo: map.demo,
     },
     now,
   );
   if (!record) throw new MapStoreError('invalid', 'O arquivo está incompleto: falta o levantamento do mapa.');
   if (record.survey.scans.length === 0) throw new MapStoreError('invalid', 'O arquivo não traz nenhuma medição.');
+  if (Object.keys(record.survey.aps).length > MAX_IMPORT_APS) throw new MapStoreError('invalid', 'Este arquivo tem redes demais para ser um mapa feito pelo WiFi Raio-X.');
+  if (record.stats.spots > MAX_IMPORT_SPOTS) throw new MapStoreError('invalid', 'Este arquivo tem lugares marcados demais para ser um mapa feito pelo WiFi Raio-X.');
   return record;
 }
 
@@ -717,6 +729,17 @@ function makeStore(backend, kind, now) {
       const record = await get(id);
       if (!record) return false;
       record.name = cleanName(name, record.name);
+      await save(record);
+      return true;
+    },
+
+    /** Troca só a miniatura de um mapa (feita pela própria tela ao abri-lo); a data do mapa não muda. */
+    async setThumb(id, thumb) {
+      const clean = cleanThumb(thumb);
+      if (!clean) return false;
+      const record = await get(id);
+      if (!record) return false;
+      record.thumb = clean;
       await save(record);
       return true;
     },

@@ -24,6 +24,10 @@
 //   favorites    Set<string>                   "minhas redes": SSIDs marcados pelo usuário (fica salvo)
 //   own          Set<string>                   BSSIDs "da casa": o AP conectado, os outros rádios do mesmo
 //                                              aparelho e todos os APs das redes favoritas
+//   clone        {bssid, ssids:string[]}|null  outro aparelho anunciando o BSSID do roteador conectado com
+//                                              OUTRO nome de rede (visto na última varredura). Essa entrada
+//                                              não entra em `aps`: o endereço é do roteador do usuário, e
+//                                              mostrá-la ali faria o app falar dela como se fosse a rede dele
 //   vendorsReady boolean                       a tabela de fabricantes já carregou
 //
 //   scan         a última varredura:
@@ -51,11 +55,14 @@
 //                           (rssiSmooth, firstSeen, lastSeen, seenCount) MAIS os que o store acrescenta:
 //                             vendor       nome do fabricante pelo MAC | null
 //                             vendorGuess  true = fabricante provável (BSSID virtual do roteador)
-//                             connected    é o BSSID em que o celular está conectado
-//                             favorite     o SSID está em "minhas redes"
+//                             connected    é o BSSID em que o celular está conectado (e o nome não contradiz
+//                                          o da conexão: veja `clone`)
+//                             favorite     o SSID está em "minhas redes" (uma rede ABERTA com o nome de uma
+//                                          rede protegida do usuário não herda o "minha": veja mineBySecurity)
 //                             own          o BSSID está em state.own
 //                           `ageMs` e `stale` contam a partir da última varredura (stale = não foi ouvido nela).
-//                           Um BSSID sai da lista depois de 90 s sem ser ouvido.
+//                           Um BSSID sai da lista depois de 90 s sem ser ouvido; com a lista cheia demais
+//                           (mais de CROWD_APS), quem foi ouvido uma única vez sai assim que deixa de ser ouvido.
 //   devices      aparelhos físicos (core/model.js groupByDevice): {id, bssids, aps, ssids, bands, bestRssi}
 //   networks     redes por nome (core/model.js groupBySsid): {key, ssid, name, hidden, security, aps,
 //                devices, bands, best, mesh}
@@ -84,13 +91,47 @@
 //   resetScanData()                      ao trocar de celular de verdade para simulador (e vice-versa)
 // ---------------------------------------------------------------------------------------------
 
-import { ApTracker, groupByDevice, groupBySsid } from './core/model.js';
+import { ApTracker, groupByDevice, groupBySsid, securityFamily } from './core/model.js';
 import { DEFAULT_SETTINGS, sanitizeSettings } from './prefs.js';
 
 /** Um BSSID que não aparece há mais tempo que isto sai da lista. */
 export const MAX_AP_AGE_MS = 90_000;
 /** Quantas leituras do sinal da rede conectada ficam guardadas (~15 min a 1 por segundo). */
 export const RSSI_HISTORY_MAX = 900;
+/**
+ * Lista "cheia demais": um lugar com centenas de redes ou alguém por perto transmitindo redes
+ * falsas aos montes (um ESP8266 inventa centenas de BSSIDs por busca). Acima disto, quem foi
+ * ouvido uma única vez e não veio na última busca sai logo, em vez de ficar 90 s: cada análise
+ * do app custa mais que o dobro quando a lista dobra.
+ */
+export const CROWD_APS = 300;
+/** "Não veio na última busca", para a regra acima (as leituras de uma busca chegam com até poucos segundos). */
+export const CROWD_GONE_MS = 5000;
+
+/** O Android entrega o nome da rede conectada entre aspas em algumas versões; "<unknown ssid>" = não informou. */
+function connectionName(connection) {
+  const raw = connection && typeof connection.ssid === 'string' ? connection.ssid : '';
+  const name = raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw;
+  return name === '<unknown ssid>' ? '' : name;
+}
+
+/**
+ * O nome que a varredura dá a um BSSID combina com o nome da rede em que o celular está?
+ * Qualquer aparelho pode transmitir com o endereço (BSSID) do roteador de outra pessoa; o nome é
+ * o que o celular confirmou ao conectar. Sem como comparar (rede oculta, conexão sem nome) vale
+ * "combina". O "\uFFFD" é o que o Android põe onde não conseguiu decodificar um nome antigo com
+ * acentos: ali qualquer letra serve.
+ * @param {string} scanSsid  nome na varredura ('' = oculta)
+ * @param {string} connSsid  nome da conexão, já limpo ('' = desconhecido)
+ */
+export function sameNetworkName(scanSsid, connSsid) {
+  if (typeof scanSsid !== 'string' || scanSsid === '' || typeof connSsid !== 'string' || connSsid === '') return true;
+  if (scanSsid === connSsid) return true;
+  if (!scanSsid.includes('\uFFFD')) return false;
+  const a = Array.from(scanSsid);
+  const b = Array.from(connSsid);
+  return a.length === b.length && a.every((ch, i) => ch === '\uFFFD' || ch === b[i]);
+}
 
 /** Comparação rasa (um nível) para seletores que devolvem objeto ou lista. */
 export function shallowEqual(a, b) {
@@ -143,6 +184,7 @@ const macOf = (x) => (typeof x === 'string' ? x.toLowerCase() : '');
  */
 export function createStore({ prefs = null, now = Date.now, onError } = {}) {
   let tracker = null; // criado na primeira varredura, já sabendo a versão do Android
+  let droppedClone = null; // {bssid, ssids}: entradas com o BSSID conectado e outro nome, tiradas da última varredura
   let vendors = null; // OuiLookup de core/oui.js
   let rssiLog = [];
 
@@ -156,6 +198,7 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
     settings: prefs ? prefs.loadSettings() : sanitizeSettings(DEFAULT_SETTINGS),
     favorites: new Set(prefs ? prefs.loadFavorites() : []),
     own: new Set(),
+    clone: null,
     vendorsReady: false,
     scan: EMPTY_SCAN,
     loop: EMPTY_LOOP,
@@ -238,10 +281,42 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
     }
   }
 
+  /**
+   * Quais redes com nome favorito são mesmo "minhas", olhando a segurança. "Minha rede" é marcada
+   * pelo nome, e nome qualquer um copia: uma rede ABERTA com o nome de uma rede protegida do
+   * usuário não é o roteador dele (é o truque clássico para atrair o celular). Regras:
+   *   - conectado a uma rede com esse nome: só valem os APs da mesma família de segurança dela;
+   *   - senão: uma rede aberta não vale enquanto houver por perto uma protegida com o mesmo nome.
+   * Uma rede que só existe aberta (a de convidados do próprio usuário) continua valendo.
+   * @returns {(ap:object) => boolean}
+   */
+  function mineBySecurity(aps, favorites) {
+    const families = new Map(); // nome favorito -> famílias de segurança vistas com esse nome
+    const connected = new Map(); // nome favorito -> família do AP conectado
+    for (const ap of aps) {
+      if (!ap.ssid || !favorites.has(ap.ssid)) continue;
+      const family = securityFamily(ap.security);
+      let seen = families.get(ap.ssid);
+      if (!seen) families.set(ap.ssid, (seen = new Set()));
+      seen.add(family);
+      if (ap.connected) connected.set(ap.ssid, family);
+    }
+    return (ap) => {
+      if (!ap.ssid || !favorites.has(ap.ssid)) return false;
+      const family = securityFamily(ap.security);
+      if (family === 'unknown') return true; // sem dado de segurança não há o que contradizer
+      const inUse = connected.get(ap.ssid);
+      if (inUse !== undefined && inUse !== 'unknown') return family === inUse;
+      if (family !== 'open') return true;
+      for (const other of families.get(ap.ssid)) if (other !== 'open' && other !== 'unknown') return false;
+      return true;
+    };
+  }
+
   /** BSSIDs "da casa": o conectado, os outros rádios do mesmo aparelho e os APs das redes favoritas. */
-  function ownSet(aps, devices, connectedBssid, favorites) {
+  function ownSet(aps, devices, connectedBssid) {
     const own = new Set();
-    for (const ap of aps) if (favorites.has(ap.ssid) && ap.ssid) own.add(ap.bssid);
+    for (const ap of aps) if (ap.favorite) own.add(ap.bssid);
     if (connectedBssid) {
       own.add(connectedBssid);
       for (const device of devices) {
@@ -260,22 +335,70 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
 
     // idades contadas a partir da última varredura (o padrão do rastreador), não de "agora":
     // `stale` quer dizer "não foi ouvido na última", mesmo que ela tenha sido há meio minuto
-    const aps = tracker ? tracker.list({ maxAgeMs: MAX_AP_AGE_MS }) : [];
+    let aps = tracker ? tracker.list({ maxAgeMs: MAX_AP_AGE_MS }) : [];
+
+    // O BSSID conectado com OUTRO nome de rede: alguém por perto está transmitindo com o endereço
+    // do roteador do usuário. Essa entrada não é a rede dele: fica fora da lista (senão todas as
+    // telas falariam dela como "a sua rede": aberta, noutro canal...) e é anotada em `clone`.
+    let clone = null;
+    if (connectedBssid) {
+      const name = connectionName(connection);
+      const at = aps.findIndex((ap) => ap.bssid === connectedBssid);
+      if (at >= 0 && !sameNetworkName(aps[at].hidden ? '' : aps[at].ssid, name)) {
+        clone = { bssid: connectedBssid, ssids: [aps[at].ssid] };
+        aps.splice(at, 1);
+      } else if (droppedClone && droppedClone.bssid === connectedBssid) {
+        clone = droppedClone; // veio junto com o roteador de verdade na última varredura
+      }
+    }
+    // lista cheia demais: os ouvidos uma única vez saem assim que deixam de ser ouvidos
+    if (aps.length > CROWD_APS) {
+      aps = aps.filter((ap) => !(ap.seenCount <= 1 && ap.ageMs > CROWD_GONE_MS) || ap.bssid === connectedBssid || (!!ap.ssid && favorites.has(ap.ssid)));
+    }
+
     for (const ap of aps) {
       const v = vendorOf(ap.bssid);
       ap.vendor = v && v.name ? v.name : null;
       ap.vendorGuess = !!(v && v.guess);
       ap.connected = !!connectedBssid && ap.bssid === connectedBssid;
-      ap.favorite = !!ap.ssid && favorites.has(ap.ssid);
     }
+    const mine = mineBySecurity(aps, favorites);
+    for (const ap of aps) ap.favorite = mine(ap);
     // o rastreador ordena pelo sinal suavizado; as telas mostram `rssi`, então a ordem segue ele
     aps.sort((a, b) => (b.rssi ?? -Infinity) - (a.rssi ?? -Infinity) || (a.bssid < b.bssid ? -1 : a.bssid > b.bssid ? 1 : 0));
     const devices = groupByDevice(aps);
     const networks = groupBySsid(aps, { devices });
-    const own = ownSet(aps, devices, connectedBssid, favorites);
+    const own = ownSet(aps, devices, connectedBssid);
     for (const ap of aps) ap.own = own.has(ap.bssid);
     byId = new Map(aps.map((ap) => [ap.bssid, ap]));
-    return { ...extra, aps, devices, networks, own };
+    return { ...extra, aps, devices, networks, own, clone };
+  }
+
+  /**
+   * Duas entradas com o BSSID conectado na mesma varredura (o roteador e alguém usando o endereço
+   * dele): o rastreador guarda uma por BSSID, então a do roteador de verdade (a que tem o nome da
+   * conexão) tem de ser a que fica. Sem entrada repetida, a varredura passa como veio.
+   */
+  function preferConnectedName(ev) {
+    const conn = state.connection;
+    const bssid = conn && conn.connected ? macOf(conn.bssid) : '';
+    const name = bssid ? connectionName(conn) : '';
+    if (!name) return ev;
+    let same = 0;
+    let genuine = 0;
+    for (const ap of ev.aps) {
+      if (!ap || macOf(ap.bssid) !== bssid) continue;
+      same += 1;
+      if (typeof ap.ssid === 'string' && ap.ssid !== '' && sameNetworkName(ap.ssid, name)) genuine += 1;
+    }
+    if (same < 2 || genuine === 0) return ev;
+    const isClone = (ap) => !!ap && macOf(ap.bssid) === bssid && !(typeof ap.ssid === 'string' && ap.ssid !== '' && sameNetworkName(ap.ssid, name));
+    const ssids = [];
+    for (const ap of ev.aps) {
+      if (isClone(ap) && typeof ap.ssid === 'string' && ap.ssid !== '' && !ssids.includes(ap.ssid) && ssids.length < 4) ssids.push(ap.ssid.slice(0, 64));
+    }
+    if (ssids.length) droppedClone = { bssid, ssids };
+    return { ...ev, aps: ev.aps.filter((ap) => !isClone(ap)) };
   }
 
   // --- API -------------------------------------------------------------------------------------
@@ -330,9 +453,10 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
 
     setConnection(connection) {
       const next = connection && typeof connection === 'object' ? connection : null;
-      const before = state.connection && state.connection.connected ? macOf(state.connection.bssid) : '';
-      const after = next && next.connected ? macOf(next.bssid) : '';
-      // só refaz as listas quando o BSSID conectado muda (a conexão é reenviada com frequência)
+      const idOf = (c) => (c && c.connected ? `${macOf(c.bssid)}|${connectionName(c)}` : '');
+      const before = idOf(state.connection);
+      const after = idOf(next);
+      // só refaz as listas quando o BSSID (ou o nome) da rede conectada muda (a conexão é reenviada com frequência)
       if (before !== after) commit(derive({ connection: next }));
       else commit({ connection: next });
     },
@@ -349,7 +473,8 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
       if (!ev || typeof ev !== 'object' || !Array.isArray(ev.aps)) return;
       const t = now();
       if (!tracker) tracker = new ApTracker({ sdk: state.info && typeof state.info.sdk === 'number' ? state.info.sdk : undefined });
-      tracker.update(ev);
+      droppedClone = null;
+      tracker.update(preferConnectedName(ev));
       const fresh = ev.fresh !== false;
       let dataAt = state.scan.dataAt;
       if (fresh) dataAt = t;
@@ -399,6 +524,7 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
 
     resetScanData() {
       tracker = null;
+      droppedClone = null;
       rssiLog = [];
       commit(derive({ scan: EMPTY_SCAN, rssi: null, connection: null, status: null, info: null }));
     },

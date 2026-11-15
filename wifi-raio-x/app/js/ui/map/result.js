@@ -1243,6 +1243,18 @@ export async function mountResult(root, env, { id }) {
   drawPick();
   measurePad();
 
+  // Mapa salvo sem miniatura (um mapa importado chega sem: a imagem do arquivo nunca é aproveitada):
+  // faz a miniatura aqui, com o desenho deste aparelho, para o cartão da biblioteca ganhar a foto.
+  if (S.saved && S.id !== null && !S.thumb && viewer && usable()) {
+    const thumbTimer = setTimeout(async () => {
+      if (dead || S.thumb || !S.saved) return;
+      const thumb = await snapshotThumb();
+      if (dead || !thumb || S.thumb) return;
+      if (await storage.setThumb(S.id, thumb)) S.thumb = thumb;
+    }, 1200);
+    offs.push(() => clearTimeout(thumbTimer));
+  }
+
   // puxar ou tocar na alça abre e fecha o painel
   let drag = null;
   handle.addEventListener('pointerdown', (ev) => {

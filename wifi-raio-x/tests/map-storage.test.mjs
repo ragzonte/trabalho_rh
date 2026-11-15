@@ -544,7 +544,11 @@ test('arquivo: exportar de um aparelho e importar em outro dá o mesmo mapa', as
   assert.notEqual(imported, id);
   const original = await a.get(id);
   const copy = await b.get(imported);
-  for (const key of ['name', 'survey', 'solution', 'own', 'meta', 'stats', 'thumb', 'demo', 'createdAt']) assert.deepEqual(copy[key], original[key], key);
+  for (const key of ['name', 'survey', 'solution', 'own', 'meta', 'stats', 'demo', 'createdAt']) assert.deepEqual(copy[key], original[key], key);
+  // a miniatura não viaja no arquivo: o aparelho que importa faz a dele ao abrir o mapa
+  assert.ok(original.thumb, 'o mapa de origem tem miniatura');
+  assert.equal('thumb' in file.map, false);
+  assert.equal(copy.thumb, null);
   assert.equal((await b.list())[0].updatedAt, original.updatedAt, 'importar não finge que o mapa foi mexido');
 
   // importar duas vezes cria dois mapas (ids diferentes), sem sobrescrever
@@ -690,4 +694,72 @@ test('um levantamento gravado, salvo e reaberto refaz exatamente o mesmo modelo'
   assert.deepEqual(again.floors[0].rooms, model.floors[0].rooms);
   assert.deepEqual(again.spots, model.spots);
   assert.equal((await store.list())[0].stats.areaM2, Math.round(model.quality.areaM2 * 10) / 10);
+});
+
+test('arquivo: a miniatura que vem num arquivo nunca é aproveitada (imagem de terceiros na lista de mapas)', async () => {
+  const store = await memory();
+  // um PNG "válido" de 12000 x 12000 cabe em poucos kB e custaria centenas de MB para desenhar:
+  // aqui basta o cabeçalho, porque o arquivo importado nem chega a ter a imagem olhada
+  const ihdr = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0x2e, 0xe0, 0, 0, 0x2e, 0xe0, 1, 0, 0, 0, 0]);
+  const bomb = `data:image/png;base64,${ihdr.toString('base64')}`;
+  const id = await store.put(sampleRecord());
+  const file = JSON.parse(await store.exportMap(id));
+  for (const thumb of [bomb, PNG, 'data:image/jpeg;base64,/9j/4AAQ', 'https://exemplo.com/x.png']) {
+    file.map.thumb = thumb;
+    const imported = await store.importMap(JSON.stringify(file));
+    const rec = await store.get(imported);
+    assert.equal(rec.thumb, null, thumb.slice(0, 30));
+    assert.equal((await store.list()).find((e) => e.id === imported).thumb, null);
+    assert.equal(rec.survey.scans.length, file.map.survey.scans.length, 'o mapa em si entra normalmente');
+  }
+});
+
+test('setThumb: troca só a miniatura, sem mexer na data do mapa, e recusa o que não é imagem embutida', async () => {
+  const clock = fakeClock();
+  const store = await memory({ now: clock.now });
+  const id = await store.put(sampleRecord({ thumb: null }));
+  const before = await store.get(id);
+  assert.equal(before.thumb, null);
+  clock.advance(60_000);
+  assert.equal(await store.setThumb(id, PNG), true);
+  const after = await store.get(id);
+  assert.equal(after.thumb, PNG);
+  assert.equal(after.updatedAt, before.updatedAt, 'a miniatura não conta como mudança no mapa');
+  assert.equal((await store.list())[0].thumb, PNG);
+  for (const bad of ['javascript:alert(1)', 'https://exemplo.com/x.png', 'data:image/svg+xml;base64,AAAA', null, 7, `data:image/png;base64,${'A'.repeat(500_000)}`]) {
+    assert.equal(await store.setThumb(id, bad), false);
+  }
+  assert.equal((await store.get(id)).thumb, PNG);
+  assert.equal(await store.setThumb('mnaoexiste', PNG), false);
+});
+
+test('arquivo: tetos contra arquivos feitos para travar o app (redes demais, lugares marcados demais)', async () => {
+  const { MAX_IMPORT_APS, MAX_IMPORT_SPOTS, parseMapFile } = await import('../app/js/mapping/storage.js');
+  const wrap = (survey) => JSON.stringify({ format: MAP_FILE_FORMAT, version: MAP_FILE_VERSION, exportedAt: Date.now(), map: { name: 'x', survey } });
+  const id = (n) => `02:00:${((n >> 16) & 255).toString(16).padStart(2, '0')}:${((n >> 8) & 255).toString(16).padStart(2, '0')}:${(n & 255).toString(16).padStart(2, '0')}:01`;
+  // cada leitura é um BSSID diferente: `scans` x `per` redes
+  const flood = (scans, per) => ({
+    version: 1,
+    aps: {},
+    scans: Array.from({ length: scans }, (_, s) => ({ t: s * 3, floor: 0, still: false, spot: null, readings: Array.from({ length: per }, (_, i) => ({ id: id(s * per + i), rssi: -50 - (i % 40), freq: 2412 })) })),
+  });
+  const store = await memory();
+
+  // no teto: entra; acima dele: recusado com uma frase clara, e nada é gravado
+  const atLimit = parseMapFile(wrap(flood(MAX_IMPORT_APS / 100, 100)));
+  assert.equal(Object.keys(atLimit.survey.aps).length, MAX_IMPORT_APS);
+  await rejects(store.importMap(wrap(flood(MAX_IMPORT_APS / 100 + 1, 100))), 'invalid', /redes demais/);
+  // o arquivo do ataque medido na revisão: 80 varreduras x 390 redes diferentes (31.200), 1,6 MB
+  await rejects(store.importMap(wrap(flood(80, 390))), 'invalid', /redes demais/);
+
+  // lugares marcados: cada varredura um lugar com nome
+  const spots = (n) => ({
+    version: 1,
+    aps: { [id(1)]: { ssid: 'Casa', freq: 2437 } },
+    scans: Array.from({ length: n }, (_, i) => ({ t: i * 3, floor: 0, still: true, spot: i, label: `Lugar ${i}`, readings: [{ id: id(1), rssi: -50, freq: 2437 }] })),
+  });
+  assert.equal(parseMapFile(wrap(spots(MAX_IMPORT_SPOTS))).stats.spots, MAX_IMPORT_SPOTS);
+  await rejects(store.importMap(wrap(spots(MAX_IMPORT_SPOTS + 1))), 'invalid', /lugares marcados demais/);
+  await rejects(store.importMap(wrap(spots(4000))), 'invalid', /lugares marcados demais/);
+  assert.deepEqual(await store.list(), []);
 });

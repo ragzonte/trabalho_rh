@@ -580,6 +580,17 @@
   padding-top: var(--sp-6); padding-bottom: var(--sp-6);
 }
 
+/* --- "mostrar mais": a lista desenha um número limitado de linhas por vez --- */
+
+.net-more__text {
+  margin: 0 4px var(--sp-2);
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ------------------------------------------------------------------------ */
 /* 2. Minigráfico                                                            */
 /* ------------------------------------------------------------------------ */

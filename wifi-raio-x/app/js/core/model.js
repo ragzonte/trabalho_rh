@@ -913,8 +913,11 @@ function groupItems(items) {
 // groupBySsid: as "redes" como o usuário as enxerga
 // ---------------------------------------------------------------------------
 
-/** Família de segurança: o mesmo nome com outra família é outra rede (é assim que o Android separa). */
-function securityFamily(security) {
+/**
+ * Família de segurança: o mesmo nome com outra família é outra rede (é assim que o Android separa).
+ * @returns {'open'|'owe'|'psk'|'eap'|'wep'|'other'|'unknown'}
+ */
+export function securityFamily(security) {
   const s = isObj(security) ? security : {};
   if (s.known === false || !Array.isArray(s.protocols)) return 'unknown';
   if (s.enterprise) return 'eap';

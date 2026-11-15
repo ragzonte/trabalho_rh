@@ -773,7 +773,14 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     return out;
   }
 
-  /** Quanto o sinal dos rádios mais fortes variou ao longo do levantamento (dB), ou null. */
+  /**
+   * Quanto o sinal variou ao longo do levantamento (dB), ou null: a maior variação (percentil 90 -
+   * percentil 10) entre os DOIS rádios mais fortes ouvidos com frequência. Quem anda pela casa faz
+   * o sinal do roteador mais próximo subir e descer 10 dB ou mais; parado, justamente os rádios
+   * fortes são os mais estáveis (os fracos, perto do piso de detecção, oscilam sozinhos, e por isso
+   * ficam fora da conta). A mediana dos seis mais fortes, usada antes, acusava "parado" numa casa
+   * com o roteador perto e os vizinhos distantes, cujo sinal quase não muda de um cômodo para outro.
+   */
   function spread() {
     if (cache.version === version && 'spread' in cache) return cache.spread;
     const perAp = new Map();
@@ -793,7 +800,7 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
       rows.push({ mid: quantile(list, 0.5), range: quantile(list, 0.9) - quantile(list, 0.1) });
     }
     rows.sort((a, b) => b.mid - a.mid);
-    const value = rows.length ? median(rows.slice(0, 6).map((r) => r.range)) : null;
+    const value = rows.length ? Math.max(...rows.slice(0, 2).map((r) => r.range)) : null;
     if (cache.version !== version) cache = { version };
     cache.spread = value;
     return value;

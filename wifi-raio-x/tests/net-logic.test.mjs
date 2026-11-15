@@ -535,3 +535,15 @@ test('histórico do teste de velocidade: valida, ordena e limita', () => {
   assert.equal(addSpeedResult(history, { ok: false }).length, SPEED_HISTORY_MAX, 'resultado inválido não entra');
   assert.deepEqual(addSpeedResult(null, rec(7)).map((r) => r.ts), [7]);
 });
+
+test('histórico do teste de velocidade: os testes da demonstração têm lista própria', async () => {
+  const { speedHistoryKey, SPEED_HISTORY_KEY, SPEED_HISTORY_DEMO_KEY } = await import('../app/js/ui/tools/net-logic.js');
+  assert.equal(SPEED_HISTORY_KEY, 'speed.history');
+  assert.equal(SPEED_HISTORY_DEMO_KEY, 'speed.history.demo');
+  assert.notEqual(SPEED_HISTORY_KEY, SPEED_HISTORY_DEMO_KEY);
+  // só o simulador escreve na lista da demonstração
+  assert.equal(speedHistoryKey('sim'), SPEED_HISTORY_DEMO_KEY);
+  assert.equal(speedHistoryKey('native'), SPEED_HISTORY_KEY);
+  // sem saber quem mediu, nunca cai na lista da demonstração por acaso (nem o contrário por um valor estranho)
+  for (const odd of [null, undefined, '', 'SIM', 'demo', 0, {}]) assert.equal(speedHistoryKey(odd), SPEED_HISTORY_KEY);
+});

@@ -223,9 +223,13 @@ function prepare(survey, solution, opts, tune) {
   const ownDevices = new Set();
   for (const b of bssids) if (isOwnBssid(b.id) || (b.ssid && nets[b.net].explicit)) ownDevices.add(b.device);
   for (const n of nets) n.own = n.explicit;
+  // os aparelhos de cada rede, juntados numa passada só (filtrar a lista inteira de BSSIDs para
+  // cada rede custa o quadrado: com milhares de redes de um arquivo hostil, segundos de tela parada)
+  const devsOfNet = nets.map(() => []);
+  for (const b of bssids) devsOfNet[b.net].push(b.device);
   nets.forEach((n, ni) => {
     if (n.own) return;
-    const devs = bssids.filter((b) => b.net === ni).map((b) => b.device);
+    const devs = devsOfNet[ni];
     if (devs.length && devs.every((d) => ownDevices.has(d))) n.own = true;
   });
 
@@ -1759,12 +1763,38 @@ function buildAps(ctx, grid, floors, centre) {
     devices.get(b.device).push(b);
   }
   const bIndex = ctx.bssidIndex;
+  // Onde cada aparelho foi ouvido: [ponto, sinal mais forte entre os rádios dele, ponto, sinal...],
+  // em ordem de ponto, montado numa passada só pelas leituras. (Varrer todas as leituras de novo
+  // para cada aparelho custa aparelhos x leituras: com dezenas de milhares de BSSIDs de um arquivo
+  // hostil, ou de uma enxurrada de redes falsas durante o levantamento, a tela parava por segundos.)
+  const slotOf = new Int32Array(bssids.length);
+  let slots = 0;
+  for (const list of devices.values()) {
+    for (const b of list) slotOf[bIndex.get(b.id)] = slots;
+    slots++;
+  }
+  const heardAt = Array.from({ length: slots }, () => []);
+  const lastPoint = new Int32Array(slots).fill(-1);
+  for (let k = 0; k < path.length; k++) {
+    const r = fresh[k];
+    for (let j = 0; j < r.length; j += 2) {
+      const d = slotOf[r[j]];
+      const at = heardAt[d];
+      if (lastPoint[d] === k) {
+        if (r[j + 1] > at[at.length - 1]) at[at.length - 1] = r[j + 1];
+      } else {
+        lastPoint[d] = k;
+        at.push(k, r[j + 1]);
+      }
+    }
+  }
   const aps = [];
+  let slot = -1;
   for (const [device, list] of devices) {
+    slot++;
     const sorted = list.slice().sort((p, q) => q.best - p.best || (p.id < q.id ? -1 : 1));
     const own = ownDevices.has(device);
     const named = sorted.find((b) => b.ssid && ctx.nets[b.net].explicit) || sorted.find((b) => b.ssid);
-    const ids = new Set(list.map((b) => bIndex.get(b.id)));
 
     // Posição: média das estimativas dos rádios do aparelho, pesada pela confiança.
     let wx = 0;
@@ -1790,11 +1820,10 @@ function buildAps(ctx, grid, floors, centre) {
     // Sinal por andar: em qual deles o aparelho chega mais forte (média das 3 melhores leituras).
     const top = new Map();
     const strongest = [];
-    for (let k = 0; k < path.length; k++) {
-      const r = fresh[k];
-      let v = -Infinity;
-      for (let j = 0; j < r.length; j += 2) if (ids.has(r[j]) && r[j + 1] > v) v = r[j + 1];
-      if (v === -Infinity) continue;
+    const at = heardAt[slot];
+    for (let t = 0; t < at.length; t += 2) {
+      const k = at[t];
+      const v = at[t + 1];
       if (!top.has(path[k].floor)) top.set(path[k].floor, []);
       top.get(path[k].floor).push(v);
       strongest.push([v, k]);
@@ -1902,7 +1931,9 @@ function signalSwing(ctx) {
   }
   if (!rows.length) return null;
   rows.sort((p, q) => q.mid - p.mid);
-  return median(rows.slice(0, 6).map((r) => r.range));
+  // a maior variação entre os dois rádios mais fortes: quem anda faz o roteador mais próximo variar
+  // 10 dB ou mais; parado, os rádios fortes são justamente os mais estáveis
+  return Math.max(...rows.slice(0, 2).map((r) => r.range));
 }
 
 // Calibração do solucionador (solver.js): o erro mediano esperado de um ponto é 0,7 + 0,8 x discordância
@@ -1920,6 +1951,8 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
   const veryStrong = aps.filter((a) => a.bestRssi >= -55).length;
   const often = devicesHeardOften(ctx);
   const swing = signalSwing(ctx);
+  const ownCount = aps.filter((a) => a.own).length;
+  const wide = ownCount >= WIDE_PLACE_APS;
   const confs = path.map((p) => p.conf);
   const flat = P > 0 && Math.max(...confs) - Math.min(...confs) < 1e-6;
   const collapsed = ctx.collapsed;
@@ -1990,7 +2023,11 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     } else if (plain > 0) notes.push('Num dos andares há menos de dois lugares com nome: ali o mapa não separa os ambientes.');
     if (usable && !veryStrong && strong >= 3) notes.push('Nenhum roteador chega forte aqui: o sinal fraco deixa o mapa menos nítido.');
     if (usable && floors.length > 1) notes.push('Mais de um andar é o caso mais difícil só com o Wi-Fi: espere mais lugares fora do cômodo certo do que numa casa térrea.');
-    if (usable && perFloor > BIG_PLACE_M2) notes.push('Lugar grande: só com o Wi-Fi o mapa costuma sair bem menor que o real (em simulação, um escritório de 280 m² sai com 60 a 70% do tamanho). Vale medir uma distância em “Ajustar a escala”.');
+    if (usable && wide) {
+      notes.push(
+        `Lugar grande (a sua rede sai de ${ownCount} pontos de acesso): em ambientes amplos o mapa costuma sair bem menor que o real — em simulação, um escritório de 280 m² sai com 60 a 70% do tamanho. Vale medir uma distância em “Ajustar a escala”.`,
+      );
+    }
   }
   // Nível: o erro esperado comparado com o que se consegue num lugar deste tamanho (num
   // escritório grande, 2,5 m de erro é um bom levantamento; numa kitnet, não).
@@ -2001,9 +2038,9 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     // leituras caem no cômodo certo num sobrado, contra 4 em 5 ou mais nas casas de um andar). E
     // tamanho incerto também não: com confiança de escala abaixo de 0,5 metade dos mapas da bancada
     // erra o tamanho em mais de 25% (é o caso dos lugares grandes, que saem encolhidos).
-    // Lugar grande idem: todos os motores do solucionador o encolhem (o escritório de 280 m² da
-    // bancada sai com 0,72 do tamanho; conduzido pelo app, com 0,6) e a área desenhada fica pela metade.
-    if (P >= 40 && excess <= LEVEL_GOOD && err <= 3.5 && floors.length === 1 && scaleConf >= 0.5 && perFloor <= BIG_PLACE_M2) level = 'boa';
+    // Lugar amplo idem (veja `wide`): todos os motores do solucionador o encolhem e a área desenhada
+    // fica pela metade.
+    if (P >= 40 && excess <= LEVEL_GOOD && err <= 3.5 && floors.length === 1 && scaleConf >= 0.5 && !wide) level = 'boa';
     else if (P >= 15 && excess <= LEVEL_FAIR && err <= 5) level = 'razoavel';
   }
   return {
@@ -2022,8 +2059,15 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
 /** Erro esperado / erro típico do tamanho do lugar: até aqui o levantamento é 'boa'; até o segundo, 'razoavel'. */
 const LEVEL_GOOD = 1.25;
 const LEVEL_FAIR = 1.9;
-/** Área desenhada por andar (m²) acima da qual o lugar é "grande": o mapa sai encolhido e nunca é 'boa'. */
-const BIG_PLACE_M2 = 100;
+/**
+ * Rede "da casa" saindo de tantos aparelhos ou mais = lugar amplo (escritório, galpão, casa muito
+ * grande): ninguém instala três pontos de acesso num apartamento. É o único indício do tamanho real
+ * que não depende da escala do próprio mapa — e é justamente nesses lugares que o mapa sai
+ * encolhido (o escritório de 280 m² da bancada, com 5 pontos de acesso, sai com 0,72 do tamanho;
+ * conduzido pelo app, com 0,6). A área desenhada não serve de indício: casas grandes sorteadas, de
+ * 100 a 140 m², saem do tamanho certo.
+ */
+const WIDE_PLACE_APS = 3;
 
 // ---------------------------------------------------------------------------
 // buildMap

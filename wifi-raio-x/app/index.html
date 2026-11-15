@@ -2,7 +2,8 @@
 <html lang="pt-BR">
   <head>
     <meta charset="utf-8" />
-    <!-- Nada sai do aparelho: só o teste de velocidade fala com a Cloudflare, e só quando o usuário pede. -->
+    <!-- A página não fala com ninguém de fora: o que usa a internet (teste de velocidade e de latência,
+         só quando o usuário pede) é feito pelo lado nativo do app, não por esta página. -->
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://speed.cloudflare.com; worker-src 'self' blob:; object-src 'none'; base-uri 'none'"

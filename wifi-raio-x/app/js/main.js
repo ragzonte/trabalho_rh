@@ -150,9 +150,13 @@ function reconnect() {
   if (reconnecting) return reconnecting;
   reconnecting = (async () => {
     scanLoop.stop();
-    // saindo do celular de verdade: ele para de mandar o sinal a cada segundo (a ponte já descarta
-    // os eventos dele enquanto o simulador responde; isto só poupa o trabalho)
-    if (bridge.kind() === 'native') bridge.unwatchRssi().catch(() => {});
+    // saindo do celular de verdade: ele para de mandar o sinal a cada segundo e encerra o que
+    // estiver medindo (teste de velocidade, ping, busca de aparelhos). Nada continua às escondidas
+    // atrás da demonstração, nem gastando dados; a ponte já descarta os eventos dele dali em diante.
+    if (bridge.kind() === 'native') {
+      bridge.unwatchRssi().catch(() => {});
+      for (const op of ['speed', 'ping', 'lan']) bridge.cancel(op).catch(() => {});
+    }
     store.resetScanData();
     try {
       await connect();

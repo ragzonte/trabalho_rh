@@ -1008,13 +1008,28 @@ test('qualidade: notas concretas sobre o que limita o mapa', () => {
   assert.match(stuckQ.notes[0], /O sinal quase não mudou.*Ande por todos os cômodos/);
   assert.equal(stuckQ.level, 'fraca');
 
-  // Levantamento farto: nível bom, sem aviso de falta de dados.
-  const { survey, solution } = bigSurvey();
+  // Levantamento farto numa casa de tamanho comum (8 x 6 m): nível bom, sem aviso de falta de dados.
+  const homeAps = [{ id: 'own:24', ssid: 'Casa', device: 'r1', x: 2, y: 2, p0: -37 }, { id: 'own:5', ssid: 'Casa', device: 'r1', x: 2, y: 2, p0: -40, freq: 5220 }, { id: 'vz:1', ssid: 'Ao lado', x: 9, y: 3, p0: -40 }, ...NEIGHBOURS];
+  const { survey, solution } = synth({ points: serpentine(0.6, 0.6, 7.4, 5.4, 6, 0.55), aps: homeAps, noise: 1.5, seed: 11 });
   const good = buildMap(survey, solution, { own: ['own:24'] });
   assert.equal(good.quality.level, 'boa');
   assert.equal(good.quality.usable, true);
   assert.ok(good.quality.expectedErrorM >= 0.5 && good.quality.expectedErrorM <= 3, `erro esperado ${good.quality.expectedErrorM}`);
-  assert.doesNotMatch(good.quality.notes.join(' | '), /Poucas leituras|Só um roteador|Só dois roteadores|Leituras lentas|quase não mudou/);
+  assert.doesNotMatch(good.quality.notes.join(' | '), /Poucas leituras|Só um roteador|Só dois roteadores|Leituras lentas|quase não mudou|Lugar grande/);
+  // Casa grande com um roteador só (126 m²): o tamanho do desenho, sozinho, não rebaixa nada.
+  const big = bigSurvey();
+  const bigQ = buildMap(big.survey, big.solution, { own: ['own:24'] }).quality;
+  assert.ok(bigQ.areaM2 > 100, `área ${bigQ.areaM2}`);
+  assert.equal(bigQ.level, 'boa');
+  assert.doesNotMatch(bigQ.notes.join(' | '), /Lugar grande/);
+  // Rede que sai de três pontos de acesso ou mais = lugar amplo (escritório): o mapa costuma sair
+  // encolhido, nunca é 'boa', e a nota diz o que fazer.
+  const wideAps = [0, 1, 2].map((k) => ({ id: `corp:${k}`, ssid: 'Empresa', device: `ap${k}`, x: 2 + 4.5 * k, y: 2 + 2.5 * (k % 2), p0: -38 }));
+  const wide = synth({ points: serpentine(0.6, 0.6, 13.4, 9.4, 10, 0.55).slice(0, 230), aps: [...wideAps, ...NEIGHBOURS], noise: 1.5, seed: 11 });
+  const wideQ = buildMap(wide.survey, wide.solution, { own: ['corp:0'] }).quality;
+  assert.equal(wideQ.usable, true);
+  assert.equal(wideQ.level, 'razoavel');
+  assert.match(wideQ.notes.join(' | '), /Lugar grande \(a sua rede sai de 3 pontos de acesso\).*Ajustar a escala/);
   // A confiança do solucionador pesa: a mesma caminhada com confiança baixa nos pontos.
   const shaky = structuredClone(solution);
   shaky.points.forEach((p, i) => (p.conf = i % 3 ? 0.15 : 0.3));
@@ -1141,4 +1156,46 @@ test('transformada de distância, contorno e corte de linhas', () => {
     [0, 0, 1.5, 0],
     [2, 0.5, 2, 2],
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// Custo com muitos BSSIDs (arquivo hostil ou enxurrada de redes falsas no levantamento)
+// ---------------------------------------------------------------------------
+
+test('buildMap: o custo cresce em linha com o número de BSSIDs diferentes, não com o quadrado', async () => {
+  const { buildMap: build } = await import('../app/js/mapping/mapmodel.js');
+  const hx = (n) => (n & 255).toString(16).padStart(2, '0');
+  // cada leitura é de um BSSID que nunca se repete: `scans` x `per` aparelhos diferentes
+  const flood = (scans, per) => {
+    const list = [];
+    const points = [];
+    for (let s = 0; s < scans; s++) {
+      const readings = [];
+      for (let i = 0; i < per; i++) readings.push({ id: `02:${hx(s >> 8)}:${hx(s)}:00:${hx(i >> 8)}:${hx(i)}`, rssi: -40 - ((i + s) % 50), freq: 2412 });
+      list.push({ t: s * 3, floor: 0, still: false, spot: null, readings });
+      points.push({ x: (s % 10) * 0.8, y: Math.floor(s / 10) * 0.8, z: 1, conf: 0.8 });
+    }
+    return [{ version: 1, scans: list, aps: {}, track: [], rtt: [], knownDistances: [] }, { points, aps: {}, scaleConf: 0.5 }];
+  };
+  const timeOf = (scans, per) => {
+    const [survey, solution] = flood(scans, per);
+    let best = Infinity;
+    let model = null;
+    for (let round = 0; round < 2; round++) {
+      const t0 = performance.now();
+      model = build(survey, solution, { own: [] });
+      best = Math.min(best, performance.now() - t0);
+    }
+    return { ms: best, model };
+  };
+  timeOf(4, 50); // aquece
+  const small = timeOf(40, 150); // 6.000 aparelhos
+  const big = timeOf(40, 600); // 24.000 aparelhos: 4 vezes mais
+  assert.equal(small.model.aps.length, 6000);
+  assert.equal(big.model.aps.length, 24000);
+  // em linha seriam ~4x; os dois laços que eram quadráticos davam mais de 12x (e 15 s com 31.000)
+  assert.ok(big.ms < Math.max(small.ms, 20) * 9, `4x mais aparelhos custaram ${(big.ms / small.ms).toFixed(1)}x (${Math.round(small.ms)} ms -> ${Math.round(big.ms)} ms)`);
+  // cada aparelho ficou onde foi ouvido (um ponto só): a conta invertida dá o mesmo resultado
+  const first = big.model.aps.find((a) => a.id === '02:00:00:00:00:00');
+  assert.ok(first && Math.abs(first.x) < 1e-9 && Math.abs(first.y) < 1e-9);
 });

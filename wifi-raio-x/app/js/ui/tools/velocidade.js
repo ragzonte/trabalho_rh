@@ -5,19 +5,21 @@
 // upload, os quatro números finais, quanto de dados o teste usou, de onde o servidor respondeu
 // e a comparação com o que o Wi-Fi aguenta neste ponto ("o limite é o Wi-Fi ou o plano?").
 //
-// É a única função do app que usa a internet, então a tela diz isso com todas as letras antes
-// do primeiro teste, junto com o gasto de dados de cada modo, e oferece o teste leve.
+// O teste fala com servidores na internet (o app só faz isso quando o usuário pede: aqui e no
+// teste de latência), então a tela diz com quem fala, com todas as letras, antes do primeiro
+// teste, junto com o gasto de dados de cada modo, e oferece o teste leve.
 //
 // Os últimos resultados ficam no aparelho (prefs "wrx.speed.history"); o modo escolhido também
-// ("wrx.speed.mode"). Sair da tela cancela o teste (bridge.cancel('speed')).
+// ("wrx.speed.mode"). Os testes do modo demonstração são simulados e ficam numa lista só deles
+// ("wrx.speed.history.demo"): nunca aparecem como resultado do Wi-Fi de verdade.
+// Sair da tela cancela o teste (bridge.cancel('speed')).
 
 import { h, patch, sheet, toast, confirmDialog, fmtNum, fmtMbps, fmtMs, fmtClock, THIN, NO_VALUE } from '../dom.js';
 import { icon } from '../icons.js';
 import { button, segmented, banner, sectionHeader, kvList, meter, badge, ssidLabel, spinner } from '../components.js';
 import { createGauge } from '../charts/gauge.js';
-import { speedVerdict, wifiVsInternet, gaugeMax, estimateTestBytes, LIGHT_MAX_BYTES, formatBytes, serverCity, sanitizeSpeedHistory, addSpeedResult } from './net-logic.js';
+import { speedVerdict, wifiVsInternet, gaugeMax, estimateTestBytes, LIGHT_MAX_BYTES, formatBytes, serverCity, sanitizeSpeedHistory, addSpeedResult, speedHistoryKey } from './net-logic.js';
 
-const KEY_HISTORY = 'speed.history';
 const KEY_MODE = 'speed.mode';
 const PHASES = ['latency', 'download', 'upload'];
 const PHASE_TEXT = {
@@ -66,7 +68,10 @@ function finishRun(run, summary, prefs) {
     if (isNum(s.jitterMs)) run.jitterMs = s.jitterMs;
     run.server = typeof s.server === 'string' ? s.server : null;
     const link = median(run.linkSamples);
-    const history = addSpeedResult(prefs.get(KEY_HISTORY, []), {
+    // a lista é a de quem mediu (run.backend, anotado na partida), não a do modo de agora: o teste
+    // pode terminar com o app já do outro lado
+    const key = speedHistoryKey(run.backend);
+    const history = addSpeedResult(prefs.get(key, []), {
       ts: run.endedAt,
       mode: run.mode,
       downMbps: run.downMbps,
@@ -79,7 +84,7 @@ function finishRun(run, summary, prefs) {
       ssid: run.ssid,
       linkMbps: link,
     });
-    prefs.set(KEY_HISTORY, history);
+    prefs.set(key, history);
     run.record = history.find((r) => r.ts === Math.round(run.endedAt)) || null;
   } else {
     const cancelled = s.error === 'cancelled' || !!run.cancelRequested;
@@ -164,8 +169,8 @@ function aboutContent({ compact = false } = {}) {
       'globe',
       'Fala com a Cloudflare.',
       compact
-        ? 'Baixa e envia dados sem conteúdo para os servidores de medição dela (speed.cloudflare.com). É a única função do app que usa a internet, e só quando você pede.'
-        : 'O teste baixa e envia dados sem conteúdo para os servidores de medição da Cloudflare (speed.cloudflare.com). É a única função do app que usa a internet, e só quando você pede. A Cloudflare vê o endereço IP da sua internet, como qualquer site que você visita; nada do que o app analisa (nomes de redes, aparelhos) é enviado.',
+        ? 'Baixa e envia dados sem conteúdo para os servidores de medição dela (speed.cloudflare.com), e só quando você pede.'
+        : 'O teste baixa e envia dados sem conteúdo para os servidores de medição da Cloudflare (speed.cloudflare.com), e só quando você pede. A Cloudflare vê o endereço IP da sua internet, como qualquer site que você visita; nada do que o app analisa (nomes de redes, aparelhos) é enviado.',
     ),
     item('wifi', 'Só pelo Wi-Fi.', 'Nunca usa os dados móveis do chip.'),
     item(
@@ -210,7 +215,9 @@ export async function mount(root, ctx) {
   let gaugeKey = ''; // fase/escala em uso no mostrador
   let rangeMax = 0;
   let picked = null; // resultado antigo escolhido na lista
-  let history = sanitizeSpeedHistory(prefs.get(KEY_HISTORY, []));
+  /** A lista de resultados do modo em que o app está (celular de verdade ou demonstração). */
+  const historyKey = () => speedHistoryKey(store.get().backend);
+  let history = sanitizeSpeedHistory(prefs.get(historyKey(), []));
   let mode = prefs.get(KEY_MODE, null) === 'light' ? 'light' : prefs.get(KEY_MODE, null) === 'full' ? 'full' : null;
   const cleanups = [];
 
@@ -230,7 +237,9 @@ export async function mount(root, ctx) {
   const metered = () => !!(connection() && connection().metered === true);
   /** O modo que vale agora: o escolhido, ou "leve" por padrão num Wi-Fi com franquia. */
   const currentMode = () => mode || (metered() ? 'light' : 'full');
-  const running = () => !!session.run && session.run.state === 'running';
+  /** O teste desta sessão, se foi feito por quem está respondendo agora (o do outro modo não aparece aqui). */
+  const sessionRun = () => (session.run && session.run.backend === store.get().backend ? session.run : null);
+  const running = () => !!sessionRun() && sessionRun().state === 'running';
 
   // --- teste ------------------------------------------------------------------------------
 
@@ -252,6 +261,7 @@ export async function mount(root, ctx) {
     if (!conn) return;
     const run = {
       id: ++session.seq,
+      backend: store.get().backend, // quem mede: o celular de verdade ou o simulador
       mode: currentMode(),
       state: 'running',
       phase: 'latency',
@@ -287,7 +297,7 @@ export async function mount(root, ctx) {
   }
 
   function cancel(by) {
-    const run = session.run;
+    const run = sessionRun();
     if (!run || run.state !== 'running' || run.cancelRequested) return;
     run.cancelRequested = by;
     bridge.cancel('speed').catch(() => {});
@@ -295,7 +305,7 @@ export async function mount(root, ctx) {
   }
 
   function onSpeed(ev) {
-    const run = session.run;
+    const run = sessionRun();
     if (!run || run.state !== 'running' || !ev || !PHASES.includes(ev.phase)) return;
     // as fases só andam para a frente (um evento atrasado da fase anterior é ignorado)
     if (PHASES.indexOf(ev.phase) < PHASES.indexOf(run.phase)) return;
@@ -320,7 +330,7 @@ export async function mount(root, ctx) {
 
   /** O que está na tela agora: um teste rodando, um resultado, um teste que parou, ou nada ainda. */
   function current() {
-    const run = session.run;
+    const run = sessionRun();
     if (run && run.state === 'running') return { kind: 'running', run };
     if (picked) return { kind: 'record', record: picked, old: !history[0] || picked.ts !== history[0].ts };
     if (run && run.state === 'done' && run.record) return { kind: 'record', record: run.record, fresh: true };
@@ -552,8 +562,8 @@ export async function mount(root, ctx) {
                 if (!ok || !alive) return;
                 history = [];
                 picked = null;
-                prefs.remove(KEY_HISTORY);
-                if (session.run && session.run.state === 'done') session.run = null;
+                prefs.remove(historyKey());
+                if (sessionRun() && sessionRun().state === 'done') session.run = null;
                 drawNow();
               },
             },
@@ -699,7 +709,7 @@ export async function mount(root, ctx) {
   // --- ligações ---------------------------------------------------------------------------
 
   const onSessionChange = () => {
-    history = sanitizeSpeedHistory(prefs.get(KEY_HISTORY, []));
+    history = sanitizeSpeedHistory(prefs.get(historyKey(), []));
     schedule();
   };
   session.onChange = onSessionChange;
@@ -710,7 +720,10 @@ export async function mount(root, ctx) {
   cleanups.push(store.subscribe((s) => s.connection, schedule));
   cleanups.push(
     store.subscribe((s) => s.backend, () => {
+      // o app trocou de modo com a tela aberta: a lista e o resultado na tela passam a ser os do modo novo
       syncBackend();
+      picked = null;
+      history = sanitizeSpeedHistory(prefs.get(historyKey(), []));
       schedule();
     }),
   );

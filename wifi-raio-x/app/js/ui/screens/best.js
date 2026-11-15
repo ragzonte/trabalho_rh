@@ -362,7 +362,7 @@ export function analyse(state) {
     // o laço de buscas percebe o limite do Android mesmo quando o celular não o informa
     const throttled = (isObj(state.status) && state.status.throttled === true) || (isObj(state.loop) && state.loop.throttled === true);
     const status = isObj(state.status) ? { ...state.status, throttled: throttled ? true : state.status.throttled } : throttled ? { throttled: true } : undefined;
-    insights = buildInsights({ aps, connection: state.connection || undefined, device: state.info || undefined, status });
+    insights = buildInsights({ aps, connection: state.connection || undefined, device: state.info || undefined, status, clone: state.clone || undefined });
   } catch {
     insights = [];
   }

@@ -142,7 +142,7 @@ test('abrir direto numa rota: cada aba, uma sub-tela e rotas inválidas', T, asy
     assert.equal(await page.locator('.topbar__back').isVisible(), true);
     assert.equal(await page.locator('.topbar__settings').isHidden(), true);
     assert.equal(await page.getAttribute('.bottomnav__item[aria-current="page"]', 'data-tab'), 'ferramentas');
-    await page.waitForSelector('text=Nada sai do seu celular.');
+    await page.waitForSelector('text=O que o app encontra fica no seu celular.');
     assert.match(await page.textContent('.view'), /speed\.cloudflare\.com/);
     assert.match(await page.textContent('.view'), /Versão \d+\.\d+/);
     assert.match(await page.textContent('.view'), /three\.js/);

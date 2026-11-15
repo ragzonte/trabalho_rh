@@ -580,3 +580,42 @@ test('as chaves das linhas são estáveis de uma varredura para a outra', () => 
   assert.ok(gone.ageMs >= 10_000);
   assert.equal(rows.filter((r) => r.stale).length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// A janela da lista (teto de linhas desenhadas)
+// ---------------------------------------------------------------------------
+
+test('windowRows: lista curta passa inteira; lista longa mostra as primeiras e diz quantas ficaram de fora', async () => {
+  const { windowRows, ROW_PAGE, ROW_PINNED_MAX } = await import('../app/js/ui/networks-logic.js');
+  const row = (i, more = {}) => ({ key: `a:${i}`, connected: false, favorite: false, own: false, ...more });
+  const short = Array.from({ length: ROW_PAGE }, (_, i) => row(i));
+  assert.equal(windowRows(short).rows, short, 'até o teto, a mesma lista (sem cópia)');
+  assert.equal(windowRows(short).hidden, 0);
+
+  const long = Array.from({ length: 1000 }, (_, i) => row(i));
+  const win = windowRows(long);
+  assert.equal(win.rows.length, ROW_PAGE);
+  assert.equal(win.hidden, 1000 - ROW_PAGE);
+  assert.deepEqual(win.rows.map((r) => r.key), long.slice(0, ROW_PAGE).map((r) => r.key), 'na ordem em que vieram (já ordenadas)');
+  // "mostrar mais" aumenta o limite
+  assert.equal(windowRows(long, ROW_PAGE * 3).rows.length, ROW_PAGE * 3);
+  assert.equal(windowRows(long, 5000).hidden, 0);
+  // limite sem sentido cai no padrão
+  for (const odd of [0, -3, NaN, 'x', null]) assert.equal(windowRows(long, odd).rows.length, ROW_PAGE);
+  assert.deepEqual(windowRows(null), { rows: [], hidden: 0 });
+
+  // a conectada e as "minhas" nunca ficam de fora, mesmo além da janela
+  long[500] = row(500, { connected: true });
+  long[700] = row(700, { favorite: true });
+  long[900] = row(900, { own: true });
+  const pinned = windowRows(long);
+  assert.deepEqual(pinned.rows.slice(ROW_PAGE).map((r) => r.key), ['a:500', 'a:700', 'a:900']);
+  assert.equal(pinned.hidden, 1000 - ROW_PAGE - 3);
+  // ...com teto: "minha" é decidido pelo nome, e um nome qualquer um copia às centenas
+  const copies = Array.from({ length: 1000 }, (_, i) => row(i, { favorite: i >= ROW_PAGE }));
+  copies[999] = row(999, { connected: true, favorite: true });
+  const capped = windowRows(copies);
+  assert.equal(capped.rows.length, ROW_PAGE + ROW_PINNED_MAX);
+  assert.equal(capped.rows[ROW_PAGE].key, 'a:999', 'a conectada entra primeiro');
+  assert.equal(capped.hidden, 1000 - ROW_PAGE - ROW_PINNED_MAX);
+});

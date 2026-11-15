@@ -365,6 +365,16 @@ function isPrivateIpv4(host) {
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
 }
 
+/**
+ * A medição escolhida sai da rede da casa? (o roteador e os endereços da rede local não saem;
+ * um endereço digitado só conta depois de reconhecido como válido)
+ */
+function leavesHome(preset, parsed) {
+  if (preset.kind === 'gateway') return false;
+  if (preset.id !== 'custom') return true;
+  return !!(parsed && parsed.host) && !isPrivateIpv4(parsed.host);
+}
+
 function openHelp() {
   sheet({
     title: 'Entenda os números',
@@ -381,6 +391,7 @@ function openHelp() {
         h('li', null, 'Até o roteador: o normal é ficar abaixo de 10', THIN, 'ms. Se já demora ali, o problema é o Wi-Fi, não a internet.'),
       ),
       h('p', null, 'O teste envia pacotes bem pequenos, um a cada 0,2 segundo: não gasta quase nada de dados. Alguns destinos ignoram o ping comum; nesses casos o app mede o tempo de abrir uma conexão, que é um pouco maior.'),
+      h('p', null, h('strong', null, 'Com quem o teste fala. '), 'Só com o destino escolhido. Até o roteador, nada sai da sua casa. Até a internet, o destino (Cloudflare em 1.1.1.1, Google em 8.8.8.8 ou o site medido) vê o endereço IP da sua internet, como qualquer site que você visita; para um nome de site, o celular antes pergunta o endereço ao servidor de nomes (DNS) da rede.'),
     ),
   });
 }
@@ -642,6 +653,10 @@ export async function mount(root, ctx) {
             current.host ? h('span.tb-note__addr.num', null, current.host, current.who ? ` · ${current.who}` : '') : null,
             h('span', null, current.note),
           ),
+      // medir até a internet é falar com alguém de fora: a tela diz com quem e o que ele fica sabendo
+      leavesHome(current, parsed)
+        ? h('p.tb-note.tb-note--out', { key: 'out' }, 'Os pacotes vão até esse destino pela internet: ele vê o endereço IP da sua internet, como qualquer site que você visita. Nada do que o app analisa é enviado.')
+        : null,
       !connected && !list[0].host
         ? h('p.tb-note.tb-note--warn', { key: 'offline' }, icon('wifi-off', { size: 16 }), 'Sem Wi-Fi conectado. A medição da internet usa a conexão que o celular tiver.')
         : null,

@@ -1329,3 +1329,27 @@ describe('cenários completos', () => {
     assert.ok(elapsed < 3000, `levou ${elapsed.toFixed(0)} ms`);
   });
 });
+
+describe('"minha rede" e a segurança (decisão do app nos Ap)', () => {
+  test('rankNetworks: rede aberta com o nome de uma rede protegida do usuário não sai como "minha"', () => {
+    const WPA2 = '[WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]';
+    const list = normalizeScan({
+      ts: TS,
+      aps: [
+        makeAp('a4:2b:b0:11:22:31', 'CasaSilva', -60, 5180, { capabilities: WPA2 }),
+        makeAp('02:13:37:00:00:01', 'CasaSilva', -40, 2412, { capabilities: '[ESS]' }),
+        makeAp('50:c7:bf:aa:bb:01', 'Vizinho', -70, 2462, { capabilities: WPA2 }),
+      ],
+    });
+    // sem a marca do app nos Ap (uso do núcleo sozinho), vale o nome, como sempre
+    const plain = rankNetworks(list, { device: PHONE, favorites: ['CasaSilva'] });
+    assert.deepEqual(plain.filter((r) => r.ssid === 'CasaSilva').map((r) => r.favorite), [true, true]);
+    // com a marca (é o que o store faz), a gêmea aberta fica de fora
+    for (const ap of list) ap.favorite = ap.ssid === 'CasaSilva' && ap.security.open !== true;
+    const flagged = rankNetworks(list, { device: PHONE, favorites: ['CasaSilva'] });
+    const byOpen = (open) => flagged.find((r) => r.ssid === 'CasaSilva' && (r.security.open === true) === open);
+    assert.equal(byOpen(false).favorite, true);
+    assert.equal(byOpen(true).favorite, false);
+    assert.equal(flagged.find((r) => r.ssid === 'Vizinho').favorite, false);
+  });
+});

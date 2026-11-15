@@ -14,6 +14,11 @@
 // pedaço do estado de que ela depende muda; a rolagem, o foco, o texto da busca e um painel
 // aberto nunca são tocados por uma varredura que chega.
 //
+// A lista tem teto: desenha as primeiras ROW_PAGE linhas da ordem escolhida (mais a conectada e as
+// "minhas") e oferece "Mostrar mais". Num lugar com centenas de redes, ou com alguém por perto
+// transmitindo redes falsas aos montes, refazer uma linha por rede a cada varredura travava a
+// tela por segundos. E a linha que não mudou nem é refeita (rowSignature).
+//
 // O modo e a ordem escolhidos ficam guardados (prefs 'redes'); filtros e busca valem até fechar o app.
 // A lógica de filtrar, ordenar e agrupar está em ui/networks-logic.js (pura, com testes).
 
@@ -22,9 +27,9 @@ import { icon } from '../icons.js';
 import { signalBars, badge, bandBadge, securityBadge, standardBadge, chip, segmented, button, iconButton, emptyState, skeletonList, sectionHeader, throttleTip } from '../components.js';
 import { signalLevel } from '../../core/signal.js';
 import { buildInsights } from '../../core/insights.js';
-import { sparkline } from '../charts/sparkline.js';
+import { sparkline, sparklineGeometry } from '../charts/sparkline.js';
 import { ensureNetworksCss, openApDetail, openNetworkDetail } from '../ap-detail.js';
-import { sanitizeControls, toggleFilter, selectRows, summarize, connectionView, channelsText, countText, cleanName } from '../networks-logic.js';
+import { sanitizeControls, toggleFilter, selectRows, windowRows, ROW_PAGE, summarize, connectionView, channelsText, countText, cleanName } from '../networks-logic.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 
@@ -53,6 +58,8 @@ let memo = null;
 // ---------------------------------------------------------------------------
 // Linha da lista
 // ---------------------------------------------------------------------------
+
+const ROW_SPARK = { width: 64, height: 16 };
 
 function nameLabel(row) {
   if (row.hidden) return h('span.ssid.ssid--hidden', null, '(rede oculta)');
@@ -114,9 +121,44 @@ function networkRow(row, env) {
       { class: ['net-row__trail', `sig-${level.key}`] },
       h('span.net-row__dbm', null, fmtDbm(row.rssi)),
       h('span.net-row__word', null, level.label),
-      sparkline(env.history(row.best.bssid), { now: env.now, width: 64, height: 16 }),
+      sparkline(env.history(row.best.bssid), { now: env.now, ...ROW_SPARK }),
     ),
   );
+}
+
+/**
+ * Tudo o que networkRow() mostra de uma linha, num texto só: enquanto ele não muda, a linha que
+ * já está na tela fica como está (patchList nem chama networkRow).
+ * ATENÇÃO: o que networkRow passar a ler de `row` (ou de `env`) tem de entrar aqui também.
+ */
+function rowSignature(row, env) {
+  const sec = row.security;
+  const std = row.standardAp;
+  const spark = sparklineGeometry(env.history(row.best.bssid), { now: env.now, ...ROW_SPARK });
+  return JSON.stringify([
+    row.kind,
+    row.lead.bssid,
+    row.best.bssid,
+    row.hidden,
+    row.name,
+    row.names.length,
+    row.rssi,
+    row.count,
+    row.deviceCount,
+    row.connected,
+    row.favorite,
+    row.bands,
+    row.channels,
+    row.channel,
+    row.widthMHz,
+    row.stale,
+    row.stale && isNum(row.ageMs) ? fmtAgo(row.ageMs) : '',
+    sec ? [sec.known, sec.level, sec.label] : null,
+    std ? [std.standard, std.gen, std.genSource, std.standardLabel, std.band, std.raw && std.raw.wifiStandard] : null,
+    row.vendor,
+    spark.d,
+    spark.dot,
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +316,7 @@ export async function mount(root, ctx) {
   let searchOpen = controls.query !== '';
   let insights = { key: null, list: [] };
   let lastRows = { rows: [], total: 0, filtered: false };
+  let limit = ROW_PAGE; // quantas linhas a lista desenha ("Mostrar mais" aumenta; mudar o filtro ou a ordem volta ao começo)
 
   // regiões fixas: cada uma é atualizada por conta própria
   const el = {
@@ -284,11 +327,12 @@ export async function mount(root, ctx) {
     caption: h('div.net-caption'),
     list: h('div.card.card--flush.list.net-list'),
     empty: h('div.net-region'),
+    more: h('div.net-region'),
     loading: h('div.net-region.stack'),
   };
   // marca invisível logo acima dos controles: quando ela sai da tela, eles estão presos no topo
   const sentinel = h('div.net-sentinel', { 'aria-hidden': 'true' });
-  render(root, el.conn, el.tip, el.loading, el.summary, sentinel, el.controls, el.caption, el.list, el.empty);
+  render(root, el.conn, el.tip, el.loading, el.summary, sentinel, el.controls, el.caption, el.list, el.empty, el.more);
   if (typeof IntersectionObserver === 'function') {
     const io = new IntersectionObserver(
       ([entry]) => {
@@ -309,6 +353,7 @@ export async function mount(root, ctx) {
   function setControls(next, { persist = true } = {}) {
     controls = sanitizeControls(next);
     memo = controls;
+    limit = ROW_PAGE;
     if (persist) ctx.prefs.set(PREFS_KEY, { mode: controls.mode, sort: controls.sort });
     drawControls();
     drawList();
@@ -357,7 +402,7 @@ export async function mount(root, ctx) {
     if (insights.key !== key || insights.aps !== state.aps) {
       let list = [];
       try {
-        list = buildInsights({ aps: state.aps, connection: conn || undefined, device: state.info || undefined, status: state.status || undefined });
+        list = buildInsights({ aps: state.aps, connection: conn || undefined, device: state.info || undefined, status: state.status || undefined, clone: state.clone || undefined });
       } catch {
         list = [];
       }
@@ -429,6 +474,7 @@ export async function mount(root, ctx) {
               onInput: (ev) => {
                 controls = sanitizeControls({ ...controls, query: ev.currentTarget.value });
                 memo = controls;
+                limit = ROW_PAGE;
                 drawList();
               },
               onKeyDown: (ev) => {
@@ -488,6 +534,33 @@ export async function mount(root, ctx) {
     );
   }
 
+  /** Com mais linhas do que a lista desenha de uma vez: quantas ficaram de fora e o botão para ver mais. */
+  function drawMore(shown) {
+    if (!shown.hidden) {
+      patch(el.more);
+      return;
+    }
+    const [one, many] = MODE_UNITS[controls.mode] || MODE_UNITS.networks;
+    const step = Math.min(ROW_PAGE, shown.hidden);
+    patch(
+      el.more,
+      h(
+        'div.net-more',
+        { key: 'more' },
+        h('p.net-more__text', { role: 'status' }, `Mostrando ${fmtNum(shown.rows.length)} de ${plural(lastRows.rows.length, one, many)}. ${controls.sort === 'signal' ? 'As de sinal mais forte vêm primeiro.' : 'Use a busca ou os filtros para achar uma rede.'}`),
+        button(`Mostrar mais ${step}`, {
+          variant: 'secondary',
+          block: true,
+          icon: 'chevron-down',
+          onClick: () => {
+            limit += ROW_PAGE;
+            drawList();
+          },
+        }),
+      ),
+    );
+  }
+
   function emptyFor() {
     const q = controls.query.trim();
     if (q) {
@@ -523,6 +596,7 @@ export async function mount(root, ctx) {
       patchList(el.list, [], { key: (row) => row.key, create: () => null });
       patch(el.summary);
       patch(el.caption);
+      patch(el.more);
     }
     if (loading) {
       if (!el.loading.firstChild) render(el.loading, sectionHeader('Procurando redes por perto…'), skeletonList(6));
@@ -546,11 +620,14 @@ export async function mount(root, ctx) {
     }
 
     lastRows = selectRows(state, controls);
+    // filtro, busca e ordem valem para a lista inteira; o teto só decide quantas linhas são desenhadas
+    const shown = windowRows(lastRows.rows, limit);
     const env = { history: (bssid) => store.history(bssid), now: state.scan.ts || Date.now(), onOpen: openRow };
-    patchList(el.list, lastRows.rows, { key: (row) => row.key, create: (row) => networkRow(row, env) });
+    patchList(el.list, shown.rows, { key: (row) => row.key, create: (row) => networkRow(row, env), signature: (row) => rowSignature(row, env) });
     el.list.hidden = lastRows.rows.length === 0;
     el.list.setAttribute('aria-label', `Lista: ${lastRows.rows.length} de ${lastRows.total}`);
     patch(el.empty, lastRows.rows.length === 0 ? emptyFor() : null);
+    drawMore(shown);
     patch(el.summary, summaryStrip(summarize(state)));
     drawCaption();
   }

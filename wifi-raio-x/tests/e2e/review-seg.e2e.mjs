@@ -12,7 +12,7 @@
 // console.error, alert(), violação de CSP ou recurso que não carregou.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startEnv, withApp, goto, settle, waitForScreen } from './helpers.mjs';
+import { startEnv, withApp, goto, settle, waitForScreen, waitForScans, horizontalOverflow } from './helpers.mjs';
 import { installFakeNative, REAL_BSSID, REAL_NEIGHBOUR_BSSID } from './fake-native.mjs';
 
 const T = { timeout: 180_000 };
@@ -195,5 +195,214 @@ test('o que o Android manda por conta própria não entra na casa virtual', T, a
     assert.notEqual(state.rssi, -31);
     assert.doesNotMatch(await viewText(page), /MinhaCasaReal/);
     assert.equal(await hash(page), '#/redes');
+  });
+});
+
+test('sair do levantamento direto para outra aba guarda mesmo as primeiras leituras', T, async () => {
+  // (o armazenamento era fechado antes de a gravação do rascunho terminar: com menos de 3 leituras
+  // o aviso dizia "o rascunho ficou guardado" e nada ficava)
+  await withApp(env, { route: '/mapa', params: { speed: 10 } }, async ({ page }) => {
+    await startSurvey(page, 1);
+    const shown = await page.evaluate(() => Number(document.querySelector('.msv-count__value').textContent));
+    await goto(page, '/redes');
+    await page.waitForFunction(() => [...document.querySelectorAll('.toast__text')].some((el) => /rascunho ficou guardado/.test(el.textContent)));
+    await page.waitForTimeout(500);
+    const draft = await storedDraft(page);
+    assert.ok(draft, 'o rascunho foi gravado de verdade');
+    assert.ok(draft.scans >= 1 && draft.scans >= shown, `as leituras da tela (${shown}) estão no rascunho (${draft.scans})`);
+    assert.equal(draft.demo, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// security-02: teste de velocidade simulado não vira resultado do Wi-Fi de verdade
+// ---------------------------------------------------------------------------
+
+const stored = (page, key) => page.evaluate((k) => JSON.parse(localStorage.getItem(`wrx.${k}`)), key);
+const speedDone = (page, timeout = 60_000) => page.waitForFunction(() => /Resultado/.test(document.querySelector('.tb-hero .tb-run__title')?.textContent || ''), null, { timeout });
+
+test('teste de velocidade da demonstração fica fora do histórico do Wi-Fi de verdade (e vice-versa)', T, async () => {
+  await withPhone({ route: '/redes' }, async ({ page }) => {
+    // 1) na demonstração: roda um teste (simulado) inteiro
+    await setDemo(page, true);
+    await page.evaluate(async () => (await import('./js/sim/backend.js')).currentSim().setSpeed(20));
+    await goto(page, '/ferramentas/velocidade');
+    await page.waitForSelector('.tb-intro');
+    await page.click('.tb-intro .btn--primary');
+    await speedDone(page);
+    assert.equal(await page.evaluate(() => window.__fake.speedCalls), 0, 'quem mediu foi o simulador');
+    assert.equal((await stored(page, 'speed.history.demo')).length, 1, 'o resultado simulado vai para a lista da demonstração');
+    assert.equal(await stored(page, 'speed.history'), null, 'e não para a dos testes de verdade');
+
+    // 2) de volta ao Wi-Fi de verdade: a tela abre como quem nunca testou
+    await setDemo(page, false);
+    await goto(page, '/ferramentas/velocidade');
+    await page.waitForSelector('.tb-intro');
+    assert.equal(await page.locator('.tb-hero').count(), 0, 'nada de "último teste" que nunca aconteceu');
+    assert.doesNotMatch(await viewText(page), /Último teste|pela última medição/);
+
+    // 3) nem depois de fechar e abrir o app
+    await page.reload();
+    await page.waitForSelector('html[data-ready]');
+    await waitForScreen(page, '/ferramentas/velocidade');
+    assert.equal(await backend(page), 'native');
+    await page.waitForSelector('.tb-intro');
+    assert.equal(await page.locator('.tb-hero').count(), 0);
+
+    // 4) um teste de verdade vai para a lista de verdade e aparece só nela
+    await page.click('.tb-intro .btn--primary');
+    await speedDone(page);
+    assert.equal(await page.evaluate(() => window.__fake.speedCalls), 1);
+    const real = await stored(page, 'speed.history');
+    assert.equal(real.length, 1);
+    assert.equal(real[0].downMbps, 93.5);
+    assert.equal((await stored(page, 'speed.history.demo')).length, 1, 'a lista da demonstração não mudou');
+    assert.notEqual((await stored(page, 'speed.history.demo'))[0].downMbps, 93.5);
+
+    // 5) com a tela aberta, trocar de modo troca a lista na hora (o "celular" pede a demonstração pelo bloqueio de permissão)
+    await page.evaluate(() => window.__wrx.app.store.updateSettings({ demo: true }));
+    await page.waitForFunction(() => window.__wrx.app.store.get().backend === 'sim');
+    await page.waitForFunction(() => /Último teste/.test(document.querySelector('.tb-hero .tb-run__title')?.textContent || ''));
+    assert.doesNotMatch((await page.textContent('[data-tile="download"] .stat__value')).replace(/\s/g, ''), /^93,5/, 'na demonstração aparece o teste simulado, não o de verdade');
+    await setDemo(page, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// security-06: centenas de redes falsas por busca não travam a tela Redes
+// ---------------------------------------------------------------------------
+
+test('lista com centenas de redes falsas: desenha uma janela com "mostrar mais" e não refaz o que não mudou', T, async () => {
+  await withApp(env, { params: { speed: 1, walk: 'still' }, route: '/redes' }, async ({ page }) => {
+    await waitForScans(page, 1);
+    const mine = await page.evaluate(() => window.__wrx.app.store.connectedAp().ssid);
+
+    // um "spammer" de beacons: 500 redes falsas, mais fortes que tudo, em cada busca que chega
+    await page.evaluate(() => {
+      const { store } = window.__wrx.app;
+      const original = store.ingestScan;
+      const hx = (n) => (n & 255).toString(16).padStart(2, '0');
+      let round = 0;
+      store.ingestScan = function (ev) {
+        round += 1;
+        const fakes = [];
+        for (let i = 0; i < 500; i++) {
+          fakes.push({ bssid: `02:13:${hx(round)}:00:${hx(i >> 8)}:${hx(i)}`, ssid: `FREE ${round}-${i}`, level: -20 - (i % 15), frequency: i % 2 ? 5180 : 2412, channelWidth: 0, centerFreq0: 0, centerFreq1: 0, capabilities: '[ESS]', ageMs: 20, wifiStandard: 4 });
+        }
+        return original.call(store, { ...ev, aps: (ev.aps || []).concat(fakes) });
+      };
+    });
+    const seq = await page.evaluate(() => window.__wrx.app.store.get().scan.seq);
+    await page.evaluate(() => window.__wrx.app.scanLoop.scanNow());
+    await page.waitForFunction((n) => window.__wrx.app.store.get().scan.seq > n && window.__wrx.app.store.get().aps.length > 500, seq);
+    await settle(page);
+
+    // a lista inteira continua valendo para a contagem, o filtro e a busca...
+    const total = Number((await page.getAttribute('.net-list', 'aria-label')).match(/de (\d+)/)[1]);
+    assert.ok(total > 500, `a lista tem ${total} redes`);
+    // ...mas só uma janela dela é desenhada
+    const rows = await page.locator('.net-list > .net-row').count();
+    assert.ok(rows >= 80 && rows <= 92, `${rows} linhas desenhadas (o teto é 80, mais a conectada e as minhas)`);
+    assert.equal(await page.locator('.net-list > .net-row--connected').count(), 1, 'a rede em uso aparece mesmo sendo mais fraca que 500 falsas');
+    const more = (await page.textContent('.net-more')).replace(/\s+/g, ' ');
+    assert.match(more, new RegExp(`Mostrando ${rows} de ${total}\\sredes`));
+    assert.match(more, /Mostrar mais 80/);
+    assert.ok((await page.evaluate(() => document.querySelectorAll('.view *').length)) < 6000, 'a página não cresce com o número de redes');
+    assert.deepEqual(await horizontalOverflow(page), []);
+
+    // redesenhar sem dado novo (a busca aberta, mesmo texto) não refaz nenhuma linha
+    await page.click('[aria-label="Buscar na lista de redes"]');
+    await page.waitForSelector('.net-search__input');
+    const created = await page.evaluate(() => {
+      let n = 0;
+      const make = document.createElement;
+      const makeNS = document.createElementNS;
+      document.createElement = function (...args) {
+        n += 1;
+        return make.apply(this, args);
+      };
+      document.createElementNS = function (...args) {
+        n += 1;
+        return makeNS.apply(this, args);
+      };
+      try {
+        document.querySelector('.net-search__input').dispatchEvent(new Event('input', { bubbles: true }));
+      } finally {
+        document.createElement = make;
+        document.createElementNS = makeNS;
+      }
+      return n;
+    });
+    assert.ok(created < 300, `redesenho sem mudança criou ${created} elementos (refazer ${rows} linhas criaria milhares)`);
+    assert.equal(await page.locator('.net-list > .net-row').count(), rows);
+
+    // a busca olha a lista inteira, não só a janela
+    await page.fill('.net-search__input', 'FREE 1-499');
+    await page.waitForFunction(() => document.querySelectorAll('.net-list > .net-row').length === 1);
+    assert.match(await page.textContent('.net-list > .net-row .ssid'), /FREE 1-499/);
+    assert.equal(await page.locator('.net-more').count(), 0);
+    await page.fill('.net-search__input', mine);
+    await page.waitForFunction(() => document.querySelectorAll('.net-list > .net-row--connected').length === 1);
+    await page.fill('.net-search__input', '');
+    await page.waitForFunction((n) => document.querySelectorAll('.net-list > .net-row').length === n, rows);
+
+    // "mostrar mais" acrescenta outra página; trocar a ordem volta ao começo
+    await page.locator('.net-more .btn').click();
+    await page.waitForFunction((n) => document.querySelectorAll('.net-list > .net-row').length >= n + 60, rows);
+    assert.match(await page.textContent('.net-more'), /Mostrando 1\d\d de/);
+
+    // a busca seguinte troca as 500 falsas por outras 500: a tela continua do mesmo tamanho
+    const seq2 = await page.evaluate(() => window.__wrx.app.store.get().scan.seq);
+    await page.evaluate(() => window.__wrx.app.scanLoop.scanNow());
+    await page.waitForFunction((n) => window.__wrx.app.store.get().scan.seq > n, seq2, { timeout: 30_000 });
+    await settle(page);
+    assert.ok((await page.locator('.net-list > .net-row').count()) <= 172);
+    assert.equal(await page.locator('.net-list > .net-row--connected').count(), 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// security-05: o que o app diz sobre a internet é exato
+// ---------------------------------------------------------------------------
+
+test('privacidade: nenhuma tela diz que o teste de velocidade é a única coisa que usa a internet', T, async () => {
+  await withApp(env, { params: { speed: 10 }, route: '/ferramentas/sobre' }, async ({ page }) => {
+    const about = await viewText(page);
+    assert.match(about, /só usa a internet quando você pede/);
+    assert.match(about, /teste de velocidade/);
+    assert.match(about, /teste de latência/);
+    assert.match(about, /1\.1\.1\.1/);
+    assert.match(about, /8\.8\.8\.8/);
+    assert.doesNotMatch(about, /única função/);
+
+    // Latência: medir até a internet avisa com quem fala; até o roteador não sai de casa
+    await goto(page, '/ferramentas/ping');
+    await page.waitForSelector('.tb-setup');
+    const chip = (label) => page.locator('.tb-setup .chip', { hasText: new RegExp(`^${label}$`) });
+    await chip('Roteador').click();
+    assert.equal(await page.locator('.tb-note--out').count(), 0, 'até o roteador nada sai da rede da casa');
+    for (const label of ['Internet', 'Internet 2', 'Site']) {
+      await chip(label).click();
+      await page.waitForSelector('.tb-note--out');
+      assert.match(await page.textContent('.tb-note--out'), /vê o endereço IP da sua internet/, label);
+    }
+    await chip('Outro').click();
+    assert.equal(await page.locator('.tb-note--out').count(), 0, 'sem destino digitado não há o que avisar');
+    await page.fill('.tb-host input', '192.168.0.7');
+    await settle(page);
+    assert.equal(await page.locator('.tb-note--out').count(), 0, 'endereço da rede local');
+    await page.fill('.tb-host input', 'exemplo.com.br');
+    await page.waitForSelector('.tb-note--out');
+
+    // Velocidade e Dispositivos: sem a afirmação falsa
+    await goto(page, '/ferramentas/velocidade');
+    await page.waitForSelector('.tb-intro');
+    const speed = await viewText(page);
+    assert.match(speed, /speed\.cloudflare\.com/);
+    assert.doesNotMatch(speed, /única função/);
+    await goto(page, '/ferramentas/dispositivos');
+    await settle(page);
+    const lan = await page.evaluate(() => document.body.innerText);
+    assert.doesNotMatch(lan, /Nada sai do celular|conversa só com/);
   });
 });

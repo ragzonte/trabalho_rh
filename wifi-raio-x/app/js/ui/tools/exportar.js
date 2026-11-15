@@ -131,7 +131,7 @@ export async function mount(root, ctx) {
     let insights = null;
     if (insightsMod && typeof insightsMod.buildInsights === 'function') {
       try {
-        const list = insightsMod.buildInsights({ aps, connection: connection || undefined, device: info || undefined, status: status || undefined });
+        const list = insightsMod.buildInsights({ aps, connection: connection || undefined, device: info || undefined, status: status || undefined, clone: state.clone || undefined });
         insights = (Array.isArray(list) ? list : []).map((i) => ({ severity: i.severity, title: i.title, text: i.text }));
       } catch {
         insights = null;

@@ -379,11 +379,14 @@ export function patch(root, ...children) {
  *   patchList(ul, aps, { key: (ap) => ap.bssid, create: (ap) => linha(ap), update: (el, ap) => {...} })
  * Cria só as linhas novas, chama `update` nas que já existiam (sem `update`, a linha é refeita
  * com `create` e atualizada no lugar), reordena e remove as que saíram.
+ * Com `signature` (um texto com tudo o que a linha mostra), a linha que já existe e não mudou
+ * nem é refeita: numa lista longa, é a diferença entre redesenhar tudo e só o que mudou.
  * @template T
  * @param {Element} parent
  * @param {T[]} items
  * @param {{key:(item:T, index:number) => string, create:(item:T, index:number) => Element,
- *          update?:(el:Element, item:T, index:number) => void}} spec
+ *          update?:(el:Element, item:T, index:number) => void,
+ *          signature?:(item:T, index:number) => string}} spec
  */
 export function patchList(parent, items, spec) {
   const old = parent.__rows || new Map();
@@ -393,13 +396,17 @@ export function patchList(parent, items, spec) {
     items.forEach((item, index) => {
       const key = String(spec.key(item, index));
       if (rows.has(key)) return; // chave repetida: fica só a primeira
+      const signature = spec.signature ? String(spec.signature(item, index)) : null;
       let el = old.get(key);
       if (el && el.parentNode === parent) {
-        if (spec.update) spec.update(el, item, index);
+        if (signature !== null && el.__sig === signature) {
+          // nada do que a linha mostra mudou: fica como está
+        } else if (spec.update) spec.update(el, item, index);
         else morphNode(el, spec.create(item, index));
       } else {
         el = spec.create(item, index);
       }
+      if (signature !== null) el.__sig = signature;
       rows.set(key, el);
       if (el === cursor) cursor = cursor.nextSibling;
       else moveNode(parent, el, cursor);

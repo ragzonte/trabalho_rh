@@ -29,7 +29,7 @@ export function gateFor(status) {
   return 'unknown';
 }
 
-const PRIVACY = 'O app não usa GPS, não descobre onde você está e não envia nada para fora do celular.';
+const PRIVACY = 'O app não usa GPS, não descobre onde você está e não envia o que encontra para fora do celular.';
 
 function gateContent(kind, { bridge, refresh }) {
   const request = async () => {

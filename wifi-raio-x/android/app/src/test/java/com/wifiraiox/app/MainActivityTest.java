@@ -534,11 +534,43 @@ public class MainActivityTest extends AllSdks {
         MainActivity activity = launch();
         activity.onBackPressed();
         assertFalse(activity.isFinishing());
-        activity.onBackPressed(); // a página não respondeu ao primeiro
+        // a página não respondeu ao primeiro e o tempo passou: está travada, o usuário não fica preso
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(MainActivity.BACK_PATIENCE_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+        activity.onBackPressed();
         assertTrue(activity.isFinishing());
         // a resposta atrasada não faz mais nada
         shadowOf(activity.webView()).getLastEvaluatedJavascriptCallback().onReceiveValue("true");
         assertTrue(activity.isFinishing());
+    }
+
+    /**
+     * Visto num aparelho lento: com um painel aberto a página demorava a responder ao "voltar", e um
+     * segundo toque logo em seguida fechava o app inteiro em vez de fechar o painel.
+     */
+    @Test
+    public void aRepeatedBackOnABusyPageDoesNotThrowTheUserOutOfTheApp() {
+        MainActivity activity = launch();
+        ShadowWebView web = shadowOf(activity.webView());
+        activity.onBackPressed();
+        android.webkit.ValueCallback<String> first = web.getLastEvaluatedJavascriptCallback();
+
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(MainActivity.BACK_PATIENCE_MS - 1, java.util.concurrent.TimeUnit.MILLISECONDS);
+        activity.onBackPressed(); // toque repetido, a página ainda está ocupada
+        activity.onBackPressed();
+        assertFalse("ainda dentro do prazo: não sai", activity.isFinishing());
+        assertSame("e não pergunta de novo: a resposta do primeiro toque resolve", first, web.getLastEvaluatedJavascriptCallback());
+
+        first.onReceiveValue("true"); // a página fechou o painel
+        assertFalse(activity.isFinishing());
+
+        // o "voltar" seguinte é um pedido novo, com prazo novo
+        activity.onBackPressed();
+        android.webkit.ValueCallback<String> second = web.getLastEvaluatedJavascriptCallback();
+        assertTrue(second != first);
+        activity.onBackPressed();
+        assertFalse(activity.isFinishing());
+        second.onReceiveValue("false");
+        assertTrue("sem nada para fechar, sai", activity.isFinishing());
     }
 
     // ------------------------------------------------------------ morte do renderizador (Android 8+)

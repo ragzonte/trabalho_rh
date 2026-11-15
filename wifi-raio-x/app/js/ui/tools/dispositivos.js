@@ -487,7 +487,7 @@ export async function mount(root, ctx) {
           'div.tb-fact',
           null,
           h('span.tb-fact__icon', null, icon('shield-check', { size: 20 })),
-          h('p', null, h('strong', null, 'Nada sai do celular. '), 'A busca conversa só com os aparelhos da sua rede e o resultado não é enviado a lugar nenhum.'),
+          h('p', null, h('strong', null, 'A lista fica no celular. '), 'A busca conversa com os aparelhos da sua rede e pergunta os nomes deles ao servidor de nomes (DNS) que a rede usa. O resultado não é enviado a lugar nenhum.'),
         ),
       ),
     ];

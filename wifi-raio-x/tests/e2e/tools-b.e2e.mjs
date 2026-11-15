@@ -475,6 +475,8 @@ const tile = (page, key) => page.textContent(`[data-tile="${key}"] .stat__value`
 const speedDone = (page, timeout = 60_000) => page.waitForFunction(() => /Resultado/.test(document.querySelector('.tb-hero .tb-run__title')?.textContent || ''), null, { timeout });
 const speedPhase = (page, word, timeout = 30_000) => page.waitForFunction((w) => (document.querySelector('.tb-hero .tb-caption')?.textContent || '').includes(w), word, { timeout });
 
+// No navegador quem mede é sempre o simulador: os resultados ficam na lista da demonstração
+// ("wrx.speed.history.demo"), nunca na dos testes do celular de verdade ("wrx.speed.history").
 const OLD_TESTS = [
   { ts: Date.now() - 86_400_000, mode: 'full', downMbps: 271.4, upMbps: 138.2, latencyMs: 14.2, jitterMs: 1.4, bytesDown: 268e6, bytesUp: 137e6, server: 'GRU', ssid: 'CasaDaAna', linkMbps: 866 },
   { ts: Date.now() - 3 * 86_400_000, mode: 'light', downMbps: 48.3, upMbps: 22.9, latencyMs: 21.5, jitterMs: 6.1, bytesDown: 18e6, bytesUp: 8.6e6, server: 'GIG', ssid: HOSTILE_SSID, linkMbps: 86.7 },
@@ -487,13 +489,14 @@ test('velocidade: antes do primeiro teste a tela diz com quem fala e quanto gast
     const intro = await text(page, '.tb-intro');
     assert.match(intro, /Cloudflare/);
     assert.match(intro, /speed\.cloudflare\.com/);
-    assert.match(intro, /única função do app que usa a internet/);
+    assert.match(intro, /só quando você pede/);
+    assert.doesNotMatch(intro, /única função/, 'o teste de latência também usa a internet: a tela não afirma o contrário');
     assert.match(intro, /Nunca usa os dados móveis/);
     assert.match(intro, /450\sMB num plano de 300\sMb\/s/);
     assert.match(intro, /Leve: até cerca de 35\sMB/);
     assert.equal(await page.getAttribute('.seg__opt:has-text("Completo")', 'aria-checked'), 'true');
     assert.equal(await page.locator('.gauge').count(), 0, 'sem teste ainda não há mostrador vazio');
-    assert.equal(await stored(page, 'speed.history'), null);
+    assert.equal(await stored(page, 'speed.history.demo'), null);
     assert.equal(await opsPending(page), 0, 'nada começa sem a pessoa pedir');
 
     await page.click('.tb-intro .btn--primary');
@@ -537,7 +540,7 @@ test('velocidade: antes do primeiro teste a tela diz com quem fala e quanto gast
     await shot(page, 'tools-b-velocidade');
 
     // guardado no aparelho
-    const history = await stored(page, 'speed.history');
+    const history = await stored(page, 'speed.history.demo');
     assert.equal(history.length, 1);
     assert.equal(history[0].mode, 'full');
     assert.ok(history[0].downMbps > 1 && history[0].upMbps > 1 && history[0].bytesDown > 1e6);
@@ -569,7 +572,7 @@ test('velocidade: teste leve gasta pouco e a escolha fica guardada', T, async ()
     await page.waitForSelector('.tb-hero');
     assert.match(await text(page, '.tb-hero .tb-run__title'), /Teste leve/);
     await speedDone(page);
-    const [record] = await stored(page, 'speed.history');
+    const [record] = await stored(page, 'speed.history.demo');
     assert.equal(record.mode, 'light');
     assert.ok(record.bytesDown + record.bytesUp < 80e6, `o teste leve usou ${Math.round((record.bytesDown + record.bytesUp) / 1e6)} MB`);
     assert.match(await text(page, '.kv'), /Tipo de teste\s*Leve/);
@@ -589,7 +592,7 @@ test('velocidade: cancelar no meio não guarda resultado; sair da tela cancela o
     await page.click('.tb-hero .btn:has-text("Cancelar")');
     await page.waitForFunction(() => /Teste cancelado/.test(document.querySelector('.tb-hero .tb-run__title')?.textContent || ''));
     assert.equal(await opsPending(page), 0, 'o celular parou o teste');
-    assert.equal(await stored(page, 'speed.history'), null, 'teste cancelado não entra no histórico');
+    assert.equal(await stored(page, 'speed.history.demo'), null, 'teste cancelado não entra no histórico');
     assert.equal(await tile(page, 'download'), '—', 'fase interrompida não vira resultado');
     assert.match(await tile(page, 'latency'), /ms$/, 'a fase que terminou continua valendo');
     assert.match(await text(page, '.banner'), /Resultado incompleto.*o teste usou \d/s);
@@ -602,14 +605,14 @@ test('velocidade: cancelar no meio não guarda resultado; sair da tela cancela o
     await goto(page, '/ferramentas/velocidade');
     await page.waitForSelector('.tb-hero');
     assert.match(await text(page, '.banner'), /O teste parou quando você saiu da tela/);
-    assert.equal(await stored(page, 'speed.history'), null);
+    assert.equal(await stored(page, 'speed.history.demo'), null);
 
     // e um teste inteiro funciona depois disso
     await setSpeed(page, 20);
     await page.click('.seg__opt:has-text("Leve")');
     await page.click('.tb-hero .btn--primary');
     await speedDone(page);
-    assert.equal((await stored(page, 'speed.history')).length, 1);
+    assert.equal((await stored(page, 'speed.history.demo')).length, 1);
   });
 });
 
@@ -626,7 +629,7 @@ test('velocidade: a internet cai no meio do teste', T, async () => {
     await page.waitForFunction(() => window.__wrx.app.store.get().connection?.connected === true, null, { timeout: 20_000 });
     await page.waitForSelector('.banner:has-text("Sem acesso à internet")');
     assert.match(await text(page, '.tb-hero .tb-run__title'), /O teste não terminou/);
-    assert.equal(await stored(page, 'speed.history'), null);
+    assert.equal(await stored(page, 'speed.history.demo'), null);
     // "tentar de novo" roda um teste inteiro
     await page.click('.banner .btn:has-text("Tentar de novo")');
     await speedDone(page);
@@ -634,7 +637,7 @@ test('velocidade: a internet cai no meio do teste', T, async () => {
 });
 
 test('velocidade: histórico guardado (com nome de rede hostil), teste antigo na tela e apagar tudo', T, async () => {
-  await withApp(env, { params: FAST, route: '/ferramentas/velocidade', storage: { 'speed.history': [...OLD_TESTS, { lixo: true }, null] } }, async ({ page }) => {
+  await withApp(env, { params: FAST, route: '/ferramentas/velocidade', storage: { 'speed.history.demo': [...OLD_TESTS, { lixo: true }, null] } }, async ({ page }) => {
     await page.waitForSelector('.tb-hero');
     assert.match(await text(page, '.tb-hero .tb-run__title'), /Último teste/);
     assert.match(await text(page, '.tb-hero .tb-run__state'), /ontem, \d\d:\d\d/);
@@ -667,17 +670,17 @@ test('velocidade: histórico guardado (com nome de rede hostil), teste antigo na
     await page.waitForSelector('.dialog');
     await page.click('.dialog .btn--quiet');
     await page.waitForSelector('.dialog', { state: 'detached' });
-    assert.equal((await stored(page, 'speed.history')).length, 3, 'cancelar a pergunta não apaga nada');
+    assert.equal((await stored(page, 'speed.history.demo')).length, 3, 'cancelar a pergunta não apaga nada');
     await page.click('.section-h .btn:has-text("Apagar")');
     await page.click('.dialog .btn--danger');
     await page.waitForSelector('.tb-intro');
-    assert.equal(await stored(page, 'speed.history'), null);
+    assert.equal(await stored(page, 'speed.history.demo'), null);
     assert.equal(await page.locator('.gauge').count(), 0);
   });
 });
 
 test('velocidade: Wi-Fi com franquia sugere o teste leve; sem Wi-Fi não deixa começar; tema claro e 360 px', T, async () => {
-  await withApp(env, { params: FAST, route: '/ferramentas/velocidade', viewport: 'small', colorScheme: 'light', storage: { 'speed.history': OLD_TESTS } }, async ({ page }) => {
+  await withApp(env, { params: FAST, route: '/ferramentas/velocidade', viewport: 'small', colorScheme: 'light', storage: { 'speed.history.demo': OLD_TESTS } }, async ({ page }) => {
     await page.waitForSelector('.tb-hero .gauge');
     assert.deepEqual(await horizontalOverflow(page), []);
     assert.equal(await page.getAttribute('.seg__opt:has-text("Completo")', 'aria-checked'), 'true');

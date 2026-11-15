@@ -173,3 +173,41 @@ export function ensureFlexGap(doc = globalThis.document, force = false) {
   return true;
 }
 if (typeof document !== 'undefined') ensureFlexGap();
+
+// --- Página congelada pelo WebView (Page Lifecycle) -----------------------------
+// Depois de 5 minutos em segundo plano o WebView congela a página (`freeze`). Quando o usuário volta,
+// ela recebe `resume` já com document.hidden === false, mas o WebView 83 NÃO manda o
+// `visibilitychange` correspondente (medido num Android 11 de verdade). Tudo o que espera esse aviso
+// para voltar a trabalhar (o laço de buscas, o medidor, o desenho do mapa) ficava parado até o app
+// ser escondido e aberto de novo. Aqui o aviso que faltou é mandado: se, logo depois de um `resume`
+// ou `pageshow`, o estado que os ouvintes viram por último não é o de verdade, sai um
+// `visibilitychange`. Onde o WebView avisa direito, nada acontece.
+/**
+ * @param {Document} [doc]
+ * @param {{delayMs?: number, setTimer?: (fn: () => void, ms: number) => any}} [options]
+ * @returns {() => void} desfaz (para os testes)
+ */
+export function installVisibilityRepair(doc = globalThis.document, { delayMs = 250, setTimer = (fn, ms) => setTimeout(fn, ms) } = {}) {
+  if (!doc || typeof doc.addEventListener !== 'function' || typeof Event !== 'function') return () => {};
+  let seen = !!doc.hidden; // o que o último `visibilitychange` mostrou aos ouvintes
+  const onChange = () => {
+    seen = !!doc.hidden;
+  };
+  const repair = () => {
+    setTimer(() => {
+      if (!!doc.hidden === seen) return; // o aviso de verdade chegou (ou nada mudou)
+      seen = !!doc.hidden;
+      doc.dispatchEvent(new Event('visibilitychange'));
+    }, delayMs);
+  };
+  const win = doc.defaultView || null;
+  doc.addEventListener('visibilitychange', onChange, true);
+  doc.addEventListener('resume', repair);
+  if (win && typeof win.addEventListener === 'function') win.addEventListener('pageshow', repair);
+  return () => {
+    doc.removeEventListener('visibilitychange', onChange, true);
+    doc.removeEventListener('resume', repair);
+    if (win && typeof win.removeEventListener === 'function') win.removeEventListener('pageshow', repair);
+  };
+}
+if (typeof document !== 'undefined') installVisibilityRepair();

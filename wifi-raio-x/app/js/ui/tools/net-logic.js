@@ -759,8 +759,23 @@ export function serverCity(code) {
 /** Quantos resultados do teste de velocidade ficam guardados. */
 export const SPEED_HISTORY_MAX = 10;
 
+/** Onde ficam os testes feitos pelo celular de verdade (prefs, sem o "wrx."). */
+export const SPEED_HISTORY_KEY = 'speed.history';
+/** Onde ficam os testes do modo demonstração (simulados): nunca na mesma lista dos de verdade. */
+export const SPEED_HISTORY_DEMO_KEY = 'speed.history.demo';
+
 /**
- * @typedef {Object} SpeedRecord  um teste concluído, como fica guardado em wrx.speed.history
+ * Chave do histórico conforme QUEM mediu: 'sim' (demonstração) tem a lista dela; qualquer outra
+ * coisa é o celular de verdade. Um resultado simulado guardado junto dos de verdade apareceria
+ * depois como "último teste" do usuário e entraria na previsão de gasto de dados.
+ * @param {'native'|'sim'|null|undefined} backend
+ */
+export function speedHistoryKey(backend) {
+  return backend === 'sim' ? SPEED_HISTORY_DEMO_KEY : SPEED_HISTORY_KEY;
+}
+
+/**
+ * @typedef {Object} SpeedRecord  um teste concluído, como fica guardado em wrx.speed.history (ou wrx.speed.history.demo)
  * @property {number} ts          quando terminou (ms desde 1970)
  * @property {'full'|'light'} mode
  * @property {number} downMbps

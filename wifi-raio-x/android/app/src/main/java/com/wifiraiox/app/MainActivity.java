@@ -17,6 +17,7 @@ import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.ConsoleMessage;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -40,6 +41,8 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     /** A interface monta em 1 ou 2 segundos; passado este prazo sem sinal dela, algo a impede de rodar. */
     static final long PAGE_START_MS = 10_000;
     static final long PAGE_RECHECK_MS = 3_000;
+    /** Sem resposta da página ao "voltar" por este tempo, o próximo "voltar" sai do app sem perguntar. */
+    static final long BACK_PATIENCE_MS = 1_500;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     /** Só na thread da interface. null = sem página (WebView ausente, tela encerrada ou renderizador morto). */
@@ -53,6 +56,8 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     /** elapsedRealtime da última vez em que a página foi refeita; -1 = ainda é a primeira. */
     private long pageRebuiltAt = -1;
     private boolean backPending;
+    /** elapsedRealtime de quando a página foi perguntada sobre o "voltar" que está pendente. */
+    private long backAskedAt;
     private long restoreWindowStart = -RESTORE_WINDOW_MS;
     private int restores;
     /** A página atual já mostrou que está rodando (ver checkPageStarted). */
@@ -60,6 +65,8 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     private boolean startProblemShown;
     private AlertDialog startProblem;
     private final Runnable pageStartCheck = this::checkPageStarted;
+    /** O "Escolher arquivo" da página (importar um mapa). */
+    private final FilePicker filePicker = new FilePicker();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -112,6 +119,7 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
         Bridge old = bridge;
         if (old != null) old.onDestroy();
         bridge = null;
+        filePicker.cancel(); // um "escolher arquivo" sem resposta termina aqui, com a página que o pediu
         WebView view = web;
         web = null;
         backPending = false;
@@ -165,6 +173,16 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
                     Log.d(TAG, message.message() + " (" + message.sourceId() + ":" + message.lineNumber() + ")");
                 }
                 return true;
+            }
+
+            /** {@code <input type="file">} da página (importar um mapa): abre o seletor de documentos do Android. */
+            @Override
+            public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                if (webView != web) { // página que já foi descartada
+                    if (callback != null) callback.onReceiveValue(null);
+                    return true;
+                }
+                return filePicker.show(MainActivity.this, callback);
             }
         });
     }
@@ -237,6 +255,12 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     }
 
     @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        filePicker.onResult(requestCode, resultCode, data);
+    }
+
+    @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         Bridge current = bridge;
@@ -245,17 +269,25 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
 
     /**
      * Botão/gesto "voltar": primeiro a página decide (fechar um painel, voltar de tela); só sai do
-     * app quando ela responde que não tratou. Um segundo "voltar" sem resposta da página sai direto.
+     * app quando ela responde que não tratou. Uma página que não responde não prende ninguém: outro
+     * "voltar" depois de BACK_PATIENCE_MS sem resposta sai direto. Antes desse prazo um toque
+     * repetido é só isso (a página está ocupada desenhando, e a resposta do primeiro toque vem):
+     * sair ali jogaria o usuário para fora do app com um painel aberto, como se viu num aparelho lento.
      */
     @Override
     @SuppressWarnings("deprecation") // mirando o Android 14, onBackPressed continua sendo chamado
     public void onBackPressed() {
         final WebView asked = web;
-        if (asked == null || backPending) {
+        if (asked == null) {
             leave();
             return;
         }
+        if (backPending) {
+            if (SystemClock.elapsedRealtime() - backAskedAt >= BACK_PATIENCE_MS) leave();
+            return;
+        }
         backPending = true;
+        backAskedAt = SystemClock.elapsedRealtime();
         try {
             asked.evaluateJavascript(Js.BACK_SCRIPT, value -> {
                 if (!backPending || asked != web) return; // resposta atrasada de uma página que já se foi
@@ -519,5 +551,9 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
 
     AlertDialog startProblemDialog() {
         return startProblem;
+    }
+
+    FilePicker filePicker() {
+        return filePicker;
     }
 }

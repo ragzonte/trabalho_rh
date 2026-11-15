@@ -18,8 +18,9 @@ lugar usando só o sinal do Wi-Fi**.
 - **Modo demonstração** — uma casa virtual com vizinhos, para conhecer o app (e o mapa 3D)
   sem sair do sofá.
 
-Nada sai do celular: o app não tem servidor, cadastro nem anúncios. A única função que usa a
-internet é o teste de velocidade (servidores da Cloudflare), e só quando você pede.
+Nada do que o app analisa sai do celular: ele não tem servidor, cadastro nem anúncios. A internet
+só é usada quando você pede: no teste de velocidade (servidores da Cloudflare) e no teste de
+latência até a internet (o destino que você escolher: Cloudflare 1.1.1.1, Google 8.8.8.8 ou um site).
 
 ---
 

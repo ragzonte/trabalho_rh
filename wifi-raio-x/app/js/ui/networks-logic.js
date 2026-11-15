@@ -4,6 +4,7 @@
 //   sanitizeControls(bruto)            -> controles válidos ({mode, sort, filters, query})
 //   toggleFilter(controles, id)        -> controles com o filtro ligado/desligado
 //   selectRows(estado, controles)      -> { rows, total, filtered }   linhas já filtradas e ordenadas
+//   windowRows(linhas, limite)         -> { rows, hidden }            só as que a lista desenha de uma vez
 //   buildRows(estado, modo, faixas)    -> linhas de um modo (sem filtro de texto nem ordem)
 //   matchesQuery(linha, texto)         -> a busca (nome, BSSID ou fabricante) casa com a linha?
 //   sortRows(linhas, ordem)            -> cópia ordenada
@@ -352,6 +353,45 @@ export function selectRows(state, controls) {
   const total = bands.length ? buildRows(state, c.mode).length : all.length;
   const rows = filtered ? all.filter((row) => matchesFlags(row, flags) && matchesQuery(row, c.query)) : all;
   return { rows: sortRows(rows, c.sort), total, filtered };
+}
+
+/** Quantas linhas a lista desenha de cada vez (o resto entra com "Mostrar mais"). */
+export const ROW_PAGE = 80;
+/** Linhas além da janela que entram assim mesmo (a conectada e as "minhas"): no máximo isto. */
+export const ROW_PINNED_MAX = 12;
+
+/**
+ * A janela da lista: as primeiras `limit` linhas da ordem atual. Desenhar (e refazer a cada
+ * busca) uma linha por rede não tem teto num lugar com centenas de redes, ou quando alguém por
+ * perto transmite redes falsas aos montes; a tela travaria por segundos a cada varredura.
+ * A linha conectada e as redes do usuário nunca ficam de fora: entram depois da janela, na ordem
+ * em que estavam (com um teto próprio, porque "minha" é decidido pelo nome, que qualquer um copia).
+ * Aplique DEPOIS de filtrar e ordenar.
+ * @param {object[]} rows
+ * @param {number} [limit]
+ * @returns {{rows:object[], hidden:number}}  hidden = quantas linhas ficaram de fora
+ */
+export function windowRows(rows, limit = ROW_PAGE) {
+  const list = Array.isArray(rows) ? rows : [];
+  const max = isNum(limit) && limit >= 1 ? Math.floor(limit) : ROW_PAGE;
+  if (list.length <= max) return { rows: list, hidden: 0 };
+  const shown = list.slice(0, max);
+  let pinned = 0;
+  // a conectada primeiro: é a que não pode faltar de jeito nenhum
+  for (let i = max; i < list.length && pinned < ROW_PINNED_MAX; i++) {
+    if (isObj(list[i]) && list[i].connected) {
+      shown.push(list[i]);
+      pinned += 1;
+    }
+  }
+  for (let i = max; i < list.length && pinned < ROW_PINNED_MAX; i++) {
+    const row = list[i];
+    if (isObj(row) && !row.connected && (row.favorite || row.own)) {
+      shown.push(row);
+      pinned += 1;
+    }
+  }
+  return { rows: shown, hidden: list.length - shown.length };
 }
 
 /**

@@ -12,7 +12,7 @@
 //   ctx                        o contexto da tela (main.js)
 //   storage                    mapas salvos e rascunho (mapping/storage.js), com tudo protegido: sem ter onde
 //                              gravar o fluxo continua (o mapa aparece) e salvar explica o problema
-//                                .ready -> Promise · .persistent · list() · get(id) · put(reg) · rename(id, nome)
+//                                .ready -> Promise · .persistent · list() · get(id) · put(reg) · rename(id, nome) · setThumb(id, img)
 //                                remove(id) · exportMap(id) · importMap(texto) · draft.load()/save()/clear()
 //   session                    o que passa de uma parte para a outra sem ir para o disco:
 //                                .start   {ownSsids, extraOwn, pilot}   pedido de levantamento novo
@@ -103,6 +103,16 @@ function createStorage() {
     },
     put: async (record) => (await need()).put(record),
     rename: async (id, name) => (await need()).rename(id, name),
+    /** Guarda a miniatura refeita ao abrir um mapa que não tinha. Nunca lança: false = ficou sem. */
+    async setThumb(id, thumb) {
+      await api.ready;
+      if (!store || typeof store.setThumb !== 'function') return false;
+      try {
+        return (await store.setThumb(id, thumb)) === true;
+      } catch {
+        return false;
+      }
+    },
     exportMap: async (id) => (await need()).exportMap(id),
     importMap: async (text) => (await need()).importMap(text),
     async remove(id) {
@@ -299,7 +309,11 @@ export async function mount(root, ctx) {
         engine.then((e) => e.dispose()).catch(() => {});
         engine = null;
       }
-      env.storage.close();
+      // o levantamento que acabou de ser fechado ainda está gravando o rascunho: o armazenamento só
+      // fecha depois (fechar antes perdia as últimas leituras, com o aviso "o rascunho ficou guardado")
+      Promise.resolve(env.session.saving)
+        .catch(() => {})
+        .then(() => env.storage.close());
     },
   };
 }

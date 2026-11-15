@@ -718,3 +718,150 @@ test('favoritos guardados: sem repetidos, sem lixo, com limite de tamanho', () =
   prefs.saveFavorites(null);
   assert.deepEqual(prefs.loadFavorites(), []);
 });
+
+// ---------------------------------------------------------------------------
+// Revisão de segurança: quem pode se passar pela rede do usuário
+// ---------------------------------------------------------------------------
+
+const OPEN = '[ESS]';
+const CLONE_CONN = { connected: true, ssid: 'CasaSilva', bssid: HOME_5, rssi: -52, frequency: 5220 };
+const mine5 = () => ap(HOME_5, 'CasaSilva', -52, 5220, { channelWidth: 2, centerFreq0: 5210 });
+const clone5 = (extra = {}) => ap(HOME_5, 'Free_WiFi', -40, 2462, { capabilities: OPEN, ...extra });
+
+test('BSSID do roteador clonado com outro nome: vindo junto com o de verdade, vale o de verdade (nas duas ordens)', () => {
+  for (const list of [
+    [clone5(), mine5(), ap(NEIGHBOUR, 'Vizinho', -71, 2462)],
+    [mine5(), clone5(), ap(NEIGHBOUR, 'Vizinho', -71, 2462)],
+    // o clone "mais novo" não ganha a vaga (a regra do núcleo para BSSID repetido é a leitura mais nova)
+    [mine5(), clone5({ ageMs: 0 }), ap(NEIGHBOUR, 'Vizinho', -71, 2462)].map((x, i) => (i === 0 ? { ...x, ageMs: 900 } : x)),
+  ]) {
+    const { store } = setup();
+    store.setConnection(CLONE_CONN);
+    store.ingestScan(scanEvent(list));
+    const cur = store.connectedAp();
+    assert.ok(cur, 'a rede em uso está na lista');
+    assert.equal(cur.ssid, 'CasaSilva');
+    assert.equal(cur.channel, 44);
+    assert.equal(cur.security.open, false);
+    assert.equal(cur.own, true);
+    assert.deepEqual(store.get().aps.map((a) => a.ssid).sort(), ['CasaSilva', 'Vizinho'], 'a entrada clonada não vira uma linha da lista');
+    assert.deepEqual(store.get().clone, { bssid: HOME_5, ssids: ['Free_WiFi'] }, 'mas fica anotada para o diagnóstico');
+  }
+});
+
+test('BSSID do roteador clonado: quando só o clone chega, ele não vira "a rede em uso"', () => {
+  const { store } = setup();
+  store.setConnection(CLONE_CONN);
+  store.ingestScan(scanEvent([clone5(), ap(NEIGHBOUR, 'Vizinho', -71, 2462)]));
+  const state = store.get();
+  assert.equal(store.connectedAp(), null, 'as telas ficam com os dados da conexão');
+  assert.equal(store.apById(HOME_5), null);
+  assert.deepEqual(state.aps.map((a) => a.ssid), ['Vizinho']);
+  assert.equal(state.own.has(HOME_5) && state.aps.some((a) => a.own), false, 'nada do clone é "da casa"');
+  assert.equal(state.networks.some((n) => n.ssid === 'Free_WiFi'), false);
+  assert.deepEqual(state.clone, { bssid: HOME_5, ssids: ['Free_WiFi'] });
+
+  // a busca seguinte traz o roteador de verdade: tudo volta ao normal e o aviso some
+  store.ingestScan(scanEvent([{ ...mine5(), ageMs: 0 }, ap(NEIGHBOUR, 'Vizinho', -71, 2462)], { ts: T0 + 10_000 }));
+  assert.equal(store.connectedAp().ssid, 'CasaSilva');
+  assert.equal(store.get().clone, null);
+});
+
+test('BSSID conectado: sem como comparar o nome, a entrada vale (rede oculta, conexão sem nome, nome que o Android não decodificou)', async () => {
+  const { sameNetworkName } = await import('../app/js/store.js');
+  // rede oculta: a varredura não traz o nome, a conexão traz
+  let s = setup().store;
+  s.setConnection(CLONE_CONN);
+  s.ingestScan(scanEvent([ap(HOME_5, '', -52, 5220)]));
+  assert.equal(s.connectedAp().hidden, true);
+  assert.equal(s.get().clone, null);
+  // conexão sem nome (o Android não informou) ou com o nome entre aspas
+  for (const ssid of [undefined, '', '<unknown ssid>', '"CasaSilva"']) {
+    s = setup().store;
+    s.setConnection({ ...CLONE_CONN, ssid });
+    s.ingestScan(scanEvent([mine5()]));
+    assert.equal(s.connectedAp().ssid, 'CasaSilva', `conexão com ssid ${JSON.stringify(ssid)}`);
+  }
+  // "Família" anunciado em Latin-1 por um roteador antigo: na varredura o Android põe U+FFFD no lugar do acento
+  assert.equal(sameNetworkName('Fam\uFFFDlia', 'Família'), true);
+  assert.equal(sameNetworkName('Fam\uFFFDlia', 'Free_WiFi'), false);
+  assert.equal(sameNetworkName('Fam\uFFFDlia', 'Famílias'), false);
+  assert.equal(sameNetworkName('CasaSilva', 'casasilva'), false, 'maiúsculas contam: são redes diferentes');
+  assert.equal(sameNetworkName('', 'CasaSilva'), true);
+  assert.equal(sameNetworkName('CasaSilva', ''), true);
+});
+
+test('trocar o nome da rede conectada (mesmo BSSID) refaz as marcas', () => {
+  const { store } = setup();
+  store.setConnection({ ...CLONE_CONN, ssid: 'Free_WiFi' });
+  store.ingestScan(scanEvent([clone5()]));
+  assert.equal(store.connectedAp().ssid, 'Free_WiFi', 'quem está conectado na rede aberta vê a rede aberta');
+  store.setConnection(CLONE_CONN); // o celular voltou para a rede de verdade, que tem o mesmo BSSID
+  assert.equal(store.connectedAp(), null);
+  assert.deepEqual(store.get().clone, { bssid: HOME_5, ssids: ['Free_WiFi'] });
+});
+
+test('"minha rede" pelo nome não vale para uma rede aberta com o nome de uma rede protegida', () => {
+  const TWIN_OPEN = '02:13:37:00:00:01';
+  const TWIN_WPA2 = '02:13:37:00:00:02';
+  const { store } = setup();
+  store.setFavorite('CasaSilva', true);
+  store.setConnection(CLONE_CONN);
+  store.ingestScan(
+    scanEvent([mine5(), ap(TWIN_OPEN, 'CasaSilva', -40, 2412, { capabilities: OPEN }), ap(TWIN_WPA2, 'CasaSilva', -45, 2462), ap(NEIGHBOUR, 'Vizinho', -71, 2462)]),
+  );
+  const flags = (bssid) => {
+    const a = store.apById(bssid);
+    return { favorite: a.favorite, own: a.own };
+  };
+  assert.deepEqual(flags(HOME_5), { favorite: true, own: true });
+  assert.deepEqual(flags(TWIN_OPEN), { favorite: false, own: false }, 'a gêmea aberta não é do usuário');
+  assert.deepEqual(flags(TWIN_WPA2), { favorite: true, own: true }, 'a de mesma segurança continua contando (pode ser um repetidor)');
+  assert.equal(store.get().own.has(TWIN_OPEN), false);
+
+  // sem estar conectado: a aberta continua de fora enquanto houver uma protegida com o mesmo nome
+  store.setConnection({ connected: false });
+  assert.deepEqual(flags(TWIN_OPEN), { favorite: false, own: false });
+  assert.equal(flags(TWIN_WPA2).favorite, true);
+});
+
+test('"minha rede" que só existe aberta continua sendo minha; conectado nela, a gêmea com senha é que fica de fora', () => {
+  const GUEST = 'a4:2b:b0:11:22:40';
+  const { store } = setup();
+  store.setFavorite('Convidados', true);
+  store.ingestScan(scanEvent([ap(GUEST, 'Convidados', -50, 2437, { capabilities: OPEN }), ap(NEIGHBOUR, 'Vizinho', -71, 2462)]));
+  assert.equal(store.apById(GUEST).favorite, true);
+  assert.equal(store.apById(GUEST).own, true);
+
+  const OTHER = '02:13:37:00:00:07';
+  store.setConnection({ connected: true, ssid: 'Convidados', bssid: GUEST });
+  store.ingestScan(scanEvent([ap(GUEST, 'Convidados', -50, 2437, { capabilities: OPEN }), ap(OTHER, 'Convidados', -45, 2462)], { ts: T0 + 10_000 }));
+  assert.equal(store.apById(GUEST).favorite, true);
+  assert.equal(store.apById(OTHER).favorite, false, 'outra família de segurança = outra rede');
+});
+
+test('lista cheia demais: BSSID ouvido uma única vez sai assim que deixa de ser ouvido', async () => {
+  const { CROWD_APS } = await import('../app/js/store.js');
+  const hx = (n) => n.toString(16).padStart(2, '0');
+  const fakes = (round, count) => Array.from({ length: count }, (_, i) => ap(`02:13:${hx(round)}:00:${hx(i >> 8)}:${hx(i & 255)}`, `FREE ${round}-${i}`, -60 - (i % 30), 2412));
+  const steady = () => [ap(HOME_24, 'Casa', -48, 2437), ap(HOME_5, 'Casa', -55, 5180), ap(NEIGHBOUR, 'Vizinho', -71, 2462)];
+  const { store } = setup();
+  store.setFavorite('Lembrada', true);
+  store.setConnection({ connected: true, ssid: 'Casa', bssid: HOME_5 });
+  const N = CROWD_APS + 100;
+  store.ingestScan(scanEvent([...steady(), ap('00:1d:aa:00:00:77', 'Lembrada', -80, 2412), ...fakes(1, N)], { ts: T0 }));
+  assert.equal(store.get().aps.length, N + 4, 'tudo o que veio na busca aparece');
+  store.ingestScan(scanEvent([...steady(), ...fakes(2, N)], { ts: T0 + 10_000 }));
+  const second = store.get().aps;
+  assert.equal(second.filter((a) => a.ssid.startsWith('FREE 1-')).length, 0, 'os de uma busca só não ficam 90 s na lista');
+  assert.equal(second.filter((a) => a.ssid.startsWith('FREE 2-')).length, N);
+  assert.ok(second.length <= N + 4);
+  for (const bssid of [HOME_24, HOME_5, NEIGHBOUR]) assert.ok(store.apById(bssid), 'quem é ouvido sempre continua');
+  assert.ok(store.apById('00:1d:aa:00:00:77'), 'uma rede marcada como minha não some por ter sido ouvida uma vez só');
+
+  // abaixo do limite nada muda: quem foi ouvido uma vez fica os 90 s de sempre
+  const calm = setup().store;
+  calm.ingestScan(scanEvent([...steady(), ...fakes(1, 20)], { ts: T0 }));
+  calm.ingestScan(scanEvent(steady(), { ts: T0 + 10_000 }));
+  assert.equal(calm.get().aps.length, 23);
+});
