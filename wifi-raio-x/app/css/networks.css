@@ -380,7 +380,7 @@
 .net-filters {
   align-items: center;
   /* espaço para o contorno de foco e a área de toque não serem cortados pela rolagem */
-  padding-block: 2px;
+  padding-top: 2px; padding-bottom: 2px;
 }
 
 .net-filters__sep {
@@ -407,7 +407,7 @@
 .net-sort__native {
   position: absolute;
   z-index: 1;
-  inset: -5px 0;
+  top: -5px; right: 0; bottom: -5px; left: 0;
   width: 100%;
   height: calc(100% + 10px);
   margin: 0;
@@ -492,7 +492,7 @@
 
 .net-row {
   align-items: flex-start;
-  padding-block: 11px;
+  padding-top: 11px; padding-bottom: 11px;
 }
 
 .net-row > .row__lead {
@@ -577,7 +577,7 @@
 }
 
 .net-list[hidden] + .net-region .empty {
-  padding-block: var(--sp-6);
+  padding-top: var(--sp-6); padding-bottom: var(--sp-6);
 }
 
 /* ------------------------------------------------------------------------ */

@@ -10,7 +10,8 @@
 //   rttTargets(aps, limite)
 // Resultado
 //   qualityInfo(quality) · coverageParts(cov) · deadZoneLines(cov, opções) · placeText(lugar, váriosAndares)
-//   heatChoices(model) · roomSignal(model, andar, ambiente, campo) · signalWordAt(dbm)
+//   heatChoices(model) · hasRooms(model) · roomsInvite(model) · roomSignal(model, andar, ambiente, campo)
+//   signalWordAt(dbm) · ACCURACY (os números de precisão que as telas citam)
 //   spotDistance(model, a, b) · parseMeters(texto) · withKnownDistance(survey, a, b, metros)
 //   renameRoom(survey, model, andar, idDoAmbiente, nome) · spotOptions(model)
 // Biblioteca e arquivos
@@ -241,6 +242,12 @@ export function finishBlocker(stats, limits = {}) {
   const minSpots = isNum(limits.minSpots) ? limits.minSpots : 12;
   const scans = isNum(st.scans) ? st.scans : 0;
   if (scans === 0) return 'Para concluir, o mapa precisa de leituras: ande pela casa com o app aberto.';
+  // um roteador só ao alcance: não é questão de quantidade de leituras, deste lugar não sai mapa
+  const fewAfter = isNum(limits.fewDevicesAfter) ? limits.fewDevicesAfter : 8;
+  const minDevices = isNum(limits.minDevices) ? limits.minDevices : 2;
+  if (isNum(st.devicesOften) && scans >= fewAfter && st.devicesOften < minDevices) {
+    return 'Só um roteador ao alcance. Para montar o mapa o app precisa ouvir pelo menos três (os dos vizinhos contam); com um só não dá para saber onde cada leitura foi feita.';
+  }
   const useful = isNum(st.useful) ? st.useful : scans;
   const spots = isNum(st.spots) ? st.spots : 0;
   const needUseful = Math.max(0, minUseful - useful);
@@ -343,22 +350,102 @@ export function rttTargets(aps = [], limit = 8) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Os números de precisão que as telas citam. Vêm da bancada (tests/mapping/map-eval.mjs e
+ * harness.mjs: 88 levantamentos simulados, solucionador e construtor finais) e do ensaio do app
+ * inteiro no simulador (tests/e2e/map-quality.e2e.mjs). Mudou o solucionador? Meça de novo e
+ * acerte aqui: os textos da tela de resultado saem destes valores.
+ *
+ *   erro mediano de posição (m), depois do melhor encaixe: kitnet de 30 m² 0,8 · apartamento de
+ *   63 m² 1,2 · casas térreas sorteadas 1,3 · sobrado de 2 x 80 m² 1,7 · escritório de 280 m² 2,2
+ *   (andando com leituras livres 1,2 a 1,5; uma leitura a cada 30 s 1,7); 9 em cada 10 posições
+ *   erram menos que o dobro disso;
+ *   tamanho (linear) do desenho / real: média 0,87; um em cada dez mapas sai mais de 29% menor e um
+ *   em cada dez mais de 6% maior; com confiança de escala a partir de 0,5 metade erra mais de 11% e
+ *   um em cada cinco mais de 26%; abaixo de 0,5, metade erra mais de 25% e um em cada cinco mais de 40%;
+ *   leitura no cômodo certo: 80% (95% na kitnet, 81% no apartamento, 80% no escritório, 60% no sobrado);
+ *   ambiente com nome: 77% da área dele é mesmo do cômodo com aquele nome.
+ */
+export const ACCURACY = Object.freeze({
+  /** erro mediano de posição: [casa pequena, casa grande / dois andares], em metros */
+  homeErrorM: [1, 2],
+  /** num lugar grande (escritório de ~300 m²) */
+  largeErrorM: 2.2,
+  /** quanto o desenho costuma sair menor que a casa (linear) */
+  shrinkPct: 13,
+  /** folga do tamanho: confiança de escala normal (>= 0,5) e baixa */
+  scalePct: 25,
+  scaleLowPct: 40,
+  /** leituras que caem no cômodo certo: casa térrea; casa de dois andares */
+  rightRoom: [4, 5],
+  rightRoomTwoFloors: [3, 5],
+});
+
+/**
  * Qualidade do mapa em palavras.
  * @param {import('../../mapping/types.js').MapQuality|null} quality
  */
 export function qualityInfo(quality) {
   const q = quality && typeof quality === 'object' ? quality : {};
   const level = q.level === 'boa' || q.level === 'razoavel' || q.level === 'fraca' ? q.level : 'fraca';
+  const notes = Array.isArray(q.notes) ? q.notes.filter((n) => typeof n === 'string' && n.trim()) : [];
+  // Levantamento de que não sai mapa (um roteador só, tudo no mesmo lugar...): não há erro típico
+  // nem tamanho a declarar; a tela mostra o motivo (a primeira nota) e o que fazer.
+  if (q.usable === false) {
+    return {
+      level: 'fraca',
+      usable: false,
+      label: 'Sem mapa',
+      tone: 'warning',
+      text: notes[0] || 'Deste levantamento não foi possível tirar um mapa.',
+      errorText: 'Posições sem valor: o desenho não representa a casa',
+      scaleText: 'Tamanho desconhecido',
+      notes: notes.slice(1),
+    };
+  }
   const look = {
     boa: { label: 'Boa', tone: 'good', text: 'Os lugares e o sinal medido devem bater bem com a casa.' },
     razoavel: { label: 'Razoável', tone: 'info', text: 'Dá uma boa ideia da casa; alguns lugares podem estar deslocados.' },
-    fraca: { label: 'Fraca', tone: 'warning', text: 'Serve como rascunho: faltaram leituras para um mapa confiável.' },
+    fraca: { label: 'Fraca', tone: 'warning', text: 'Serve como rascunho: veja abaixo o que limitou este mapa.' },
   }[level];
   const err = isNum(q.expectedErrorM) && q.expectedErrorM > 0 ? q.expectedErrorM : null;
   const errorText = err === null ? 'Posições aproximadas' : `Posições com erro típico de ≈${THIN}${fmtNum(Math.round(err * 2) / 2, 1).replace(/,0$/, '')}${THIN}m`;
   const scale = isNum(q.scaleConf) ? q.scaleConf : 0;
-  const scaleText = scale >= 0.7 ? 'Tamanho bem estimado' : scale >= 0.4 ? 'Tamanho com folga de uns 25%' : 'Tamanho incerto: vale ajustar a escala';
-  return { level, label: look.label, tone: look.tone, text: look.text, errorText, scaleText, notes: Array.isArray(q.notes) ? q.notes.filter((n) => typeof n === 'string' && n.trim()) : [] };
+  // 0,7 ou mais só acontece com uma distância medida pelo usuário ("Ajustar a escala")
+  const scaleText =
+    scale >= 0.7 ? 'Tamanho ajustado pela distância que você mediu' : scale >= 0.5 ? `Tamanho com folga de uns ${ACCURACY.scalePct}% (costuma sair um pouco menor)` : `Tamanho incerto (pode errar ${ACCURACY.scaleLowPct}%): vale ajustar a escala`;
+  return { level, usable: true, label: look.label, tone: look.tone, text: look.text, errorText, scaleText, notes };
+}
+
+/** O mapa tem ambientes em algum andar? (só tem quando o usuário deu nome a pelo menos dois lugares do andar) */
+export function hasRooms(model) {
+  const floors = model && Array.isArray(model.floors) ? model.floors : [];
+  return floors.some((f) => f && Array.isArray(f.rooms) && f.rooms.length > 0);
+}
+
+/**
+ * Convite para marcar lugares com nome, quando o mapa (ou um andar dele) saiu sem divisão em
+ * ambientes. null quando todos os andares têm ambientes.
+ * @returns {{title:string, text:string, all:boolean}|null}
+ */
+export function roomsInvite(model) {
+  const floors = model && Array.isArray(model.floors) ? model.floors : [];
+  if (!floors.length) return null;
+  const plain = floors.filter((f) => !f || !Array.isArray(f.rooms) || !f.rooms.length);
+  if (!plain.length) return null;
+  const spots = model && Array.isArray(model.spots) ? model.spots : [];
+  const named = new Set(spots.map((sp) => fold(sp.label)).filter(Boolean)).size;
+  if (plain.length < floors.length) {
+    const names = plain.map((f) => floorName(f.floor)).join(' e ');
+    return { all: false, title: `${names}: sem divisão em ambientes`, text: 'Neste andar menos de dois lugares têm nome. Volte lá com “Continuar mapeando”, pare em cada cômodo e marque o lugar com o nome.' };
+  }
+  return {
+    all: true,
+    title: 'Quer ver os cômodos no mapa?',
+    text:
+      named === 1
+        ? 'Só um lugar tem nome, e o app não inventa divisões: com o sinal sozinho elas sairiam quase ao acaso. Toque em “Continuar mapeando”, pare em mais um cômodo (ou em todos) e marque o lugar com o nome.'
+        : 'Este mapa mostra a área por onde você andou, sem dividir em ambientes: o app não inventa divisões, porque só com o sinal elas sairiam quase ao acaso. Toque em “Continuar mapeando”, pare em pelo menos dois cômodos e marque cada lugar com o nome.',
+  };
 }
 
 /** Faixas da cobertura, na ordem do melhor para o pior. As palavras são as mesmas da legenda do mapa. */
@@ -446,7 +533,8 @@ export function deadZoneLines(cov, { multiFloor = false, limit = 4 } = {}) {
  * @returns {{key:string, kind:'rooms'|'own'|'other', label:string, ssid:string}[]}
  */
 export function heatChoices(model, { maxOthers = 4 } = {}) {
-  const out = [{ key: 'rooms', kind: 'rooms', label: 'Ambientes', ssid: '' }];
+  // sem lugares com nome o mapa não tem ambientes: a primeira opção mostra só a área
+  const out = [{ key: 'rooms', kind: 'rooms', label: hasRooms(model) ? 'Ambientes' : 'Área', ssid: '' }];
   const nets = model && Array.isArray(model.networks) ? model.networks : [];
   const own = nets.filter((n) => n.own);
   const others = nets.filter((n) => !n.own).slice(0, maxOthers);

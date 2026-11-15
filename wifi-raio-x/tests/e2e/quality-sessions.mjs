@@ -7,7 +7,7 @@
 // Com `fakeClock` o relógio da página é o do Playwright (page.clock): o app roda na velocidade 1
 // do simulador — o ritmo de um celular de verdade — e o teste adianta o tempo em vez de esperar.
 import { openApp, settle, simEval } from './helpers.mjs';
-import { installProbe, readProbe, savedRecord, evaluateSession } from './quality.mjs';
+import { installProbe, readProbe, savedRecord, evaluateSession, HARD_PLACES, hardWorld, loadHardPlace } from './quality.mjs';
 
 const RESULT = '.mrs:not([hidden]) .mrs__stage canvas';
 
@@ -30,17 +30,26 @@ async function saveMap(page, name) {
   await page.waitForFunction(() => /^#\/mapa\/ver\/m[a-z0-9]+$/.test(location.hash), null, { timeout: 30_000 });
 }
 
-async function finishSession(app, name) {
+/** O que a tela de resultado diz (para conferir que o texto bate com o mapa). */
+async function resultTexts(page) {
+  return page.evaluate(() => ({
+    legend: document.querySelector('.mrs-legend')?.textContent || '',
+    show: [...document.querySelectorAll('.mrs-show .chip')].map((el) => el.textContent.trim()),
+    noMap: document.querySelector('.mrs-nomap')?.textContent || null,
+    invite: document.querySelector('.mrs-invite')?.textContent || null,
+    quality: [...document.querySelectorAll('.mrs__more .mrs-card')].find((el) => /Qualidade do mapa|Por que não há mapa/.test(el.textContent))?.textContent || '',
+    canvases: document.querySelectorAll('.mrs__stage canvas').length,
+  }));
+}
+
+async function finishSession(app, name, world) {
   const { page } = app;
   await settle(page);
-  const ui = await page.evaluate(() => ({
-    legend: document.querySelector('.mrs-legend')?.textContent || '',
-    quality: [...document.querySelectorAll('.mrs__more .mrs-card')].map((el) => el.textContent).join('\n'),
-  }));
+  const ui = await resultTexts(page);
   await saveMap(page, name);
   const probe = await readProbe(page);
   const record = await savedRecord(page);
-  const metrics = evaluateSession({ probe, record });
+  const metrics = evaluateSession({ probe, record, world });
   return { ...metrics, ui };
 }
 
@@ -150,6 +159,59 @@ export async function manualSession(env, { world = 'apartamento', seed, throttle
     const out = await finishSession(app, `Ensaio manual ${world}`);
     failed = false;
     return { ...out, levelAtFinish: level, hintAtFinish: blocker };
+  } finally {
+    await app.close({ check: !failed });
+  }
+}
+
+/**
+ * Casos difíceis de verdade, do começo ao fim no app (relógio adiantado, simulador na velocidade 1):
+ *   place: 'emulador' | 'um-roteador' | 'dois-roteadores' (HARD_PLACES) ou nenhum (o apartamento inteiro)
+ *   still: a pessoa não sai do lugar · walkS: quanto tempo anda antes de tentar concluir
+ * Devolve o que a tela disse durante o levantamento e, se deu para concluir, o que o resultado mostrou
+ * (e as medidas do mapa, quando há mapa).
+ */
+export async function hardSession(env, { place = null, still = false, walkS = 240 } = {}) {
+  const app = await openApp(env, { params: { world: 'apartamento', speed: 1 }, route: '/mapa', before: (page) => page.clock.install() });
+  const { page } = app;
+  let failed = true;
+  try {
+    await page.waitForSelector('.mlib-hero');
+    const recipe = place ? HARD_PLACES[place] : null;
+    if (recipe) {
+      await loadHardPlace(page, recipe);
+      await page.clock.runFor(4000); // a lista do lugar novo chega e a tela de redes se atualiza
+    }
+    await installProbe(page);
+    await page.locator('.mlib-hero .btn', { hasText: 'Novo mapa' }).click();
+    await page.waitForSelector('.sheet .map-start');
+    await page.click('.sheet__footer .btn--primary');
+    await page.waitForSelector('.msv__bar .btn--primary');
+    if (still) await simEval(page, (sim) => sim.walker.setMode('still'));
+    await page.clock.runFor(walkS * 1000);
+    await page.evaluate(() => new Promise((resolve) => queueMicrotask(resolve)));
+    const during = await page.evaluate(() => ({
+      counts: [...document.querySelectorAll('.msv-count__value')].slice(0, 3).map((el) => Number(el.textContent)),
+      level: document.querySelector('.msv-level__label')?.textContent || '',
+      hint: document.querySelector('.msv-level__hint:not(.msv-level__blocker)')?.textContent || '',
+      blocker: document.querySelector('.msv__bar-note')?.textContent || document.querySelector('.msv-level__blocker')?.textContent || '',
+      canFinish: !document.querySelector('.msv__finish').disabled,
+    }));
+    if (!during.canFinish) {
+      failed = false;
+      return { concluded: false, during };
+    }
+    await page.click('.msv__finish');
+    await advanceUntil(page, async () => (await page.locator('.mrs:not([hidden])').count()) > 0 && (await page.locator('.mrs__busy:not([hidden])').count()) === 0 && (await page.locator('.msv-stage:not([hidden])').count()) === 0, { stepMs: 250, limitS: 600, what: 'a tela de resultado' });
+    await settle(page);
+    const ui = await resultTexts(page);
+    let metrics = null;
+    if (!ui.noMap) {
+      const out = await finishSession(app, `Ensaio ${place || 'apartamento'}`, recipe ? hardWorld(recipe) : undefined);
+      metrics = out;
+    }
+    failed = false;
+    return { concluded: true, during, ui, metrics };
   } finally {
     await app.close({ check: !failed });
   }

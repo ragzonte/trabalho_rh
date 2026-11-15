@@ -276,7 +276,8 @@ export async function mountSurvey(root, env) {
     if (dead || mode !== 'survey') return;
     let accepted = false;
     try {
-      accepted = rec.onScan(ev, { aps: store.get().aps });
+      // o gravador fica sabendo do limite de buscas pelo laço (relógio de verdade), não pelo ritmo em tempo de caminhada
+      accepted = rec.onScan(ev, { aps: store.get().aps, throttled: !!store.get().loop.throttled });
     } catch (err) {
       console.error('[mapa] o gravador recusou uma leitura', err);
     }
@@ -861,7 +862,16 @@ export async function mountSurvey(root, env) {
       },
     ),
   );
-  offs.push(store.subscribe((st) => st.loop.throttled, () => draw()));
+  offs.push(
+    store.subscribe(
+      (st) => st.loop.throttled,
+      (throttled) => {
+        rec.setThrottled(!!throttled);
+        draw();
+      },
+    ),
+  );
+  rec.setThrottled(!!store.get().loop.throttled);
   const onHide = () => {
     if (document.hidden && rec.stats().scans) void saveDraft();
   };

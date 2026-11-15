@@ -1,0 +1,1203 @@
+/* GERADO por tools/flex-gap-fallback.mjs — não edite à mão: mude o `gap` na folha de origem e rode
+   `node tools/flex-gap-fallback.mjs`.
+
+   Espaçamento dos contêineres flex para WebViews sem `gap` em flex (anteriores ao Chrome 84; o
+   WebView 83 vem de fábrica no Android 11). Só é carregada nesses WebViews (app/js/polyfills.js).
+   A margem fica atrás de cada filho, menos o último, e se soma às margens do próprio app. */
+
+/* ---- app.css ---- */
+
+.topbar > *:not(:last-child) {
+  margin-right: 2px;
+}
+
+.topbar__status > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.topbar__actions > *:not(:last-child) {
+  margin-right: 0;
+}
+
+.pill > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.screen > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.screen--bleed > *:not(:last-child) {
+  margin-bottom: 0;
+}
+
+.bottomnav__item > *:not(:last-child) {
+  margin-bottom: 4px;
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .bottomnav__item > *:not(:last-child) {
+    margin-bottom: 2px;
+  }
+}
+
+.row > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.row__body > *:not(:last-child) {
+  margin-bottom: 2px;
+}
+
+.row__title > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.row__sub {
+  margin-bottom: calc(2px * -1);
+}
+
+.row__sub > * {
+  margin-right: 6px; margin-bottom: 2px;
+}
+
+.row__sub--clip > * {
+  margin-right: 0; margin-bottom: 0;
+}
+
+.row__sub--clip > .badge--plain > *:not(:last-child) {
+  margin-right: 4px;
+}
+
+.row__trail > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.row__trail--stack > *:not(:last-child) {
+  margin-bottom: 0;
+}
+
+.kv__row > *:not(:last-child) {
+  margin-right: var(--sp-4);
+}
+
+.btn > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.chips {
+  margin-bottom: calc(var(--sp-2) * -1);
+}
+
+.chips > * {
+  margin-right: var(--sp-2); margin-bottom: var(--sp-2);
+}
+
+.chip > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.seg__opt > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.badge > *:not(:last-child) {
+  margin-right: 4px;
+}
+
+.bars > *:not(:last-child) {
+  margin-right: 2px;
+}
+
+.bars--lg > *:not(:last-child) {
+  margin-right: 3px;
+}
+
+.signal > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.signal--stack > *:not(:last-child) {
+  margin-bottom: 0;
+}
+
+.stat > *:not(:last-child) {
+  margin-bottom: 2px;
+}
+
+.stat__label > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.stat__value > *:not(:last-child) {
+  margin-right: 4px;
+}
+
+.section-h > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.section-h__title > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.empty > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.empty__actions > *:not(:last-child) {
+  margin-bottom: var(--sp-1);
+}
+
+.banner > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.banner__body > *:not(:last-child) {
+  margin-bottom: 2px;
+}
+
+.banner__actions {
+  margin-bottom: calc(var(--sp-1) * -1);
+}
+
+.banner__actions > * {
+  margin-right: var(--sp-1); margin-bottom: var(--sp-1);
+}
+
+.sheet__header > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.sheet__body > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.sheet__footer > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.dialog__actions {
+  margin-bottom: calc(var(--sp-2) * -1);
+}
+
+.dialog__actions > * {
+  margin-right: var(--sp-2); margin-bottom: var(--sp-2);
+}
+
+.toasts > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.toast > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.gate__main > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.gate__note > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.gate__actions > *:not(:last-child) {
+  margin-bottom: var(--sp-1);
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .gate__main > *:not(:last-child) {
+    margin-bottom: var(--sp-2);
+  }
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .gate__actions > *:not(:last-child) {
+    margin-left: var(--sp-1); margin-bottom: 0;
+  }
+}
+
+.field > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.stack > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.stack--sm > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.stack--lg > *:not(:last-child) {
+  margin-bottom: var(--sp-5);
+}
+
+.cluster {
+  margin-bottom: calc(var(--sp-2) * -1);
+}
+
+.cluster > * {
+  margin-right: var(--sp-2); margin-bottom: var(--sp-2);
+}
+
+.between > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.prose > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.prose ol.steps > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+/* ---- best.css ---- */
+
+.best-section > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.best-subtitle > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.best-hero__main > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.best-hero__top > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.best-hero__titles > *:not(:last-child) {
+  margin-bottom: 2px;
+}
+
+.best-hero__score > *:not(:last-child) {
+  margin-bottom: 4px;
+}
+
+.best-hero__actions > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.best-hero__age > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.best-side > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.best-side__body > *:not(:last-child) {
+  margin-bottom: 1px;
+}
+
+.best-side__where > * {
+  margin-right: 6px; margin-bottom: 0;
+}
+
+.best-side__where > .badge--plain > *:not(:last-child) {
+  margin-right: 4px;
+}
+
+.best-side__gain > *:not(:last-child) {
+  margin-right: 3px;
+}
+
+.best-hero__diag > *:not(:last-child) {
+  margin-right: 10px;
+}
+
+.best-row__ring > *:not(:last-child) {
+  margin-bottom: 3px;
+}
+
+.best-row__notes {
+  margin-bottom: calc(2px * -1);
+}
+
+.best-row__notes > * {
+  margin-right: 12px; margin-bottom: 2px;
+}
+
+.best-note > *:not(:last-child) {
+  margin-right: 5px;
+}
+
+.best-warnings > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.best-diag > *:not(:last-child) {
+  margin-bottom: 10px;
+}
+
+.best-diag__head > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.best-diag__actions {
+  margin-bottom: calc(var(--sp-2) * -1);
+}
+
+.best-diag__actions > * {
+  margin-right: var(--sp-2); margin-bottom: var(--sp-2);
+}
+
+.best-fold__body > *:not(:last-child) {
+  margin-bottom: 10px;
+}
+
+.best-sheet-head > *:not(:last-child) {
+  margin-right: var(--sp-4);
+}
+
+.best-parts > *:not(:last-child) {
+  margin-bottom: 14px;
+}
+
+.best-part > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.best-part__head > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.best-part__label > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.best-why > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.best-why__steps > *:not(:last-child) {
+  margin-bottom: 10px;
+}
+
+.best-why__notes > *:not(:last-child) {
+  margin-bottom: 4px;
+}
+
+.best-ap .row__title > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+/* ---- channels.css ---- */
+
+.ch-main > *:not(:last-child),
+.ch-slot > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.ch-loading > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.ch-band.seg__opt > *:not(:last-child) {
+  margin-bottom: 0;
+}
+
+.ch-band__name > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.ch-chart__head > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.ch-chart__sub > * {
+  margin-right: 10px; margin-bottom: 0;
+}
+
+.ch-chart__age > *:not(:last-child) {
+  margin-right: 4px;
+}
+
+.ch-legend {
+  margin-bottom: calc(4px * -1);
+}
+
+.ch-legend > * {
+  margin-right: 16px; margin-bottom: 4px;
+}
+
+.ch-legend__item > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.ch-sel > .row > *:not(:last-child) {
+  margin-right: 10px;
+}
+
+.ch-rec__head > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.ch-rec__note > *:not(:last-child),
+.ch-advice > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.ch-tile > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.ch-tile__ch {
+  margin-bottom: calc(2px * -1);
+}
+
+.ch-tile__ch > * {
+  margin-right: 8px; margin-bottom: 2px;
+}
+
+.ch-tile__note > * {
+  margin-right: 10px; margin-bottom: 0;
+}
+
+.ch-level > *:not(:last-child) {
+  margin-right: 5px;
+}
+
+.ch-own > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.ch-ask > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.ch-ask__text > *:not(:last-child) {
+  margin-bottom: 2px;
+}
+
+.ch-widthopt.seg__opt > *:not(:last-child) {
+  margin-bottom: 0;
+}
+
+.ch-widthopt__w > *:not(:last-child) {
+  margin-right: 3px;
+}
+
+.ch-rank__head > *:not(:last-child) {
+  margin-bottom: 4px;
+}
+
+.ch-rank__row.row > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.ch-rank__row .row__body > *:not(:last-child) {
+  margin-bottom: 4px;
+}
+
+.ch-rank__top > *:not(:last-child) {
+  margin-right: 10px;
+}
+
+.ch-rank__tags {
+  margin-bottom: calc(6px * -1);
+}
+
+.ch-rank__tags > * {
+  margin-right: 6px; margin-bottom: 6px;
+}
+
+.ch-glossary > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.ch-glossary > p > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.ch-others > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.ch-sheet__score > *:not(:last-child) {
+  margin-bottom: 10px;
+}
+
+.ch-sheet__big > *:not(:last-child) {
+  margin-right: 8px;
+}
+
+.ch-sheet__level > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+/* ---- map-viewer.css ---- */
+
+.mapv__scale > *:not(:last-child) {
+  margin-right: 8px;
+}
+
+/* ---- map.css ---- */
+
+.map-start > *:not(:last-child) {
+  margin-bottom: var(--sp-5);
+}
+
+.map-start__block > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.map-start__note > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.map-tips > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.map-tip > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.map-tip__body > *:not(:last-child) {
+  margin-bottom: 2px;
+}
+
+.map-import > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.mlib > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.mlib-hero > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.mlib-steps > *:not(:last-child) {
+  margin-right: 2px;
+}
+
+.mlib-step > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.mlib-demo > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.mlib-demo__body > *:not(:last-child) {
+  margin-bottom: 2px;
+}
+
+.mlib-draft > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.mlib-draft__head > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.mlib-draft__actions > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.mlib-list > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.mlib-maps > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.mlib-map__open > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.mlib-map__body > *:not(:last-child) {
+  margin-bottom: 3px;
+}
+
+.mlib-map__foot {
+  margin-bottom: calc(4px * -1);
+}
+
+.mlib-map__foot > * {
+  margin-right: 8px; margin-bottom: 4px;
+}
+
+.mlib-empty > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.mlib-foot > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.msv__col > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.msv__body > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.msv-radar > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.msv-status > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.msv-status__now > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.msv-level > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.msv-level__head > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.msv-count > *:not(:last-child) {
+  margin-bottom: 2px;
+}
+
+.msv-floor > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.msv-floor__ctl > *:not(:last-child) {
+  margin-right: 2px;
+}
+
+.msv__bar-in > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.msv__bar-row > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.msv__bar-row > .btn > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.msv__bar-note > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.msv-mark > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.msv-mark__hint > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.msv-mark__free > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.mproc > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.mrs__float > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.mrs__note > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.mrs-pick__head > *:not(:last-child) {
+  margin-right: 2px;
+}
+
+.mrs-pick__titles > *:not(:last-child) {
+  margin-bottom: 4px;
+}
+
+.mrs-pick__sig > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.mrs-pick__net > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.mrs-pick__facts > *:not(:last-child) {
+  margin-bottom: 4px;
+}
+
+.mrs-pick__facts > div > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.mrs__handle > *:not(:last-child) {
+  margin-bottom: 2px;
+}
+
+.mrs__handle-row > *:not(:last-child) {
+  margin-right: 4px;
+}
+
+.mrs__quick > *:not(:last-child) {
+  margin-bottom: 10px;
+}
+
+.mrs__panel[data-open='true'] .mrs__more > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.mrs-show > *:not(:last-child),
+.mrs-floors > *:not(:last-child) {
+  margin-right: 10px;
+}
+
+.mrs-tools > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.mrs-tools__flat > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.mrs-block > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.mrs-card > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.mrs-card .card__title {
+  margin-bottom: calc(6px * -1);
+}
+
+.mrs-card .card__title > * {
+  margin-right: 6px; margin-bottom: 6px;
+}
+
+.mrs-card__head > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.mrs-card__actions {
+  margin-bottom: calc(var(--sp-2) * -1);
+}
+
+.mrs-card__actions > * {
+  margin-right: var(--sp-2); margin-bottom: var(--sp-2);
+}
+
+.mrs-invite .card__title > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.mrs-nomap > *:not(:last-child) {
+  margin-bottom: 8px;
+}
+
+.mrs-nomap__head > *:not(:last-child) {
+  margin-right: 8px;
+}
+
+.mrs-cov__bar > *:not(:last-child) {
+  margin-right: 2px;
+}
+
+.mrs-cov__list > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.mrs-cov__list li > *:not(:last-child) {
+  margin-right: 10px;
+}
+
+.mrs-cov__name > * {
+  margin-right: 8px; margin-bottom: 0;
+}
+
+.mrs-zones > *:not(:last-child),
+.mrs-facts > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.mrs-zones li > *:not(:last-child),
+.mrs-zones__none > *:not(:last-child),
+.mrs-facts li > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.mrs-extremes > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.mrs-extremes > div > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.mrs-notes > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.mrs-scale > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .mrs__more > *:not(:last-child) {
+    margin-bottom: var(--sp-3); margin-right: 0;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .mrs__panel[data-open='true'] .mrs__more > *:not(:last-child) {
+    margin-bottom: var(--sp-3);
+  }
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .mproc {
+    margin-bottom: calc(var(--sp-2) * -1);
+  }
+}
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .mproc > * {
+    margin-right: var(--sp-5); margin-bottom: var(--sp-2);
+  }
+}
+
+/* ---- networks.css ---- */
+
+.net-conn__main > *:not(:last-child) {
+  margin-bottom: 10px;
+}
+
+.net-conn__head > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.net-conn__more > *:not(:last-child) {
+  margin-right: 2px;
+}
+
+.net-conn__name > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.net-conn__signal > *:not(:last-child) {
+  margin-right: 10px;
+}
+
+.net-conn__reading > *:not(:last-child) {
+  margin-right: 4px;
+}
+
+.net-conn__facts {
+  margin-bottom: calc(6px * -1);
+}
+
+.net-conn__facts > * {
+  margin-right: 6px; margin-bottom: 6px;
+}
+
+.net-conn__stat > *:not(:last-child) {
+  margin-bottom: 1px;
+}
+
+.net-conn__stat-value > *:not(:last-child) {
+  margin-right: 5px;
+}
+
+.net-insight > *:not(:last-child) {
+  margin-right: 10px;
+}
+
+.net-conn--off > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.net-conn__off-body > *:not(:last-child) {
+  margin-bottom: 4px;
+}
+
+.net-sum > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.net-sum__label > *:not(:last-child) {
+  margin-right: 5px;
+}
+
+.net-controls > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.net-search > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.net-caption > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.net-row > .row__body > *:not(:last-child) {
+  margin-bottom: 1px;
+}
+
+.ap-head > *:not(:last-child) {
+  margin-bottom: 10px;
+}
+
+.ap-signal > *:not(:last-child) {
+  margin-right: 14px;
+}
+
+.ap-signal > .bars > *:not(:last-child) {
+  margin-right: 3px;
+}
+
+.ap-signal__line {
+  margin-bottom: calc(2px * -1);
+}
+
+.ap-signal__line > * {
+  margin-right: 10px; margin-bottom: 2px;
+}
+
+.ap-badges {
+  margin-bottom: calc(6px * -1);
+}
+
+.ap-badges > * {
+  margin-right: 6px; margin-bottom: 6px;
+}
+
+.ap-chart-card__head > * {
+  margin-right: var(--sp-3); margin-bottom: 0;
+}
+
+.fact > *:not(:last-child) {
+  margin-bottom: 1px;
+}
+
+.ap-issues > *:not(:last-child) {
+  margin-bottom: 10px;
+}
+
+.ap-issue > *:not(:last-child),
+.ap-ok > *:not(:last-child) {
+  margin-right: 10px;
+}
+
+.ap-feature > *:not(:last-child) {
+  margin-right: 12px;
+}
+
+.ap-kv__bssid > * {
+  margin-right: 2px; margin-bottom: 0;
+}
+
+.hist-bar > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.hist-card__head > * {
+  margin-right: var(--sp-3); margin-bottom: 0;
+}
+
+.hist-item__main > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+/* ---- tools-a.css ---- */
+
+.mtr-note > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.mtr-meta {
+  margin-bottom: calc(6px * -1);
+}
+
+.mtr-meta > * {
+  margin-right: var(--sp-6); margin-bottom: 6px;
+}
+
+.mtr-meta__item > *:not(:last-child) {
+  margin-bottom: 0;
+}
+
+.mtr-stats__head > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.mtr-stat__label > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.mtr-stat__value > *:not(:last-child) {
+  margin-right: 3px;
+}
+
+.mtr-chart__head > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.mtr-hunt > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.mtr-trend > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.mtr-trend__body > *:not(:last-child) {
+  margin-bottom: 2px;
+}
+
+.mtr-heat__scale > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.mtr-rtt__result {
+  margin-bottom: calc(2px * -1);
+}
+
+.mtr-rtt__result > * {
+  margin-right: var(--sp-2); margin-bottom: 2px;
+}
+
+.mtr-rtt__busy > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.cnx-hero__top > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.cnx-hero__signal > *:not(:last-child) {
+  margin-right: var(--sp-4);
+}
+
+.cnx-hero__dbm > *:not(:last-child) {
+  margin-right: 4px;
+}
+
+.cnx-kv__row > *:not(:last-child) {
+  margin-bottom: 2px;
+}
+
+.cnx-kv__main > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.cnx-speed__item > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.cnx-speed__head > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.cnx-speed__usable > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.exp-summary > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.exp-preview__head > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.exp-actions > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+/* ---- tools-b.css ---- */
+
+.tb-note--warn > *:not(:last-child) {
+  margin-right: var(--sp-2);
+}
+
+.tb-run {
+  margin-bottom: calc(2px * -1);
+}
+
+.tb-run > * {
+  margin-right: var(--sp-3); margin-bottom: 2px;
+}
+
+.tb-run__state > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.tb-idle > *:not(:last-child) {
+  margin-right: var(--sp-4);
+}
+
+.tb-duration > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.tb-chartwrap > *:not(:last-child) {
+  margin-bottom: var(--sp-2);
+}
+
+.tb-legend {
+  margin-bottom: calc(4px * -1);
+}
+
+.tb-legend > * {
+  margin-right: var(--sp-4); margin-bottom: 4px;
+}
+
+.tb-legend__item > *:not(:last-child) {
+  margin-right: 6px;
+}
+
+.tb-sum__top > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.tb-sum__count > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.tb-sum__label > *:not(:last-child) {
+  margin-right: 0;
+}
+
+.tb-sum__progress > *:not(:last-child) {
+  margin-bottom: 6px;
+}
+
+.tb-dev .row__trail > *:not(:last-child) {
+  margin-right: 2px;
+}
+
+.tb-facts > *:not(:last-child) {
+  margin-bottom: var(--sp-3);
+}
+
+.tb-fact > *:not(:last-child) {
+  margin-right: var(--sp-3);
+}
+
+.tb-intro__head > *:not(:last-child) {
+  margin-right: var(--sp-4);
+}
+
+.tb-rec__v > *:not(:last-child) {
+  margin-right: 4px;
+}

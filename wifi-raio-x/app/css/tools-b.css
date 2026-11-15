@@ -163,7 +163,7 @@
 
 .tb-chart__canvas {
   position: absolute;
-  inset: 0;
+  top: 0; right: 0; bottom: 0; left: 0;
   border-radius: var(--r-sm);
   cursor: crosshair;
 }
@@ -397,7 +397,7 @@
 .tb-link::after {
   content: '';
   position: absolute;
-  inset: -14px -6px;
+  top: -14px; right: -6px; bottom: -14px; left: -6px;
 }
 
 .tb-rec {

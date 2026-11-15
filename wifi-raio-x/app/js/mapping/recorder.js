@@ -69,8 +69,9 @@
 //                    (ficar parado num ponto só soma até a terceira varredura: é o mesmo lugar)
 //
 //   'insuficiente'   menos de 25 medições úteis e menos de 12 pontos — ou o sinal não variou
-//                    (a pessoa não saiu do lugar)
-//   'minimo'         25+ medições úteis ou 12+ pontos
+//                    (a pessoa não saiu do lugar) — ou só há um roteador ao alcance (com um só não
+//                    dá para saber onde cada leitura foi feita: `devicesOften`, veja abaixo)
+//   'minimo'         25+ medições úteis ou 12+ pontos (e é o teto com só dois roteadores ao alcance)
 //   'bom'            60+ medições úteis ou 20+ pontos
 //   'otimo'          120+ medições úteis ou 32+ pontos, com pelo menos 3 lugares com nome
 //
@@ -92,6 +93,8 @@ import { groupByDevice, normalizeBssid } from '../core/model.js';
  * @property {string[]} labels        nomes distintos dados aos pontos, na ordem em que apareceram
  * @property {number} aps             BSSIDs ouvidos
  * @property {number} devices         aparelhos físicos (roteadores) ouvidos
+ * @property {number} devicesOften    os ouvidos com frequência (em pelo menos um quinto das varreduras): é com
+ *                                    eles que o mapa conta. 1 = não sai mapa; 2 = mapa pouco confiável
  * @property {number[]} floors        andares com varredura, em ordem crescente
  * @property {number} floor           andar marcado agora
  * @property {number} durationS       tempo de caminhada (escala aplicada, pausas fora)
@@ -123,6 +126,14 @@ export const SURVEY_THRESHOLDS = Object.freeze({
   /** variação do sinal (dB) abaixo da qual a pessoa não saiu do lugar; só vale com `stillAfter` medições */
   stillSpreadDb: 7,
   stillAfter: 15,
+  /**
+   * Roteadores ouvidos com frequência: com um só não há mapa (na bancada, o resultado fica quase tão
+   * ruim quanto pôr todas as leituras num ponto só); com dois, sai pouco confiável. Só vale depois de
+   * `fewDevicesAfter` varreduras (no começo ainda não deu tempo de ouvir os vizinhos).
+   */
+  minDevices: 2,
+  wantDevices: 3,
+  fewDevicesAfter: 8,
 });
 
 export const RECORDER_LIMITS = Object.freeze({
@@ -829,6 +840,9 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     if (s.state === 'paused') return 'Em pausa. Toque em continuar quando voltar a andar.';
     if (s.full) return 'Este levantamento chegou ao tamanho máximo. Finalize para ver o mapa.';
     if (s.scans === 0) return 'Aguardando a primeira varredura do Wi-Fi…';
+    if (s.scans >= T.fewDevicesAfter && s.devicesOften < T.minDevices) {
+      return 'Só um roteador ao alcance: para montar o mapa o app precisa ouvir pelo menos três (os dos vizinhos contam). Aqui não vai dar.';
+    }
     if (s.spot) {
       if (s.spot.scans >= s.spot.target) return 'Ponto marcado. Pode seguir para o próximo lugar.';
       if (s.spot.target === 1) return 'Fique parado até a varredura deste ponto chegar (pode levar meio minuto).';
@@ -840,6 +854,9 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     if (s.throttled && s.level !== 'bom' && s.level !== 'otimo') {
       const missing = Math.max(1, (s.level === 'insuficiente' ? T.minSpots : T.goodSpots) - s.spots);
       return `O celular está limitando as buscas: pare em cada lugar e marque um ponto (faltam ${missing}).`;
+    }
+    if (s.scans >= T.fewDevicesAfter && s.devicesOften < T.wantDevices) {
+      return 'Só dois roteadores ao alcance: o mapa sai pouco confiável. Continue andando; se aparecerem redes de vizinhos, melhora.';
     }
     if (s.level === 'insuficiente') {
       const missing = Math.max(1, T.minUseful - s.useful);
@@ -874,13 +891,19 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     const spotCount = perSpot.size;
     const devices = deviceMap();
     const heard = new Set();
-    const heardDevices = new Set();
+    const heardDevices = new Map(); // aparelho -> em quantas varreduras apareceu
+    const inScan = new Set();
     for (const s of scans) {
+      inScan.clear();
       for (const r of s.readings) {
         heard.add(r.id);
-        heardDevices.add(devices.get(r.id) || r.id);
+        inScan.add(devices.get(r.id) || r.id);
       }
+      for (const d of inScan) heardDevices.set(d, (heardDevices.get(d) || 0) + 1);
     }
+    const oftenMin = Math.max(1, Math.ceil(0.2 * scans.length));
+    let devicesOften = 0;
+    for (const n of heardDevices.values()) if (n >= oftenMin) devicesOften += 1;
     const pace = cadence();
     const { cadenceS, throttled } = pace;
     const spreadDb = spread();
@@ -890,6 +913,9 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     if (useful >= T.goodUseful || spotCount >= T.goodSpots) level = 2;
     if ((useful >= T.greatUseful || spotCount >= T.greatSpots) && labels.length >= T.labelsWanted) level = 3;
     if (useful >= T.stillAfter && spreadDb !== null && spreadDb < T.stillSpreadDb) level = 0;
+    if (scans.length >= T.fewDevicesAfter && devicesOften < T.minDevices) level = 0;
+    // dois roteadores: dá para concluir, mas o mapa sai fraco por mais que se ande
+    else if (scans.length >= T.fewDevicesAfter && devicesOften < T.wantDevices) level = Math.min(level, 1);
 
     const active = currentSpot !== null ? spots.get(currentSpot) : null;
     const out = {
@@ -902,6 +928,7 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
       labels,
       aps: heard.size,
       devices: heardDevices.size,
+      devicesOften,
       floors: [...floors].sort((a, b) => a - b),
       floor,
       durationS: Math.round(walkMs / 100) / 10,

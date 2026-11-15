@@ -233,7 +233,7 @@
 
 .mtr-chart {
   min-height: 150px;
-  margin-inline: -4px;
+  margin-left: -4px; margin-right: -4px;
 }
 
 .mtr-chart__canvas {

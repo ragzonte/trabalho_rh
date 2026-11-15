@@ -447,7 +447,8 @@ test('de 1 a 3 varreduras, um ponto só e pontos em linha', () => {
   }
   const one = buildMap(...Object.values(synth({ points: cases['uma varredura'], aps })), {});
   assert.equal(one.quality.level, 'fraca');
-  assert.ok(one.quality.notes.some((n) => n.includes('Poucos pontos')));
+  assert.equal(one.quality.usable, false, 'uma leitura só não é um mapa');
+  assert.match(one.quality.notes[0], /^Só 1 leitura: é pouco para desenhar um mapa/);
 });
 
 test('solução ruim: pontos sem posição, tudo no zero, coordenadas absurdas, roteadores faltando', () => {
@@ -920,19 +921,41 @@ test('qualidade: notas concretas sobre o que limita o mapa', () => {
   few.solution.scaleConf = 0.1;
   const weak = buildMap(few.survey, few.solution, {});
   const notes = weak.quality.notes.join(' | ');
-  assert.match(notes, /Poucos pontos: ande por mais cômodos/);
-  assert.match(notes, /Só um roteador forte por perto: as posições ficam menos precisas/);
-  assert.match(notes, /Varreduras lentas/);
-  assert.match(notes, /escala é incerta/);
+  // Um roteador só: disso não sai mapa, e é a primeira coisa que o mapa diz.
+  assert.match(weak.quality.notes[0], /^Só um roteador ao alcance\. .*pelo menos três roteadores/);
+  assert.equal(weak.quality.usable, false);
+  assert.match(notes, /Poucas leituras: ande por mais cômodos/);
+  assert.match(notes, /Leituras lentas/);
   assert.match(notes, /nenhum lugar tem nome: pare em pelo menos dois cômodos/);
   assert.equal(weak.quality.level, 'fraca');
+
+  // Os mesmos lugares com três vizinhos ao alcance: mapa fraco, mas mapa; e o tamanho incerto vem com o remédio.
+  const some = synth({ points: serpentine(0, 0, 4, 3, 2, 1), aps: [...aps, ...NEIGHBOURS.slice(0, 3)], interval: 30 });
+  some.solution.scaleConf = 0.1;
+  const poor = buildMap(some.survey, some.solution, {});
+  assert.equal(poor.quality.usable, true);
+  assert.match(poor.quality.notes.join(' | '), /O tamanho é incerto: .*Ajustar a escala/);
+  assert.doesNotMatch(poor.quality.notes.join(' | '), /Só um roteador ao alcance/);
+  // Dois roteadores: desenha, avisa que pode não lembrar a casa e não passa de 'fraca'.
+  const two = synth({ points: serpentine(0.5, 0.5, 6.5, 5.5, 5, 0.8), aps: [...aps, NEIGHBOURS[0]] });
+  const twoQ = buildMap(two.survey, two.solution, {}).quality;
+  assert.equal(twoQ.usable, true);
+  assert.equal(twoQ.level, 'fraca');
+  assert.match(twoQ.notes.join(' | '), /Só dois roteadores ao alcance/);
+  // Parado no mesmo lugar (o sinal não muda): não é um mapa, e a nota diz o que fazer.
+  const stuck = synth({ points: Array.from({ length: 30 }, (_, i) => ({ x: 2 + 0.05 * Math.sin(i), y: 2 })), aps: [...aps, ...NEIGHBOURS] });
+  const stuckQ = buildMap(stuck.survey, stuck.solution, {}).quality;
+  assert.equal(stuckQ.usable, false);
+  assert.match(stuckQ.notes[0], /O sinal quase não mudou.*Ande por todos os cômodos/);
+  assert.equal(stuckQ.level, 'fraca');
 
   // Levantamento farto: nível bom, sem aviso de falta de dados.
   const { survey, solution } = bigSurvey();
   const good = buildMap(survey, solution, { own: ['own:24'] });
   assert.equal(good.quality.level, 'boa');
+  assert.equal(good.quality.usable, true);
   assert.ok(good.quality.expectedErrorM >= 0.5 && good.quality.expectedErrorM <= 3, `erro esperado ${good.quality.expectedErrorM}`);
-  assert.doesNotMatch(good.quality.notes.join(' | '), /Poucos pontos|Só um roteador|Varreduras lentas/);
+  assert.doesNotMatch(good.quality.notes.join(' | '), /Poucas leituras|Só um roteador|Só dois roteadores|Leituras lentas|quase não mudou/);
   // A confiança do solucionador pesa: a mesma caminhada com confiança baixa nos pontos.
   const shaky = structuredClone(solution);
   shaky.points.forEach((p, i) => (p.conf = i % 3 ? 0.15 : 0.3));

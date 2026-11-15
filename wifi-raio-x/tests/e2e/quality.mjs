@@ -23,7 +23,7 @@ import { createWorld } from '../../app/js/sim/world.js';
 import { buildMap } from '../../app/js/mapping/mapmodel.js';
 import { FLOOR_HEIGHT } from '../../app/js/mapping/types.js';
 import { evaluate } from '../mapping/metrics.mjs';
-import { evaluateMap } from '../mapping/map-eval.mjs';
+import { evaluateMap, truthSolution } from '../mapping/map-eval.mjs';
 
 /** A lista de uma varredura chega ~1,35 s (simulados) depois do meio da escuta: é esse o instante da posição real. */
 const SWEEP_MID_S = 1.35;
@@ -90,6 +90,41 @@ export function simWorld(id, seed = 1) {
   const spec = presetSpec(id, seed);
   spec.aps.push(...hostileNeighbours(spec));
   return createWorld(spec, seed);
+}
+
+/**
+ * Lugares difíceis de verdade, feitos do apartamento pronto tirando roteadores:
+ *   'emulador'         um roteador só, sempre a -50 dBm (é o que o emulador do Android oferece)
+ *   'um-roteador'      só o roteador da casa (um rádio)
+ *   'dois-roteadores'  o da casa e um vizinho
+ * Devolve a receita (quais BSSIDs ficam e a propagação); a página e o Node montam o mundo dela.
+ */
+export const HARD_PLACES = Object.freeze({
+  emulador: { preset: 'apartamento', keep: ['cc:d4:a1:3c:0e:00'], eirpDbm: 8, rf: { n: 0.0001, wallScale: 0, shadowSigmaDb: 0, fadeSigmaDb: 0, noiseSigmaDb: 0, outlierProb: 0, bodyLossDb: [0, 0, 0], missProb: 0 } },
+  'um-roteador': { preset: 'apartamento', keep: ['cc:d4:a1:3c:0e:00'], rf: {} },
+  'dois-roteadores': { preset: 'apartamento', keep: ['cc:d4:a1:3c:0e:00', 'cc:d4:a1:bc:78:e0'], rf: {} },
+});
+
+/** O mundo de uma receita de HARD_PLACES (no Node). */
+export function hardWorld(recipe) {
+  const spec = presetSpec(recipe.preset, 1);
+  spec.aps = spec.aps.filter((a) => recipe.keep.includes(a.bssid));
+  if (recipe.eirpDbm !== undefined) for (const a of spec.aps) a.eirpDbm = recipe.eirpDbm;
+  return createWorld(spec, 1, recipe.rf || {});
+}
+
+/** Troca o mundo do simulador da página pelo de uma receita de HARD_PLACES (antes de começar o levantamento). */
+export async function loadHardPlace(page, recipe) {
+  await page.evaluate(async (r) => {
+    const { presetSpec } = await import('./js/sim/presets.js');
+    const { createWorld } = await import('./js/sim/world.js');
+    const { currentSim } = await import('./js/sim/backend.js');
+    const spec = presetSpec(r.preset, 1);
+    spec.aps = spec.aps.filter((a) => r.keep.includes(a.bssid));
+    if (r.eirpDbm !== undefined) for (const a of spec.aps) a.eirpDbm = r.eirpDbm;
+    // mundo já montado: o simulador usa como está (sem acrescentar os vizinhos da demonstração)
+    currentSim().loadWorld(createWorld(spec, 1, r.rf || {}));
+  }, recipe);
 }
 
 function positionAt(trace, t) {
@@ -165,8 +200,8 @@ const median = (v) => {
  * @param {{probe: object, record: {survey:object, solution:object, own:string[]}}} o
  * @returns {object} números da sessão (ver as chaves no fim)
  */
-export function evaluateSession({ probe, record }) {
-  const world = simWorld(probe.world, probe.seed);
+export function evaluateSession({ probe, record, world: given }) {
+  const world = given || simWorld(probe.world, probe.seed);
   // O Node refez o mesmo mundo da página?
   const mine = new Map(world.aps.map((a) => [a.bssid, a]));
   for (const [id, x, y] of probe.aps) {
@@ -190,6 +225,8 @@ export function evaluateSession({ probe, record }) {
   const pos = evaluate(solution, truth, survey);
   const map = evaluateMap(scenario, solution, { own: record.own || [] });
   const model = buildMap(survey, solution, { own: record.own || [] });
+  // O teto deste levantamento: o mesmo mapa com as posições reais (o que falta aqui é caminhada, não conta).
+  const ideal = evaluateMap(scenario, truthSolution(scenario), { own: record.own || [] }).metrics;
 
   // Relógio de caminhada x tempo simulado: os intervalos entre varreduras seguidas têm de bater
   // (é aqui que aparece tempo fora de escala, pausa contada como caminhada...).
@@ -261,6 +298,11 @@ export function evaluateSession({ probe, record }) {
     notes: model.quality.notes,
     scaleConf: model.quality.scaleConf,
     solverConf: median(solution.points.map((p) => p.conf)),
+    idealAreaRatio: ideal.ratio,
+    idealIou: ideal.iou,
+    idealAriIn: ideal.ariIn,
+    idealNameAcc: ideal.nameAcc,
+    idealHeatRmse: ideal.heatRmse,
     maxSkip: t.maxSkip,
   };
 }

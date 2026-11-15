@@ -317,7 +317,7 @@ test('fluxo completo: demonstração automática -> prévia -> resultado -> salv
     await openPanel(page);
     await panelButton(page, 'Ajustar a escala').click();
     await page.waitForSelector('.mrs-scale');
-    assert.match(await text(page, '.mrs-scale'), /25% maior ou menor/);
+    assert.match(await text(page, '.mrs-scale'), /costumam sair um pouco menores .* podem errar 25% ou mais/);
     const estimate = await text(page, '.mrs-scale__now');
     const meters = Number(estimate.match(/≈\s*([\d,]+)/)[1].replace(',', '.'));
     assert.ok(meters >= 1, `distância estimada: ${estimate}`);

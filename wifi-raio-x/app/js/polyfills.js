@@ -133,4 +133,43 @@ if (typeof CanvasRenderingContext2D !== 'undefined') {
   });
 }
 
-export {};
+// --- CSS: `gap` em contêiner flex (Chrome 84) -----------------------------------
+// `CSS.supports('gap', ...)` não serve: responde "sim" por causa do grid. O jeito é medir.
+function flexGapWorks(doc) {
+  const host = doc.body || doc.documentElement;
+  if (!host) return true;
+  const box = doc.createElement('div');
+  box.style.cssText = 'display:flex;flex-direction:column;row-gap:1px;position:absolute;visibility:hidden;margin:0;padding:0;border:0';
+  box.appendChild(doc.createElement('div'));
+  box.appendChild(doc.createElement('div'));
+  host.appendChild(box);
+  const works = box.scrollHeight === 1;
+  host.removeChild(box);
+  return works;
+}
+
+/**
+ * Onde falta o `gap` em flex, carrega css/flex-gap-fallback.css (gerada por tools/flex-gap-fallback.mjs)
+ * ANTES das outras folhas, para as margens que o app dá aos filhos continuarem valendo, e marca
+ * <html class="no-flex-gap">. `force` = carregar de qualquer jeito (testes).
+ * @returns {boolean} a folha de reserva foi (ou já estava) carregada
+ */
+export function ensureFlexGap(doc = globalThis.document, force = false) {
+  if (!doc || !doc.head || typeof doc.createElement !== 'function') return false;
+  if (doc.getElementById('wrx-flex-gap-css')) return true;
+  let works = true;
+  try {
+    works = flexGapWorks(doc);
+  } catch {
+    // sem como medir: fica como está
+  }
+  if (works && !force) return false;
+  const link = doc.createElement('link');
+  link.id = 'wrx-flex-gap-css';
+  link.rel = 'stylesheet';
+  link.href = new URL('../css/flex-gap-fallback.css', import.meta.url).href;
+  doc.head.insertBefore(link, doc.head.querySelector('link[rel="stylesheet"], style'));
+  doc.documentElement.classList.add('no-flex-gap');
+  return true;
+}
+if (typeof document !== 'undefined') ensureFlexGap();

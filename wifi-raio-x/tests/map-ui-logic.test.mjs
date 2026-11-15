@@ -239,6 +239,48 @@ test('qualityInfo: palavras honestas para cada nível', () => {
   assert.equal(weak.level, 'fraca');
   assert.equal(weak.errorText, 'Posições aproximadas');
   assert.match(weak.scaleText, /escala/);
+
+  // tamanho: a folga declarada acompanha a confiança de escala (números da bancada, em ACCURACY)
+  assert.match(L.qualityInfo({ level: 'boa', scaleConf: 0.56 }).scaleText, new RegExp(`folga de uns ${L.ACCURACY.scalePct}%`));
+  assert.match(L.qualityInfo({ level: 'boa', scaleConf: 0.45 }).scaleText, new RegExp(`pode errar ${L.ACCURACY.scaleLowPct}%`));
+  assert.match(good.scaleText, /distância que você mediu/);
+  assert.equal(good.usable, true);
+
+  // levantamento de que não sai mapa: o motivo vira o texto principal, sem erro típico nem tamanho
+  const none = L.qualityInfo({ level: 'fraca', usable: false, expectedErrorM: 2.1, scaleConf: 0.5, notes: ['Só um roteador ao alcance. Etc.', 'Poucas leituras: ande por mais cômodos.'] });
+  assert.equal(none.usable, false);
+  assert.equal(none.label, 'Sem mapa');
+  assert.equal(none.text, 'Só um roteador ao alcance. Etc.');
+  assert.doesNotMatch(none.errorText, /erro típico/);
+  assert.deepEqual(none.notes, ['Poucas leituras: ande por mais cômodos.']);
+});
+
+test('hasRooms / roomsInvite: sem dois lugares com nome o mapa não tem ambientes, e a tela convida a marcar', () => {
+  const withRooms = makeMap('apartamento');
+  assert.equal(L.hasRooms(withRooms.model), true);
+  assert.equal(L.roomsInvite(withRooms.model), null);
+  assert.equal(L.heatChoices(withRooms.model)[0].label, 'Ambientes');
+
+  const plain = makeMap('apartamento', { labelRate: 0 });
+  assert.equal(L.hasRooms(plain.model), false);
+  assert.equal(L.heatChoices(plain.model)[0].label, 'Área');
+  const invite = L.roomsInvite(plain.model);
+  assert.equal(invite.all, true);
+  assert.match(invite.text, /não inventa divisões/);
+  assert.match(invite.text, /Continuar mapeando/);
+  assert.match(invite.text, /pelo menos dois cômodos/);
+
+  // dois andares, nomes só no de baixo: o convite fala do andar que ficou sem divisão
+  const two = makeMap('sobrado');
+  const upstairs = structuredClone(two.survey);
+  for (const sc of upstairs.scans) if (sc.floor !== 0) delete sc.label;
+  const half = buildMap(upstairs, two.solution, { own: two.own });
+  assert.equal(L.hasRooms(half), true);
+  const part = L.roomsInvite(half);
+  assert.equal(part.all, false);
+  assert.match(part.title, /1º andar: sem divisão em ambientes/);
+  assert.equal(L.roomsInvite(null), null);
+  assert.equal(L.hasRooms(null), false);
 });
 
 test('coverageParts: inteiros que somam 100', () => {
@@ -311,7 +353,8 @@ test('heatChoices: ambientes, redes da casa e poucas vizinhas, com nomes sem amb
   };
   const list = L.heatChoices(model);
   assert.deepEqual(list.map((c) => c.kind), ['rooms', 'own', 'own', 'other', 'other', 'other', 'other']);
-  assert.deepEqual(list.map((c) => c.label), ['Ambientes', 'Casa', 'Casa-5G', 'Rede oculta', 'Rede oculta (2)', HOSTILE, 'v0']);
+  // (este modelo de mentira não tem andares nem ambientes: a primeira opção é só a área)
+  assert.deepEqual(list.map((c) => c.label), ['Área', 'Casa', 'Casa-5G', 'Rede oculta', 'Rede oculta (2)', HOSTILE, 'v0']);
   assert.deepEqual(L.heatChoices(null).map((c) => c.key), ['rooms']);
   assert.equal(L.heatChoices(model, { maxOthers: 0 }).length, 3);
 });

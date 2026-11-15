@@ -1866,43 +1866,120 @@ function buildAps(ctx, grid, floors, centre) {
 // Qualidade
 // ---------------------------------------------------------------------------
 
+// Aparelhos (roteadores) ouvidos com frequência: em pelo menos um quinto das varreduras.
+function devicesHeardOften(ctx) {
+  const { P, fresh, bssids } = ctx;
+  if (!P) return 0;
+  const count = new Map();
+  const seen = new Set();
+  for (let k = 0; k < P; k++) {
+    seen.clear();
+    const list = fresh[k];
+    for (let j = 0; j < list.length; j += 2) seen.add(bssids[list[j]].device);
+    for (const d of seen) count.set(d, (count.get(d) || 0) + 1);
+  }
+  let often = 0;
+  for (const n of count.values()) if (n >= Math.max(1, Math.ceil(0.2 * P))) often++;
+  return often;
+}
+
+// Quanto o sinal dos rádios mais fortes variou ao longo do levantamento (dB; null = sem dados). É a
+// mesma conta do gravador (recorder.js, spread): pouco = as leituras foram feitas todas no mesmo lugar.
+function signalSwing(ctx) {
+  const { P, fresh, bssids } = ctx;
+  const per = bssids.map(() => []);
+  for (let k = 0; k < P; k++) {
+    const list = fresh[k];
+    for (let j = 0; j < list.length; j += 2) per[list[j]].push(list[j + 1]);
+  }
+  const need = Math.max(5, Math.ceil(0.3 * P));
+  const rows = [];
+  for (const list of per) {
+    if (list.length < need) continue;
+    list.sort((p, q) => p - q);
+    rows.push({ mid: quantileSorted(list, 0.5), range: quantileSorted(list, 0.9) - quantileSorted(list, 0.1) });
+  }
+  if (!rows.length) return null;
+  rows.sort((p, q) => q.mid - p.mid);
+  return median(rows.slice(0, 6).map((r) => r.range));
+}
+
+// Calibração do solucionador (solver.js): o erro mediano esperado de um ponto é 0,7 + 0,8 x discordância
+// entre os motores ali, e o do levantamento inteiro é 0,5 + 1,3 x discordância mediana.
+const POINT_ERR = [0.7, 0.8];
+const SURVEY_ERR = [0.5, 1.3];
+/** Variação do sinal (dB) abaixo da qual o levantamento foi feito parado (o mesmo corte do gravador). */
+const STILL_SWING_DB = 7;
+
 function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
   const { path, P, cadence, scans } = ctx;
   const notes = [];
   const scaleConf = isNum(solution.scaleConf) ? clamp(solution.scaleConf, 0, 1) : 0;
   const strong = aps.filter((a) => a.bestRssi >= -70).length;
   const veryStrong = aps.filter((a) => a.bestRssi >= -55).length;
+  const often = devicesHeardOften(ctx);
+  const swing = signalSwing(ctx);
   const confs = path.map((p) => p.conf);
-  const meanConf = P ? confs.reduce((s, v) => s + v, 0) / P : 0;
   const flat = P > 0 && Math.max(...confs) - Math.min(...confs) < 1e-6;
   const collapsed = ctx.collapsed;
 
-  // Erro típico esperado, calibrado na bancada com quatro solucionadores: cresce com o tamanho
-  // do lugar (perto da raiz da área de um andar), com varreduras lentas e com mais de um andar;
-  // a confiança que o próprio solucionador declara e a falta de dados ajustam em volta disso.
+  // ERRO TÍPICO ESPERADO (mediano, em metros). Duas fontes, que erram de jeitos diferentes:
+  //  - o tamanho do lugar: na bancada (88 levantamentos simulados, solucionador final) o erro mediano
+  //    cresce perto da raiz da área de um andar — 0,8 m numa kitnet de 30 m², 1,2 m num apartamento
+  //    de 63 m², 2,2 m num escritório de 280 m² —, é ~45% maior com uma varredura a cada 30 s e
+  //    ~35% maior numa casa de dois andares;
+  //  - o que a própria solução declara: a confiança de cada ponto vem da discordância entre os
+  //    motores ali (conf = 1 / (1 + (e / 1,5)²)), e dela sai o erro do levantamento pela calibração
+  //    do solucionador. Sozinha ela subestima os lugares grandes, que todos os motores encolhem
+  //    juntos sem discordar.
+  // A média das duas errou 0,27 m em média na bancada (viés +0,07 m); cada uma sozinha, ~0,30 m.
+  // Solução sem confiança própria (todas iguais: posições dadas de fora) fica só com o tamanho.
   const perFloor = Math.max(8, areaM2 / Math.max(1, floors.length));
-  const base = 1.45 * Math.pow(perFloor / 60, 0.54);
-  let err = base;
+  const typical = 1.2 * Math.pow(perFloor / 60, 0.54);
+  let err = typical;
   if (cadence > 10) err *= 1.45;
   if (floors.length > 1) err *= 1.35;
-  if (!flat) err *= clamp(1.3 - 0.5 * meanConf, 0.85, 1.3);
+  if (P && !flat) {
+    const point = CONF_HALF_M * Math.sqrt(1 / clamp(median(confs), 0.02, 1) - 1);
+    const declared = SURVEY_ERR[0] + SURVEY_ERR[1] * Math.max(0, (point - POINT_ERR[0]) / POINT_ERR[1]);
+    err = 0.5 * (err + declared);
+  }
   if (strong < 3) err *= 1.4;
   if (P < 25) err *= 1.3;
   if (scaleConf < 0.3) err *= 1.1;
   if (collapsed || !P) err = Math.max(err, 5);
-  if (P && meanConf < 0.02 && flat) err = Math.max(err, 4);
+  if (P && flat && confs[0] < 0.02) err = Math.max(err, 4);
   err = Math.round(clamp(err, 0.5, 9) * 10) / 10;
 
-  if (!scans.length) notes.push('Nenhuma varredura: ande pela casa com o levantamento ligado.');
-  else if (!P) notes.push('Não foi possível estimar as posições deste levantamento.');
+  // ISTO É UM MAPA? Há levantamentos de que não sai mapa nenhum, por mais conta que se faça; a
+  // primeira nota diz por quê e o que fazer, e `usable: false` avisa a tela para não apresentar o
+  // desenho como se fosse a casa.
+  let usable = true;
+  const stop = (text) => {
+    if (usable) notes.push(text);
+    usable = false;
+  };
+  if (!scans.length) stop('Nenhuma leitura: ande pela casa com o mapeamento ligado.');
+  else if (!P) stop('Não foi possível estimar as posições deste levantamento.');
   else {
-    if (collapsed) notes.push('As posições ficaram todas no mesmo lugar: o levantamento não tem informação suficiente.');
-    if (P < 25) notes.push('Poucos pontos: ande por mais cômodos.');
-    else if (P < 50) notes.push('O mapa melhora com mais pontos: ande mais devagar e passe por todos os cômodos.');
-    if (strong < 3) notes.push('Só um roteador forte por perto: as posições ficam menos precisas.');
-    if (cadence > 10) notes.push('Varreduras lentas (o Android limita a uma a cada 30 s): marque mais pontos ou desligue o limite nas opções do desenvolvedor.');
-    if (scaleConf < 0.3) notes.push('A escala é incerta: as distâncias em metros podem estar bem fora.');
-    else if (scaleConf < 0.6) notes.push('A escala é aproximada: as distâncias podem variar uns 25%.');
+    if (often <= 1) {
+      stop(
+        'Só um roteador ao alcance. Para descobrir onde cada leitura foi feita o app precisa ouvir pelo menos três roteadores (o seu e os dos vizinhos contam); com um só, o desenho não representa a casa.',
+      );
+    } else if (P >= 12 && swing !== null && swing < STILL_SWING_DB) {
+      stop('O sinal quase não mudou do começo ao fim: as leituras parecem ter sido feitas todas no mesmo lugar. Ande por todos os cômodos com o mapeamento ligado.');
+    } else if (collapsed) stop('As posições ficaram todas no mesmo lugar: as leituras não têm informação suficiente para um mapa.');
+    else if (P < 8) stop(`Só ${P} ${P === 1 ? 'leitura' : 'leituras'}: é pouco para desenhar um mapa. Continue o mapeamento e ande por todos os cômodos.`);
+
+    if (usable && often === 2) notes.push('Só dois roteadores ao alcance: as posições ficam pouco confiáveis e o desenho pode não lembrar a casa.');
+    if (P >= 8 && P < 25) notes.push('Poucas leituras: ande por mais cômodos.');
+    else if (P >= 25 && P < 50) notes.push('O mapa melhora com mais leituras: ande mais devagar e passe por todos os cômodos.');
+    if (usable && often > 2 && strong < 3) notes.push('Só um roteador chega forte aqui: as posições ficam menos precisas.');
+    if (cadence > 10) notes.push('Leituras lentas (o Android limita a uma a cada 30 s): marque mais lugares ou desligue o limite nas opções do desenvolvedor.');
+    // Tamanho. Na bancada a nuvem de pontos sai em média 13% menor que a casa; com esta confiança
+    // de escala, metade dos mapas erra o tamanho em mais de 11% (abaixo de 0,5: em mais de 25%).
+    if (usable && scaleConf < 0.5) notes.push('O tamanho é incerto: as distâncias em metros podem errar 40%. Para acertar, informe uma distância real em “Ajustar a escala”.');
+    else if (usable && scaleConf < 0.7) notes.push('O tamanho é aproximado: as distâncias costumam sair um pouco menores que as reais e podem errar uns 25%.');
     // Sem pelo menos dois lugares com nome num andar, ele sai como uma área só (ver buildFloor).
     const plain = floors.filter((f) => !f.rooms.length).length;
     const named = new Set(spots.map((s) => s.label.toLowerCase()).filter(Boolean)).size;
@@ -1910,15 +1987,19 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
       if (!named) notes.push('O mapa não separa os ambientes porque nenhum lugar tem nome: pare em pelo menos dois cômodos, marque o lugar e diga onde está.');
       else notes.push('Só um lugar tem nome: marque pelo menos mais um para o mapa separar os ambientes.');
     } else if (plain > 0) notes.push('Num dos andares há menos de dois lugares com nome: ali o mapa não separa os ambientes.');
-    if (!veryStrong && strong >= 3) notes.push('Nenhum roteador chega forte aqui: o sinal fraco deixa o mapa menos nítido.');
+    if (usable && !veryStrong && strong >= 3) notes.push('Nenhum roteador chega forte aqui: o sinal fraco deixa o mapa menos nítido.');
+    if (usable && floors.length > 1) notes.push('Mais de um andar é o caso mais difícil só com o Wi-Fi: espere mais lugares fora do cômodo certo do que numa casa térrea.');
   }
   // Nível: o erro esperado comparado com o que se consegue num lugar deste tamanho (num
   // escritório grande, 2,5 m de erro é um bom levantamento; numa kitnet, não).
-  const excess = err / base;
+  const excess = err / typical;
   let level = 'fraca';
-  if (P >= 40 && excess <= 1.15 && err <= 3.5) level = 'boa';
-  else if (P >= 15 && excess <= 1.75 && err <= 5) level = 'razoavel';
-  if (level === 'boa' && !notes.length) notes.push('Levantamento bom: posições com erro típico de 1 a 2 metros.');
+  if (usable && often > 2) {
+    // Mais de um andar nunca passa de 'razoavel': é o caso mais difícil (na bancada, 3 em cada 5
+    // leituras caem no cômodo certo num sobrado, contra 4 em 5 ou mais nas casas de um andar).
+    if (P >= 40 && excess <= LEVEL_GOOD && err <= 3.5 && floors.length === 1) level = 'boa';
+    else if (P >= 15 && excess <= LEVEL_FAIR && err <= 5) level = 'razoavel';
+  }
   return {
     scans: P,
     spots: spots.length,
@@ -1927,9 +2008,14 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     scaleConf,
     expectedErrorM: err,
     level,
+    usable,
     notes,
   };
 }
+
+/** Erro esperado / erro típico do tamanho do lugar: até aqui o levantamento é 'boa'; até o segundo, 'razoavel'. */
+const LEVEL_GOOD = 1.25;
+const LEVEL_FAIR = 1.9;
 
 // ---------------------------------------------------------------------------
 // buildMap
@@ -2591,6 +2677,12 @@ export function describeMap(model) {
   const roomCount = floors.reduce((s, f) => s + f.rooms.length, 0);
   if (!q.scans || q.areaM2 <= 0) {
     out.push('Ainda não há mapa: faça um levantamento andando pela casa com o Wi-Fi ligado.');
+    for (const n of q.notes) out.push(n);
+    return out;
+  }
+  if (q.usable === false) {
+    // Levantamento de que não sai mapa: diz isso, o motivo e o que fazer; nada de área nem ambientes.
+    out.push(`Deste levantamento (${q.scans} ${q.scans === 1 ? 'varredura' : 'varreduras'}) não saiu um mapa.`);
     for (const n of q.notes) out.push(n);
     return out;
   }

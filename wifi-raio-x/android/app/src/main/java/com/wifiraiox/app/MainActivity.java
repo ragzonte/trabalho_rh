@@ -6,6 +6,7 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -144,6 +145,8 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
         settings.setSupportZoom(false);
         settings.setBuiltInZoomControls(false);
         settings.setMediaPlaybackRequiresUserGesture(true);
+        // WebViews antigos só contam à página que o celular está no modo escuro se o app pedir.
+        WebDarkMode.apply(settings, getResources().getConfiguration());
 
         view.setBackgroundColor(getColor(R.color.page)); // sem clarão branco antes da página pintar
         view.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -163,6 +166,22 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
                 return true;
             }
         });
+    }
+
+    /**
+     * Girar a tela, trocar o modo claro/escuro ou o tamanho da fonte não recria a tela (veja
+     * configChanges no manifesto); o que precisa acompanhar a mudança é atualizado aqui.
+     */
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        WebView view = web;
+        if (view == null) return;
+        try {
+            WebDarkMode.apply(view.getSettings(), newConfig);
+        } catch (RuntimeException ignored) {
+            // WebView em encerramento
+        }
     }
 
     @Override

@@ -456,7 +456,7 @@
   align-items: start;
   column-gap: var(--sp-3);
   row-gap: 2px;
-  padding-block: var(--sp-3);
+  padding-top: var(--sp-3); padding-bottom: var(--sp-3);
 }
 
 .best-row__ring {

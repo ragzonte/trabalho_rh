@@ -195,6 +195,9 @@ export const FLOOR_HEIGHT = 2.8;
  * @property {number} scaleConf              0..1
  * @property {number} expectedErrorM         erro típico de posição esperado para este levantamento (m)
  * @property {'boa'|'razoavel'|'fraca'} level
+ * @property {boolean} usable                false = deste levantamento não sai mapa (um roteador só ao alcance,
+ *                                           leituras feitas todas no mesmo lugar, quase nenhuma leitura...): a tela
+ *                                           não deve apresentar o desenho como a casa. notes[0] diz por quê e o que fazer
  * @property {string[]} notes                frases curtas em pt-BR: o que limita a qualidade e o que melhoraria
  */
 

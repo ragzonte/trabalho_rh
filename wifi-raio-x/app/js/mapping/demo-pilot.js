@@ -4,7 +4,8 @@
 // SÓ para o modo demonstração (precisa dos controles do simulador: currentSim() de sim/backend.js).
 //
 //   const pilot = createDemoPilot({ sim, recorder, scanLoop, onStep });
-//   pilot.start({ speed = 8, spots = true })   -> true se começou (também aceita minScans). Se o gravador
+//   pilot.start({ speed, spots = true })       -> true se começou (também aceita minScans). Sem `speed`, o
+//                                              piloto escolhe: 8x, ou mais numa casa grande (veja abaixo). Se o gravador
 //                                              ainda não começou (ou está em pausa), o piloto o põe para gravar;
 //                                              quem encerra a gravação, no fim, é a tela.
 //   pilot.stop()                               para e devolve o simulador como estava
@@ -17,8 +18,12 @@
 //            encerrada pela tela ou casa virtual trocada)
 //     room:  nome do cômodo em que a pessoa virtual está (ou null); progress: 0..1, nunca volta
 //
-// Duração (relógio, velocidade 8): cerca de 30 s na kitnet e no apartamento, 45 s no sobrado e no
-// escritório. O mínimo de varreduras acompanha o tamanho da casa (uma por m², entre 80 e 110).
+// Quanto anda: o mínimo de varreduras acompanha o tamanho da casa (uma por m², entre 80 e 240). É a
+// caminhada que desenha a área: com 110 varreduras num escritório de 280 m² a demonstração cobria
+// um terço dele (medido pelo app inteiro em tests/e2e/map-quality.e2e.mjs). Para a demonstração
+// continuar cabendo em cerca de um minuto, numa casa grande o tempo simulado corre mais depressa:
+// 8x até 110 varreduras, proporcionalmente mais acima disso, até 16x. Duração (relógio): cerca de
+// 35 s na kitnet e no apartamento, 50 a 60 s no sobrado e no escritório.
 //
 // O que ele faz: põe a pessoa para passear ('auto'); ao chegar ao meio de um cômodo ainda sem
 // ponto, para ('still'), marca um ponto com o nome do cômodo (o simulador sabe onde ela está),
@@ -46,8 +51,11 @@ export const PILOT_DEFAULTS = Object.freeze({
   scansPerSpot: 3,
   /** varreduras para terminar: uma por m² de casa, entre estes limites (o nível 'bom' do gravador pede 60 medições úteis) */
   minScans: 80,
-  maxScans: 110,
+  maxScans: 240,
   scansPerM2: 1,
+  /** até tantas varreduras a velocidade é `speed`; acima disso cresce na mesma proporção, até `maxSpeed` */
+  speedScans: 110,
+  maxSpeed: 16,
   /** trocar de andar "custa" isto (m) ao escolher o próximo cômodo */
   floorCostM: 15,
   tickS: 0.4,
@@ -339,16 +347,18 @@ export function createDemoPilot({ sim, recorder, scanLoop = null, onStep, reques
       timeScale: typeof recorder.timeScale === 'number' ? recorder.timeScale : 1,
       loopMode: scanLoop && typeof scanLoop.getState === 'function' ? scanLoop.getState().mode : null,
     };
-    speed = sim.setSpeed(Number.isFinite(opts.speed) && opts.speed > 0 ? opts.speed : cfg.speed);
+    world = sim.world;
+    rooms = reachableRooms(world);
+    const area = rooms.reduce((sum, r) => sum + (Number.isFinite(r.area) ? r.area : 0), 0);
+    minScans = Number.isFinite(opts.minScans) && opts.minScans > 0 ? opts.minScans : Math.max(cfg.minScans, Math.min(cfg.maxScans, Math.round(area * cfg.scansPerM2)));
+    // casa grande = mais caminhada: o tempo corre mais depressa para a demonstração caber em ~1 minuto
+    const auto = Math.min(cfg.maxSpeed, cfg.speed * Math.max(1, minScans / cfg.speedScans));
+    speed = sim.setSpeed(Number.isFinite(opts.speed) && opts.speed > 0 ? opts.speed : auto);
     if (typeof recorder.setTimeScale === 'function') recorder.setTimeScale(speed);
     if (scanLoop && typeof scanLoop.setMode === 'function') scanLoop.setMode('mapping');
     if (recorder.state === 'idle') recorder.start();
     else if (recorder.state === 'paused') recorder.resume();
 
-    world = sim.world;
-    rooms = reachableRooms(world);
-    const area = rooms.reduce((sum, r) => sum + (Number.isFinite(r.area) ? r.area : 0), 0);
-    minScans = Number.isFinite(opts.minScans) && opts.minScans > 0 ? opts.minScans : Math.max(cfg.minScans, Math.min(cfg.maxScans, Math.round(area * cfg.scansPerM2)));
     marks = new Map();
     skipped = new Set();
     visited = new Set();

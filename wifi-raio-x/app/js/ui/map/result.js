@@ -13,6 +13,12 @@
 //     de uma rede, com a legenda em dBm e palavras), 3D / Planta, relevo do sinal, andares, camadas,
 //     e os cartões Cobertura, Sugestão, Qualidade do mapa, "Como este mapa é feito" e as ações.
 //
+// Honestidade em dois casos que não são "um mapa com ambientes":
+//   - menos de dois lugares com nome: o mapa mostra só a área (o construtor não inventa ambientes),
+//     "Mostrar" oferece "Área" em vez de "Ambientes" e um cartão convida a marcar lugares;
+//   - levantamento de que não sai mapa (quality.usable === false: um roteador só ao alcance,
+//     leituras todas no mesmo lugar...): o desenho NÃO aparece; no lugar dele vai o motivo e o que fazer.
+//
 // Ações: salvar / renomear, ajustar a escala (distância real entre dois lugares marcados ->
 // survey.knownDistances -> o motor refaz o mapa), continuar mapeando, imagem (PNG), arquivo do
 // mapa (JSON), apagar. Renomear um ambiente mexe no levantamento (map-ui-logic.renameRoom) e
@@ -34,6 +40,9 @@ import { processingView } from './survey.js';
 import {
   floorName,
   qualityInfo,
+  hasRooms,
+  roomsInvite,
+  ACCURACY,
   coverageParts,
   deadZoneLines,
   placeText,
@@ -293,6 +302,8 @@ export async function mountResult(root, env, { id }) {
   // --- dados derivados -----------------------------------------------------
 
   const multiFloor = () => S.model.floors.length > 1;
+  /** false = deste levantamento não sai mapa: nada de desenhar o que o solucionador devolveu. */
+  const usable = () => !(S.model.quality && S.model.quality.usable === false);
   const choices = () => heatChoices(S.model);
   const netByKey = (key) => S.model.networks.find((n) => n.key === key) || null;
   /** A rede de que os cartões falam: a mostrada no mapa ou, sem nenhuma, a principal da casa. */
@@ -303,7 +314,7 @@ export async function mountResult(root, env, { id }) {
   // --- visualizador --------------------------------------------------------
 
   function applyHeat() {
-    if (!viewer) return;
+    if (!viewer || !usable()) return;
     if (V.show !== 'rooms' && !netByKey(V.show)) V.show = 'rooms';
     viewer.setHeat(V.show === 'rooms' ? null : fieldsFor(V.show));
     viewer.setLayers({ ...V.layers, relief: V.relief && V.show !== 'rooms' });
@@ -311,6 +322,13 @@ export async function mountResult(root, env, { id }) {
 
   function applyModel({ keepView = false } = {}) {
     if (!viewer) return;
+    // sem mapa, o palco some: o motivo vai num cartão no lugar dele (drawPick)
+    stage.style.visibility = usable() ? '' : 'hidden';
+    if (!usable()) {
+      viewer.setModel(null);
+      viewer.setHeat(null);
+      return;
+    }
     viewer.setModel(S.model, { keepView });
     if (V.floor !== null && !S.model.floors.some((f) => f.floor === V.floor)) V.floor = null;
     viewer.setFocusFloor(V.floor);
@@ -499,10 +517,10 @@ export async function mountResult(root, env, { id }) {
     actionSheet({
       title: 'Compartilhar o mapa',
       actions: [
-        { icon: 'share', label: 'Imagem do mapa', hint: 'A vista de agora, como PNG', onClick: shareImage },
+        usable() ? { icon: 'share', label: 'Imagem do mapa', hint: 'A vista de agora, como PNG', onClick: shareImage } : null,
         { icon: 'file', label: 'Arquivo do mapa', hint: 'Para abrir em outro aparelho com o WiFi Raio-X', onClick: exportFile },
-        { icon: 'copy', label: 'Resumo em texto', hint: 'Área, ambientes e cobertura em palavras', onClick: shareText },
-      ],
+        { icon: 'copy', label: 'Resumo em texto', hint: usable() ? 'Área, ambientes e cobertura em palavras' : 'O que foi medido e por que não saiu um mapa', onClick: shareText },
+      ].filter(Boolean),
     });
   }
 
@@ -544,7 +562,7 @@ export async function mountResult(root, env, { id }) {
     const why = h(
       'div.prose',
       null,
-      h('p', null, 'Só com o Wi-Fi, o tamanho do mapa pode sair até uns 25% maior ou menor que a casa. Se você informar a ', h('strong', null, 'distância real'), ' entre dois lugares marcados, o mapa inteiro é reajustado por ela.'),
+      h('p', null, `Só com o Wi-Fi, as distâncias do mapa costumam sair um pouco menores que as da casa (uns ${ACCURACY.shrinkPct}%, em média) e podem errar ${ACCURACY.scalePct}% ou mais. Se você informar a `, h('strong', null, 'distância real'), ' entre dois lugares marcados, o mapa inteiro é reajustado por ela.'),
       h('p', null, 'Escolha dois lugares bem distantes um do outro e meça com uma trena, ou conte passos largos (um passo largo ≈ 1 m).'),
     );
     if (spots.length < 2) {
@@ -732,12 +750,14 @@ export async function mountResult(root, env, { id }) {
     const fi = pick.floorIndex;
     const roomIndex = room ? model.floors[fi].rooms.indexOf(room) : -1;
     const here = pick.kind === 'cell' && Number.isFinite(pick.dbm) && netByKey(V.show) ? h('p.mrs-pick__here', null, 'Neste ponto: ', h('strong', null, `${approxDbm(pick.dbm)} · ${signalWordAt(pick.dbm)}`)) : null;
+    // andar sem divisão em ambientes (menos de dois lugares com nome): o toque cai na área inteira
+    const plain = !room && model.floors[fi] && !model.floors[fi].rooms.length;
     return {
-      title: room ? h('span', { dir: 'auto' }, room.label) : 'Trecho sem ambiente',
+      title: room ? h('span', { dir: 'auto' }, room.label) : plain ? 'Área mapeada' : 'Trecho sem ambiente',
       badge: room && room.auto ? badge('Nome automático') : null,
       edit: room ? () => renameRoomFlow(pick) : null,
       body: [
-        h('p.mrs-pick__line', null, [room && room.areaM2 > 0 ? `Área ≈${THIN}${fmtNum(Math.max(1, Math.round(room.areaM2)))}${THIN}m²` : null, floorText].filter(Boolean).join(' · ') || 'Área aproximada'),
+        h('p.mrs-pick__line', null, [room && room.areaM2 > 0 ? `Área ≈${THIN}${fmtNum(Math.max(1, Math.round(room.areaM2)))}${THIN}m²` : null, floorText].filter(Boolean).join(' · ') || (plain ? 'Sem divisão em ambientes: nenhum lugar (ou só um) tem nome.' : 'Área aproximada')),
         here,
         room && roomIndex >= 0 ? h('p.mrs-pick__sub', null, 'Sinal médio neste ambiente:') : null,
         room && roomIndex >= 0 ? signalRows((key) => roomSignal(model, fi, roomIndex, heatField(model, fi, key))) : null,
@@ -747,6 +767,22 @@ export async function mountResult(root, env, { id }) {
 
   function drawPick() {
     if (dead) return;
+    if (!usable()) {
+      // no lugar do desenho: por que não há mapa e o que fazer
+      const q = qualityInfo(S.model.quality);
+      patch(
+        floatEl,
+        h(
+          'article.mrs-pick.mrs-nomap',
+          { key: 'nomap', role: 'status' },
+          h('div.mrs-nomap__head', null, icon('warning', { size: 22 }), h('h3.mrs-pick__title', null, 'Não deu para montar um mapa')),
+          h('p.mrs-nomap__text', null, q.text),
+          h('p.mrs-pick__note', null, 'As leituras continuam guardadas: dá para continuar este mapeamento de onde parou.'),
+          h('div.mrs-nomap__actions', null, button('Continuar mapeando', { variant: 'primary', icon: 'walk', onClick: () => void continueSurvey() })),
+        ),
+      );
+      return;
+    }
     const pick = V.pick;
     if (!pick) {
       patch(floatEl, viewerNote ? h('p.mrs__note', { key: 'note' }, icon('info', { size: 16 }), viewerNote) : null);
@@ -792,7 +828,9 @@ export async function mountResult(root, env, { id }) {
 
   function legend() {
     if (V.show === 'rooms') {
-      return h('p.mrs-legend.mrs-legend--text', { key: 'legend' }, 'Cada cor é um ambiente estimado. Toque num ambiente, roteador ou lugar marcado para ver os detalhes.');
+      return hasRooms(S.model)
+        ? h('p.mrs-legend.mrs-legend--text', { key: 'legend' }, 'Cada cor é um ambiente estimado. Toque num ambiente, roteador ou lugar marcado para ver os detalhes.')
+        : h('p.mrs-legend.mrs-legend--text', { key: 'legend' }, 'A área por onde você andou, sem divisão em ambientes (nenhum lugar, ou só um, tem nome). Escolha uma rede acima para ver o sinal.');
     }
     const theme = store.get().theme;
     const scale = signalScale(theme);
@@ -848,8 +886,93 @@ export async function mountResult(root, env, { id }) {
     );
   }
 
+  /** "Como este mapa é feito": os números são os da bancada (ACCURACY em map-ui-logic.js). */
+  function howCard() {
+    const [errLo, errHi] = ACCURACY.homeErrorM;
+    const [roomHit, roomOf] = ACCURACY.rightRoom;
+    const [roomHit2, roomOf2] = ACCURACY.rightRoomTwoFloors;
+    return h(
+      'section.card.mrs-card',
+      { key: 'how' },
+      h('h3.card__title', null, 'Como este mapa é feito'),
+      h(
+        'div.prose',
+        null,
+        h('p', null, h('strong', null, 'Só com o Wi-Fi. '), 'Em cada canto da casa o celular ouve os roteadores (o seu e os dos vizinhos) com uma força diferente. O app compara essas leituras para estimar onde cada uma foi feita e desenha a área por onde você andou.'),
+        h(
+          'p',
+          null,
+          h('strong', null, 'Por que é aproximado. '),
+          `O sinal muda com paredes, móveis e até com o seu corpo. Em casas e apartamentos simulados, cada posição erra tipicamente de ${errLo} a ${errHi} metros (perto de ${fmtNum(ACCURACY.largeErrorM, 1)}${THIN}m num lugar grande, como um escritório), e cerca de ${roomHit} em cada ${roomOf} leituras caem no cômodo certo (${roomHit2} em cada ${roomOf2} numa casa de dois andares). As divisões entre ambientes são estimativas, não paredes medidas.`,
+        ),
+        h(
+          'p',
+          null,
+          h('strong', null, 'O tamanho. '),
+          `As distâncias em metros são a parte mais fraca: saem em média uns ${ACCURACY.shrinkPct}% menores que as reais e podem errar ${ACCURACY.scalePct}% ou mais, sobretudo em lugares grandes. A área do desenho já desconta esse efeito; para as distâncias, meça uma de verdade em “Ajustar a escala”.`,
+        ),
+        h('p', null, h('strong', null, 'Por que pode sair girado ou espelhado. '), 'O Wi-Fi não sabe onde fica o norte nem o que é esquerda ou direita. Gire o mapa com o dedo até reconhecer a casa. Os andares são os que você marcou.'),
+        h('p', null, h('strong', null, 'Ambientes só com nomes. '), 'O mapa só é dividido em ambientes quando você marca pelo menos dois lugares com nome. Sem nomes, as divisões sairiam quase ao acaso, e o app prefere não inventar.'),
+      ),
+    );
+  }
+
+  function saveCard() {
+    return !S.saved
+      ? h(
+          'section.card.card--accent.mrs-card.mrs-save',
+          { key: 'save' },
+          h('div', null, h('h3.card__title', null, S.id !== null ? 'Mapa atualizado, ainda não salvo' : 'Este mapa ainda não foi salvo'), h('p.mrs-card__sub', null, 'O levantamento está guardado como rascunho. Salve para o mapa aparecer na sua lista.')),
+          button('Salvar', { variant: 'primary', icon: 'save', onClick: save }),
+        )
+      : null;
+  }
+
+  function actionsBlock() {
+    return h(
+      'section.mrs-block.mrs-actions',
+      { key: 'actions' },
+      h('h3.mrs-block__title', null, 'Ações'),
+      h(
+        'div.mrs-actions__list',
+        null,
+        S.saved ? button('Renomear', { icon: 'edit', onClick: rename }) : button('Salvar o mapa', { icon: 'save', variant: 'primary', onClick: save }),
+        usable() ? button('Imagem do mapa', { icon: 'share', onClick: shareImage }) : null,
+        button('Exportar arquivo', { icon: 'file', onClick: exportFile }),
+        button(S.saved ? 'Apagar mapa' : 'Descartar', { icon: 'trash', variant: 'danger-quiet', onClick: remove }),
+      ),
+    );
+  }
+
+  /** Levantamento de que não saiu mapa: o painel fica só com o motivo, o que fazer e as ações. */
+  function drawPanelNoMap() {
+    const q = qualityInfo(S.model.quality);
+    const meta = mapMeta(S.model, S.survey);
+    patch(quickEl, h('p.mrs-legend.mrs-legend--text', { key: 'legend' }, 'Deste levantamento não saiu um mapa. Veja abaixo o motivo e o que fazer.'));
+    patch(
+      moreEl,
+      saveCard(),
+      h(
+        'section.card.mrs-card',
+        { key: 'quality' },
+        h('div.mrs-card__head', null, h('h3.card__title', null, 'Por que não há mapa'), badge(q.label, { tone: QUALITY_TONE[q.tone] })),
+        h('p.mrs-card__text', null, q.text),
+        h('ul.mrs-facts', null, h('li', null, icon('route', { size: 18 }), `${plural(meta.scans, 'leitura', 'leituras')} · ${plural(meta.spots, 'lugar marcado', 'lugares marcados')} · ${plural(S.model.quality.aps || 0, 'roteador ouvido', 'roteadores ouvidos')}`)),
+        q.notes.length ? h('div.mrs-notes', null, h('h4.mrs-notes__title', null, 'Também ajuda'), h('ul', null, q.notes.map((n) => h('li', null, n)))) : null,
+        h('div.mrs-card__actions', null, button('Continuar mapeando', { icon: 'walk', variant: 'primary', onClick: () => void continueSurvey() })),
+      ),
+      howCard(),
+      actionsBlock(),
+    );
+  }
+
   function drawPanel() {
     if (dead) return;
+    syncHandle();
+    if (!usable()) {
+      drawPanelNoMap();
+      return;
+    }
     const model = S.model;
     const opts = choices();
     const net = focusNet();
@@ -980,14 +1103,18 @@ export async function mountResult(root, env, { id }) {
         : null,
     );
 
+    const invite = roomsInvite(model);
     patch(
       moreEl,
-      !S.saved
+      saveCard(),
+      // sem lugares com nome o mapa não tem ambientes: o convite para marcá-los vem antes de tudo
+      invite
         ? h(
-            'section.card.card--accent.mrs-card.mrs-save',
-            { key: 'save' },
-            h('div', null, h('h3.card__title', null, S.id !== null ? 'Mapa atualizado, ainda não salvo' : 'Este mapa ainda não foi salvo'), h('p.mrs-card__sub', null, 'O levantamento está guardado como rascunho. Salve para o mapa aparecer na sua lista.')),
-            button('Salvar', { variant: 'primary', icon: 'save', onClick: save }),
+            'section.card.mrs-card.mrs-invite',
+            { key: 'invite' },
+            h('h3.card__title', null, icon('pin', { size: 18 }), invite.title),
+            h('p.mrs-card__text', null, invite.text),
+            h('div.mrs-card__actions', null, button('Continuar mapeando', { icon: 'walk', variant: invite.all ? 'primary' : 'secondary', onClick: () => void continueSurvey() })),
           )
         : null,
       h(
@@ -1051,32 +1178,13 @@ export async function mountResult(root, env, { id }) {
         q.notes.length ? h('div.mrs-notes', null, h('h4.mrs-notes__title', null, 'Como melhorar'), h('ul', null, q.notes.map((n) => h('li', null, n)))) : null,
         h('div.mrs-card__actions', null, button('Ajustar a escala', { icon: 'ruler', onClick: openScale }), button('Continuar mapeando', { icon: 'walk', onClick: () => void continueSurvey() })),
       ),
-      h(
-        'section.card.mrs-card',
-        { key: 'how' },
-        h('h3.card__title', null, 'Como este mapa é feito'),
-        h(
-          'div.prose',
-          null,
-          h('p', null, h('strong', null, 'Só com o Wi-Fi. '), 'Em cada canto da casa o celular ouve os roteadores (o seu e os dos vizinhos) com uma força diferente. O app compara essas leituras para estimar onde cada uma foi feita e desenha a área por onde você andou.'),
-          h('p', null, h('strong', null, 'Por que é aproximado. '), 'O sinal muda com paredes, móveis e até com o seu corpo. Cada posição tem erro de 1 a 2 metros, o tamanho pode variar uns 25% e as divisões entre ambientes são estimativas, não paredes medidas.'),
-          h('p', null, h('strong', null, 'Por que pode sair girado ou espelhado. '), 'O Wi-Fi não sabe onde fica o norte nem o que é esquerda ou direita. Gire o mapa com o dedo até reconhecer a casa. Os andares são os que você marcou.'),
-        ),
-      ),
-      h(
-        'section.mrs-block.mrs-actions',
-        { key: 'actions' },
-        h('h3.mrs-block__title', null, 'Ações'),
-        h(
-          'div.mrs-actions__list',
-          null,
-          S.saved ? button('Renomear', { icon: 'edit', onClick: rename }) : button('Salvar o mapa', { icon: 'save', variant: 'primary', onClick: save }),
-          button('Imagem do mapa', { icon: 'share', onClick: shareImage }),
-          button('Exportar arquivo', { icon: 'file', onClick: exportFile }),
-          button(S.saved ? 'Apagar mapa' : 'Descartar', { icon: 'trash', variant: 'danger-quiet', onClick: remove }),
-        ),
-      ),
+      howCard(),
+      actionsBlock(),
     );
+  }
+
+  function syncHandle() {
+    handleLabel.textContent = V.open ? 'Fechar os detalhes' : usable() ? 'Cobertura, qualidade e ações' : 'O motivo e as ações';
   }
 
   function setOpen(open) {
@@ -1084,7 +1192,7 @@ export async function mountResult(root, env, { id }) {
     panelEl.dataset.open = String(V.open);
     el.classList.toggle('mrs--open', V.open);
     handle.setAttribute('aria-expanded', String(V.open));
-    handleLabel.textContent = V.open ? 'Fechar os detalhes' : 'Cobertura, qualidade e ações';
+    syncHandle();
     handleIcon.replaceChildren(icon(V.open ? 'chevron-down' : 'chevron-up', { size: 18 }));
     if (!V.open) moreEl.scrollTop = 0;
   }
