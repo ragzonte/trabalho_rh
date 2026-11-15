@@ -452,6 +452,15 @@ export function mountLibrary(root, env) {
     const saved = maps || [];
     patch(
       body,
+      // um mapeamento pela metade é o que mais importa: fica no topo
+      draft
+        ? h(
+            'section.card.card--accent.mlib-draft',
+            { key: 'draft' },
+            h('div.mlib-draft__head', null, h('span.mlib-draft__icon', null, icon('route')), h('div', null, h('h3.card__title', null, 'Mapeamento em andamento'), h('p.card__text', null, draftSummaryText(draft), draft.savedAt ? ` · guardado ${fmtAgo(Date.now() - draft.savedAt)}` : ''))),
+            h('div.mlib-draft__actions', null, button('Descartar', { variant: 'quiet', onClick: discardDraft }), button('Continuar', { variant: 'primary', icon: 'play', onClick: resumeDraft })),
+          )
+        : null,
       h(
         'section.card.mlib-hero',
         { key: 'hero' },
@@ -477,14 +486,6 @@ export function mountLibrary(root, env) {
               h('strong.mlib-demo__title', null, 'Ver a demonstração automática'),
               h('span.mlib-demo__text', null, 'Uma pessoa virtual anda pela casa virtual e o mapa se monta sozinho, em cerca de um minuto.'),
             ),
-          )
-        : null,
-      draft
-        ? h(
-            'section.card.card--accent.mlib-draft',
-            { key: 'draft' },
-            h('div.mlib-draft__head', null, h('span.mlib-draft__icon', null, icon('route')), h('div', null, h('h3.card__title', null, 'Mapeamento em andamento'), h('p.card__text', null, draftSummaryText(draft), draft.savedAt ? ` · guardado ${fmtAgo(Date.now() - draft.savedAt)}` : ''))),
-            h('div.mlib-draft__actions', null, button('Descartar', { variant: 'quiet', onClick: discardDraft }), button('Continuar', { variant: 'primary', icon: 'play', onClick: resumeDraft })),
           )
         : null,
       !storage.persistent && maps !== null

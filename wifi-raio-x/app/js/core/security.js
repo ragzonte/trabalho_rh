@@ -1,5 +1,11 @@
 // Segurança de uma rede Wi-Fi.
 //
+// O que oferece:
+//   parseCapabilities   ScanAp.capabilities -> Security (protocolos, cifras, PMF, WPS, nível de
+//                       0 a 4, rótulo curto e os problemas, com a frase pronta para um leigo)
+//   refineWithIes       troca o que foi deduzido do texto pelos dados exatos do beacon
+//   securityTypeLabel   rótulo de Connection.securityType (WifiInfo.SECURITY_TYPE_*)
+//
 // Entrada principal: o texto cru de ScanResult.capabilities, por exemplo
 //   "[WPA2-PSK-CCMP][RSN-PSK+SAE-CCMP][ESS][WPS][MFPC]"
 // O formato mudou bastante entre versões do Android (conferido no código do AOSP,
@@ -150,7 +156,7 @@ const ISSUE_TEXT = {
   open: 'Rede aberta, sem senha e sem criptografia: quem estiver por perto pode ver o que você envia e recebe.',
   wep: 'WEP é uma proteção ultrapassada que pode ser quebrada em poucos minutos; troque para WPA2 ou WPA3 no roteador.',
   'tkip-only':
-    'A rede só oferece WPA/TKIP, um padrão antigo e frágil que ainda limita a velocidade a 54 Mbps; mude o roteador para WPA2 (AES) ou WPA3.',
+    'A rede só oferece WPA/TKIP, um padrão antigo e frágil que ainda limita a velocidade a 54 Mb/s; mude o roteador para WPA2 (AES) ou WPA3.',
   'tkip-mixed':
     'O modo antigo WPA/TKIP continua ligado junto com o AES, o que enfraquece a rede; deixe só WPA2 (AES) ou WPA3 no roteador.',
   wps: 'O WPS está ligado: esse atalho para conectar por botão ou PIN é uma brecha conhecida; desligue no roteador se não usa.',

@@ -15,6 +15,8 @@
 //
 //   rec.onScan(scanEvent, { aps })    entregue TODOS os eventos 'scan'; `aps` = store.get().aps (lista normalizada,
 //                                     para nome, frequência e agrupamento por aparelho). Devolve true se gravou.
+//                                     Opcional: { aps, throttled: store.get().loop.throttled } (ou rec.setThrottled(v))
+//                                     para o gravador saber do limite de buscas na hora, sem esperar para descobrir.
 //                                     Só grava lista nova (fresh === true), nunca a mesma lista duas vezes, e
 //                                     descarta leitura absurda (nível >= 0 ou < -110 dBm) ou velha demais.
 //   rec.onRssi(sample)                sinal da rede conectada entre varreduras -> survey.track
@@ -26,7 +28,8 @@
 //                                     toque foi quase toda ouvida ainda andando: fica como varredura comum.)
 //   rec.endSpot()
 //   rec.resumeSpot(id)                "voltei ao ponto X": continua um ponto que já existe
-//   rec.currentSpot                   { id, label, floor, scans, target } | null
+//   rec.currentSpot                   { id, label, floor, scans, target } | null   (target: 3 varreduras; 1 quando o
+//                                     celular está limitado ou a segunda já demorou mais de 8 s)
 //   rec.spots()                       [{ id, label, floor, scans }]
 //   rec.renameSpot(id, label)         troca o nome em todas as varreduras do ponto
 //   rec.removeSpot(id)                as varreduras dele viram varreduras comuns (andando)
@@ -41,7 +44,7 @@
 //   recorderFromJSON(json, opts)      refaz o gravador a partir do retrato (texto ou objeto) OU de um Survey
 //                                     salvo; devolve null se o conteúdo não presta. Quem estava gravando
 //                                     volta em pausa.
-//   rec.subscribe(fn) -> cancelar     fn({ type }) a cada mudança ('state', 'scan', 'spot', 'floor', 'undo', 'calibration')
+//   rec.subscribe(fn) -> cancelar     fn({ type }) a cada mudança ('state', 'scan', 'spot', 'floor', 'undo', 'calibration', 'pace')
 //   rec.timeScale / rec.setTimeScale(k)
 //
 // ---------------------------------------------------------------------------------------------
@@ -72,8 +75,9 @@
 //   'otimo'          120+ medições úteis ou 32+ pontos, com pelo menos 3 lugares com nome
 //
 // `throttled` = entre as últimas varreduras há intervalos de mais de 20 s (limite do Android de
-// 4 buscas a cada 2 minutos; o app então pede uma a cada 30 s): aí a orientação muda para
-// "pare e marque pontos". `cadenceS` é a mediana desses intervalos.
+// 4 buscas a cada 2 minutos; o app então pede uma a cada 30 s), ou a espera pela próxima já
+// passou disso, ou a tela avisou (setThrottled): aí a orientação muda para "pare e marque
+// pontos" e cada ponto pede uma varredura só. `cadenceS` é a mediana dos intervalos.
 
 import { groupByDevice, normalizeBssid } from '../core/model.js';
 
@@ -114,6 +118,8 @@ export const SURVEY_THRESHOLDS = Object.freeze({
   scansPerSpot: 3,
   /** intervalo entre varreduras (s de caminhada) acima do qual o celular está "limitado" */
   throttledCadenceS: 20,
+  /** num ponto, a varredura seguinte demorou mais que isto (s de caminhada): uma já basta */
+  slowWaitS: 8,
   /** variação do sinal (dB) abaixo da qual a pessoa não saiu do lugar; só vale com `stillAfter` medições */
   stillSpreadDb: 7,
   stillAfter: 15,
@@ -372,6 +378,7 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
   let lastNewest = null; // "ouvido em" (relógio do celular) da leitura mais nova da última lista gravada
   let lastSignature = '';
   let lastTrack = null; // { t, id, rssi }
+  let toldThrottled = null; // o que a tela informou sobre o limite de buscas (store.loop.throttled); null = nada
 
   let version = 0; // muda a cada alteração: invalida os cálculos guardados
   let cache = { version: -1 };
@@ -463,7 +470,19 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     lastNewest = null;
     lastSignature = '';
     lastTrack = null;
+    toldThrottled = null;
     emit('state');
+  }
+
+  /**
+   * Opcional: a tela conta o que o laço de buscas sabe (store.get().loop.throttled). Sem isso o
+   * gravador descobre sozinho pelo ritmo das varreduras, mas só depois de esperar pela segunda.
+   */
+  function setThrottled(value) {
+    const next = value === true ? true : value === false ? false : null;
+    if (next === toldThrottled) return;
+    toldThrottled = next;
+    emit('pace');
   }
 
   function setTimeScale(k) {
@@ -496,10 +515,12 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
 
   /**
    * @param {import('../bridge.js').ScanEvent} ev
-   * @param {{aps?: object[]}} [context]  lista normalizada do store (para nome, frequência e aparelho)
+   * @param {{aps?: object[], throttled?: boolean}} [context]  aps: lista normalizada do store (para nome,
+   *        frequência e aparelho); throttled (opcional): store.get().loop.throttled, o mesmo que setThrottled()
    * @returns {boolean} true quando a varredura foi gravada
    */
   function onScan(ev, context) {
+    if (isObj(context) && typeof context.throttled === 'boolean') toldThrottled = context.throttled;
     if (state !== 'recording') return false;
     if (!isObj(ev) || ev.fresh !== true || !Array.isArray(ev.aps)) return false;
     if (scans.length >= L.maxScans) return false;
@@ -767,18 +788,39 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     return value;
   }
 
-  /** Ritmo das últimas varreduras: intervalo típico (mediana) e se o celular está limitando as buscas. */
+  /**
+   * Ritmo das últimas varreduras: intervalo típico (mediana), há quanto tempo de caminhada chegou
+   * a última (`waitS`) e se o celular está limitando as buscas.
+   */
   function cadence() {
     const gaps = [];
     for (let i = scans.length - 1; i > 0 && gaps.length < 8; i--) {
       if (scanInfo[i].seg !== scanInfo[i - 1].seg) continue; // uma pausa no meio não é ritmo
       gaps.push(scans[i].t - scans[i - 1].t);
     }
-    if (!gaps.length) return { cadenceS: null, throttled: false };
-    gaps.sort((a, b) => a - b);
+    let waitS = null;
+    if (state === 'recording' && scans.length && scanInfo[scans.length - 1].seg === segment) {
+      tick();
+      waitS = Math.max(0, (walkMs + gapMs) / 1000 - scans[scans.length - 1].t);
+    }
+    const cadenceS = gaps.length ? Math.round(median(gaps) * 10) / 10 : null;
+    // A espera em curso também conta: logo no começo ainda não há intervalos para olhar.
+    const seen = waitS !== null && waitS > T.throttledCadenceS ? [...gaps, waitS] : gaps;
+    seen.sort((a, b) => a - b);
     // Com o limite do Android os intervalos longos (~30 s) se alternam com varreduras que o
     // próprio sistema faz por conta dele: quem denuncia o limite é o quarto superior, não a mediana.
-    return { cadenceS: Math.round(median(gaps) * 10) / 10, throttled: quantile(gaps, 0.75) > T.throttledCadenceS };
+    const slow = seen.length > 0 && quantile(seen, 0.75) > T.throttledCadenceS;
+    return { cadenceS, waitS, throttled: toldThrottled === true || slow };
+  }
+
+  /**
+   * Quantas varreduras esperar num ponto: 3 no ritmo normal; 1 quando o celular está limitado —
+   * ou quando, depois da primeira, a seguinte já demorou mais que o ritmo normal permitiria
+   * (ninguém deve ficar meio minuto parado em cada lugar). Uma vez relaxada, a meta do ponto não volta.
+   */
+  function spotTarget(spot, pace) {
+    if (!spot.relaxed && (pace.throttled || (pace.waitS !== null && pace.waitS > T.slowWaitS && spotScans(spot.id) >= 1))) spot.relaxed = true;
+    return spot.relaxed ? 1 : T.scansPerSpot;
   }
 
   function hintFor(s) {
@@ -788,8 +830,9 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     if (s.full) return 'Este levantamento chegou ao tamanho máximo. Finalize para ver o mapa.';
     if (s.scans === 0) return 'Aguardando a primeira varredura do Wi-Fi…';
     if (s.spot) {
-      if (s.spot.scans < s.spot.target) return `Fique parado: ${s.spot.scans} de ${s.spot.target} varreduras neste ponto.`;
-      return 'Ponto marcado. Pode seguir para o próximo lugar.';
+      if (s.spot.scans >= s.spot.target) return 'Ponto marcado. Pode seguir para o próximo lugar.';
+      if (s.spot.target === 1) return 'Fique parado até a varredura deste ponto chegar (pode levar meio minuto).';
+      return `Fique parado: ${s.spot.scans} de ${s.spot.target} varreduras neste ponto.`;
     }
     if (s.useful >= T.stillAfter && s.spreadDb !== null && s.spreadDb < T.stillSpreadDb) {
       return 'O sinal quase não mudou: ande pelos cômodos para o mapa ganhar forma.';
@@ -838,7 +881,8 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
         heardDevices.add(devices.get(r.id) || r.id);
       }
     }
-    const { cadenceS, throttled } = cadence();
+    const pace = cadence();
+    const { cadenceS, throttled } = pace;
     const spreadDb = spread();
 
     let level = 0;
@@ -866,8 +910,8 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
       throttled,
       spreadDb: spreadDb === null ? null : Math.round(spreadDb * 10) / 10,
       full: scans.length >= L.maxScans,
-      // com o celular limitado (uma varredura a cada 30 s) uma por ponto já está bom
-      spot: active ? { ...spotView(active), target: throttled ? 1 : T.scansPerSpot } : null,
+      // (com o celular limitado — uma varredura a cada 30 s — a meta de cada ponto é uma só)
+      spot: active ? { ...spotView(active), target: spotTarget(active, pace) } : null,
       level: LEVELS[level],
       hint: '',
     };
@@ -930,7 +974,9 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     reset();
     const survey = snap.survey;
     scans = survey.scans;
-    scanInfo = scans.map((_, i) => ({ at: now(), seg: Array.isArray(snap.segs) && Number.isInteger(snap.segs[i]) ? snap.segs[i] : 0 }));
+    // "há quanto tempo foi a última varredura" conta de quando o retrato foi salvo
+    const savedAt = isNum(snap.savedAt) && snap.savedAt <= now() ? snap.savedAt : now();
+    scanInfo = scans.map((_, i) => ({ at: savedAt, seg: Array.isArray(snap.segs) && Number.isInteger(snap.segs[i]) ? snap.segs[i] : 0 }));
     track = survey.track || [];
     rtt = survey.rtt || [];
     known = survey.knownDistances || [];
@@ -1021,13 +1067,14 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     get currentSpot() {
       const spot = currentSpot !== null ? spots.get(currentSpot) : null;
       if (!spot) return null;
-      return { ...spotView(spot), target: cadence().throttled ? 1 : T.scansPerSpot };
+      return { ...spotView(spot), target: spotTarget(spot, cadence()) };
     },
     start,
     pause,
     resume,
     stop,
     reset,
+    setThrottled,
     setTimeScale,
     onScan,
     onRssi,

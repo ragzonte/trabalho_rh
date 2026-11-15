@@ -1,6 +1,14 @@
 // Canais e ocupação do espectro Wi-Fi: faixas, numeração, junção de canais
 // (40/80/160/320 MHz), DFS / U-NII / PSC e quanto um transmissor "vaza" para os vizinhos.
 //
+// O que oferece:
+//   numeração   BANDS, bandOf, freqToChannel, channelToFreq, channelList, isDfs, uniiOf
+//   blocos      blocksOf, blocksContaining, blockContaining (canais de 20 a 320 MHz de cada faixa)
+//   ocupação    occupancy (o trecho do espectro que um AP usa, pelos campos crus do Android),
+//               androidWidthToMHz, segmentsOf, overlapMHz, WIDTH_60GHZ
+//   vazamento   maskDb (máscara espectral), interferenceFactor (fração da potência de um
+//               transmissor que cai na banda de um receptor)
+//
 // Tudo aqui é função pura e nunca lança exceção: dado torto vindo do celular vira
 // null / valor conservador.
 //
@@ -611,7 +619,8 @@ export function segmentsOf(occ) {
     if (s === null || typeof s !== 'object') continue;
     const lo = toNum(s.lo);
     const hi = toNum(s.hi);
-    if (lo !== null && hi !== null && hi > lo) out.push({ lo, hi });
+    // (a largura precisa ser um número: de −1e308 a 1e308 a conta estoura)
+    if (lo !== null && hi !== null && hi > lo && hi - lo < Infinity) out.push({ lo, hi });
   }
   return out;
 }

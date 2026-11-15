@@ -59,8 +59,7 @@ function bandOf(freq) {
  * @property {number} n                 varreduras
  * @property {Float64Array} time        segundos, nunca decrescente
  * @property {Int32Array} floor         andar marcado
- * @property {(string|null)[]} spot     chave do ponto marcado, ou null (andando)
- * @property {Uint8Array} still         1 = o usuário estava parado
+ * @property {(string|null)[]} spot     chave do ponto marcado (o usuário estava parado ali), ou null (andando)
  * @property {{device:string, band:number, freq:number, ids:string[]}[]} radios
  *           rádio = aparelho + faixa: os BSSIDs de um mesmo rádio (rede principal, convidados) medem o mesmo sinal
  * @property {number} K                 rádios
@@ -71,7 +70,6 @@ function bandOf(freq) {
  * @property {number} weakest           leitura fresca mais fraca do levantamento (dBm; NaN sem leituras)
  * @property {number} lowLevel          percentil 3 das leituras frescas: perto do limiar de detecção deste celular
  * @property {{t:number, k:number, rssi:number, id:string}[]} track   sinal da rede conectada, em ordem de tempo
- * @property {Int32Array} index         índice de cada varredura no levantamento original
  */
 
 /**
@@ -91,7 +89,6 @@ export function readSurvey(survey) {
   const time = new Float64Array(n);
   const floor = new Int32Array(n);
   const spot = new Array(n).fill(null);
-  const still = new Uint8Array(n);
   const radios = [];
   const radioIndex = new Map();
   const radioOf = new Map();
@@ -121,7 +118,6 @@ export function readSurvey(survey) {
     time[i] = i > 0 ? Math.max(t, time[i - 1]) : t; // a ordem é a do vetor; o relógio não volta
     floor[i] = floorOf(s);
     spot[i] = s.spot == null ? null : String(s.spot);
-    still[i] = s.still || s.spot != null ? 1 : 0;
     const list = [];
     for (const r of Array.isArray(s.readings) ? s.readings : []) {
       if (!r || r.id == null || !Number.isFinite(r.rssi) || r.rssi > 20 || r.rssi < -150) continue;
@@ -166,9 +162,7 @@ export function readSurvey(survey) {
   }
   track.sort((p, q) => p.t - q.t);
 
-  const index = new Int32Array(n);
-  for (let i = 0; i < n; i++) index[i] = i;
-  return { n, time, floor, spot, still, radios, K, rssi, count, fresh, meanAgeS, weakest, lowLevel, track, index };
+  return { n, time, floor, spot, radios, K, rssi, count, fresh, meanAgeS, weakest, lowLevel, track };
 }
 
 /** Visão com só as varreduras de `keep` (índices crescentes). Os rádios e o sinal conectado são os mesmos. */
@@ -181,21 +175,17 @@ export function pickScans(view, keep) {
     time: new Float64Array(n),
     floor: new Int32Array(n),
     spot: new Array(n),
-    still: new Uint8Array(n),
     rssi: new Float64Array(n * K),
     count: new Float64Array(n * K),
     fresh: new Int32Array(n),
     meanAgeS: new Float64Array(n),
-    index: new Int32Array(n),
   };
   keep.forEach((i, q) => {
     out.time[q] = view.time[i];
     out.floor[q] = view.floor[i];
     out.spot[q] = view.spot[i];
-    out.still[q] = view.still[i];
     out.fresh[q] = view.fresh[i];
     out.meanAgeS[q] = view.meanAgeS[i];
-    out.index[q] = view.index[i];
     out.rssi.set(view.rssi.subarray(i * K, (i + 1) * K), q * K);
     out.count.set(view.count.subarray(i * K, (i + 1) * K), q * K);
   });

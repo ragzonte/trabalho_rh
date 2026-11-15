@@ -17,11 +17,10 @@
 // de caminhada entre dois pontos marcados sai do sinal da rede conectada (ele estabiliza quando o
 // usuário chega): é o motor que melhor aproveita esse modo.
 
-import { FLOOR_HEIGHT, SWEEP_MID_S, cholesky, choleskySolve, finite, median, now, shareSpots, topEigen2, visitsOf } from './solver-common.js';
+import { FLOOR_HEIGHT, SWEEP_MID_S, cholesky, choleskySolve, cloudStats, finite, median, now, shareSpots, topEigen2, visitsOf } from './solver-common.js';
 
 // --- como o Android entrega as leituras ---
 const SWEEP_S = 2.6; // duração típica de uma varredura completa
-const MID_S = SWEEP_MID_S; // uma varredura "andando" vale para o meio dela
 const LONG_GAP_S = 8; // intervalo entre varreduras acima do qual o relógio deixa de dizer a distância (limite do Android: 30 s)
 const TRACK_RES_S = 2; // o sinal da rede conectada chega a cada ~2 s: resolução do instante de chegada
 const UNKNOWN_WALK_S = 4; // sem pista nenhuma: pontos marcados seguidos costumam ficar a uns 2 m
@@ -114,9 +113,7 @@ export function solveChain(view, options = {}) {
 
   // --- escala: boa quando quase todos os passos têm tempo de caminhada conhecido ---
   let scaleConf = !informative ? 0 : P.timed >= 0.8 * (N - 1) ? (nodes.some((nd) => nd.spot === null) ? 0.6 : 0.35) : 0.15;
-  let spread = 0;
-  for (let i = 0; i < n; i++) spread += (x[i] * x[i] + y[i] * y[i]) / n;
-  if (spread < 0.01) scaleConf = Math.min(scaleConf, 0.05); // mapa sem tamanho: nada foi medido
+  if (cloudStats(x, y).radius < 0.1) scaleConf = Math.min(scaleConf, 0.05); // mapa sem tamanho: nada foi medido
 
   return { x, y, conf, aps: placeRouters(P, lin, rad, X, x, y), scaleConf };
 }
@@ -171,8 +168,8 @@ function prepare(view) {
   for (let a = 0; a + 1 < N; a++) {
     const i = nodes[a].members[nodes[a].members.length - 1];
     const j = nodes[a + 1].members[0];
-    const depart = nodes[a].spot !== null ? tOf(i) + LEAVE_S : tOf(i) - MID_S;
-    const arrive = nodes[a + 1].spot !== null ? tOf(j) - SWEEP_S - TAP_S - 0.5 * interval : tOf(j) - MID_S;
+    const depart = nodes[a].spot !== null ? tOf(i) + LEAVE_S : tOf(i) - SWEEP_MID_S;
+    const arrive = nodes[a + 1].spot !== null ? tOf(j) - SWEEP_S - TAP_S - 0.5 * interval : tOf(j) - SWEEP_MID_S;
     let tau = arrive - depart;
     if (tOf(j) - tOf(i) > LONG_GAP_S && nodes[a + 1].spot !== null) {
       // Intervalo longo: o usuário andou e depois ESPEROU. O sinal da rede conectada mostra quando
@@ -839,7 +836,11 @@ function fieldStage(P, lin, alive) {
       }
       if (minX === Infinity) continue;
       let h = sigma;
-      while (((maxX - minX) / h + 2) * ((maxY - minY) / h + 2) > TUNE.fieldMaxBasis / F) h *= 1.1;
+      // Alarga a grade até caber no teto de bases deste andar. O laço tem fim garantido: com muitos
+      // andares o teto por andar cai abaixo de 4 (o mínimo da conta, 2 x 2) e, sem o limite de
+      // voltas, `h` crescia para sempre — o motor travava com 31 andares ou mais.
+      const maxBasis = Math.max(4, TUNE.fieldMaxBasis / F);
+      for (let grow = 0; grow < 400 && ((maxX - minX) / h + 2) * ((maxY - minY) / h + 2) > maxBasis; grow++) h *= 1.1;
       const nx = Math.max(1, Math.ceil((maxX - minX) / h) + 1);
       const ny = Math.max(1, Math.ceil((maxY - minY) / h) + 1);
       const ox = (minX + maxX) / 2 - ((nx - 1) * h) / 2;

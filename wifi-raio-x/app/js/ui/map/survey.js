@@ -204,7 +204,6 @@ export async function mountSurvey(root, env) {
   let lastSavedAt = Date.now();
   let lastRttAt = 0;
   let rttBusy = false;
-  let floorNudged = false;
   const preview = { running: false, lastScans: 0, lastAt: 0, solution: null, model: null };
   const offs = [];
   const prevLoopMode = scanLoop.getState().mode;
@@ -212,8 +211,8 @@ export async function mountSurvey(root, env) {
   // --- DOM fixo ------------------------------------------------------------
   root.className = 'screen screen--bleed';
   const viewerBox = h('div.msv-preview__viewer', { hidden: true });
-  const radarText = h('p.msv-radar__text', null, 'Ouvindo o Wi-Fi…');
-  const radarSub = h('p.msv-radar__sub', null, 'A prévia do mapa aparece depois das primeiras leituras.');
+  const radarText = h('p.msv-radar__text', null, 'A prévia do mapa aparece aqui');
+  const radarSub = h('p.msv-radar__sub', null, 'Depois das primeiras leituras, o desenho vai se formando enquanto você anda.');
   const radarDotsBox = h('span.msv-radar__dots', { 'aria-hidden': 'true' });
   const radar = h('div.msv-radar', null, h('div.msv-radar__art', { 'aria-hidden': 'true' }, h('span.msv-radar__wave'), h('span.msv-radar__wave'), h('span.msv-radar__wave'), radarDotsBox, h('span.msv-radar__core', null, icon('wifi', { size: 26 }))), radarText, radarSub);
   const tag = h('span.msv-preview__tag', { hidden: true }, 'Prévia · estimativa');
@@ -237,7 +236,8 @@ export async function mountSurvey(root, env) {
   const previewEl = h('div', { class: ['msv-preview', sim && 'msv-preview--demo'] }, viewerBox, radar, tag, planEl);
   const bodyEl = h('div.msv__body');
   const barEl = h('div.msv__bar');
-  const surveyEl = h('div.msv', null, h('div.msv__scroll', null, h('div.msv__col', null, previewEl, bodyEl)), barEl);
+  const liveEl = h('div.sr-only', { role: 'status', 'aria-live': 'polite' });
+  const surveyEl = h('div.msv', null, h('div.msv__scroll', null, h('div.msv__col', null, previewEl, bodyEl)), barEl, liveEl);
   const stageEl = h('div.msv-stage');
   root.appendChild(surveyEl);
   root.appendChild(stageEl);
@@ -246,6 +246,23 @@ export async function mountSurvey(root, env) {
   if (sim) miniPlan = createMiniPlan(planBox, { world: sim.world, floorName });
 
   // --- gravação ------------------------------------------------------------
+
+  /**
+   * Quantas leituras bastam num lugar marcado. Com o Android limitando as buscas (o que o laço de
+   * buscas sabe na hora; o gravador só percebe depois de algumas leituras) uma já está ótimo.
+   */
+  function spotTarget(spot) {
+    return store.get().loop.throttled ? 1 : Math.max(1, spot.target || 1);
+  }
+
+  /** Diz em voz (leitor de tela) só o que muda o que a pessoa deve fazer; a contagem regressiva fica de fora. */
+  let lastSaid = '';
+  let lastLevel = null;
+  function say(text) {
+    if (!text || text === lastSaid) return;
+    lastSaid = text;
+    liveEl.textContent = text;
+  }
 
   function noteScanAccepted() {
     const t = Date.now();
@@ -266,7 +283,14 @@ export async function mountSurvey(root, env) {
     if (!accepted) return;
     noteScanAccepted();
     const st = rec.stats();
-    if (st.spot && st.spot.scans === st.spot.target) bridge.vibrate(30).catch(() => {});
+    if (st.spot && st.spot.scans === spotTarget(st.spot)) {
+      bridge.vibrate(30).catch(() => {});
+      say(`${st.spot.label ? `${st.spot.label}: ` : ''}lugar marcado. Pode seguir para o próximo.`);
+    }
+    if (st.level !== lastLevel) {
+      if (lastLevel !== null) say(levelInfo(st.level).label);
+      lastLevel = st.level;
+    }
     draw();
     void maybePreview();
     if (st.scans - lastSavedScans >= AUTOSAVE_SCANS) void saveDraft();
@@ -394,6 +418,7 @@ export async function mountSurvey(root, env) {
       return;
     }
     bridge.vibrate(20).catch(() => {});
+    say(clean ? `Parado em: ${clean}. Fique parado até as leituras chegarem.` : 'Lugar marcado. Fique parado até as leituras chegarem.');
     // ponto a ponto: pede uma leitura já (se o Android ainda tiver busca sobrando ela chega em
     // segundos; se não, vale a próxima do ritmo de 30 s)
     if (store.get().loop.throttled) scanLoop.scanNow().catch(() => {});
@@ -673,7 +698,8 @@ export async function mountSurvey(root, env) {
     let tone = pulse.phase === 'late' ? 'late' : null;
     if (spot && !paused) {
       title = spot.label ? h('span', null, 'Parado em: ', h('strong', { dir: 'auto' }, spot.label)) : 'Parado num lugar sem nome';
-      const got = spot.scans >= spot.target;
+      const target = spotTarget(spot);
+      const got = spot.scans >= target;
       const count = `${plural(spot.scans, 'leitura', 'leituras')} aqui`;
       if (got) {
         detail = `${count}. Pode seguir para o próximo lugar.`;
@@ -682,7 +708,7 @@ export async function mountSurvey(root, env) {
       } else if (throttled) {
         detail = `Fique parado até a leitura chegar. ${pulse.phase === 'waiting' || pulse.phase === 'late' ? pulse.detail : 'A leitura pode levar até meio minuto.'}`;
       } else {
-        detail = `${count} (o ideal são ${spot.target}). Fique parado mais um pouco.`;
+        detail = `${count} (o ideal são ${target}). Fique parado mais um pouco.`;
       }
     } else if (!paused && throttled && pulse.phase !== 'first') {
       detail = `${pulse.detail} · leituras a cada ≈ 30 s`;
@@ -722,7 +748,7 @@ export async function mountSurvey(root, env) {
       h(
         'section.card.msv-status',
         { key: 'status', dataset: { state: paused ? 'paused' : spot ? 'spot' : 'walking' } },
-        h('div.msv-status__now', { 'aria-live': 'polite' }, ring(spot && !paused ? Math.min(1, spot.scans / Math.max(1, spot.target)) || pulse.fraction : pulse.fraction, center, tone), h('div.msv-status__text', null, h('p.msv-status__title', null, title), h('p.msv-status__detail', null, detail))),
+        h('div.msv-status__now', null, ring(spot && !paused ? Math.min(1, spot.scans / spotTarget(spot)) || pulse.fraction : pulse.fraction, center, tone), h('div.msv-status__text', null, h('p.msv-status__title', null, title), h('p.msv-status__detail', null, detail))),
         h(
           'div.msv-level',
           null,
@@ -731,7 +757,7 @@ export async function mountSurvey(root, env) {
           // com um ponto aberto a orientação já está na linha de cima; sem poder concluir, ela vai junto do botão
           !spot && !paused && level.canFinish ? h('p.msv-level__hint', null, st.hint) : null,
           // (deitado, a barra de ações é baixa: o motivo de não poder concluir aparece aqui)
-          !level.canFinish && !piloting ? h('p.msv-level__hint.msv-level__blocker', null, finishBlocker(st, SURVEY_THRESHOLDS)) : null,
+          !level.canFinish && !piloting ? h('p.msv-level__hint.msv-level__blocker', null, finishBlocker({ ...st, throttled: st.throttled || throttled }, SURVEY_THRESHOLDS)) : null,
         ),
       ),
       h(
@@ -783,7 +809,7 @@ export async function mountSurvey(root, env) {
               paused ? null : button('Pausar', { icon: 'pause', onClick: togglePause }),
               finishBtn('Concluir'),
             ),
-            canFinish ? null : h('p.msv__bar-note', null, icon('info', { size: 14 }), finishBlocker(st, SURVEY_THRESHOLDS)),
+            canFinish ? null : h('p.msv__bar-note', null, icon('info', { size: 14 }), finishBlocker({ ...st, throttled: st.throttled || throttled }, SURVEY_THRESHOLDS)),
           ),
     );
   }
@@ -806,7 +832,6 @@ export async function mountSurvey(root, env) {
         void conclude({ force: true });
       } else draw();
     }
-    if (sim && simNow && !floorNudged && simNow.floor !== rec.floor && !(pilot && pilot.running)) floorNudged = true;
   }
 
   // --- partida -------------------------------------------------------------
@@ -880,6 +905,9 @@ export async function mountSurvey(root, env) {
   else if (resumed) toast('Mapeamento retomado de onde você parou.');
 
   return {
+    onShow() {
+      if (!dead && mode === 'survey') setTopActions();
+    },
     unmount() {
       if (dead) return;
       dead = true;

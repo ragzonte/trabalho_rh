@@ -420,7 +420,7 @@ describe('segurança fraca da rede em uso', () => {
     const tkip = get(run({ aps: home({ r5: { capabilities: CAPS.tkip } }) }), 'weak-security');
     assert.equal(tkip.severity, 'critical');
     assert.match(tkip.title, /WPA\/TKIP/);
-    assert.match(tkip.text, /54 Mbps/);
+    assert.match(tkip.text, /54 Mb\/s/);
     const mixed = get(run({ aps: home({ r5: { capabilities: CAPS.mixed } }) }), 'weak-security');
     assert.equal(mixed.severity, 'warning');
   });

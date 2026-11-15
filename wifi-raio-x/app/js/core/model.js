@@ -2,16 +2,34 @@
 // objeto `Ap` que o resto do app usa, agrupa BSSIDs por aparelho físico e por rede, e guarda
 // o histórico de cada BSSID entre uma varredura e outra.
 //
-// Nada aqui lança exceção: dado torto vindo do celular vira null / "desconhecido".
+// O que oferece:
+//   normalizar  normalizeAp, normalizeScan, asAp, asApList (o typedef `Ap` está logo abaixo)
+//   agrupar     groupByDevice (BSSIDs da mesma caixa), groupBySsid (as redes como a pessoa vê)
+//   memória     ApTracker (sinal suavizado, histórico e idade de cada BSSID entre varreduras)
+//   utilidades  normalizeBssid, parseMac, ssidStem, HIDDEN_NAME, STALE_MS
+//
+// Nada aqui lança exceção: dado torto vindo do celular vira null / "desconhecido". Os objetos
+// `Ap` são tratados como somente leitura por todo o core (groupByDevice guarda a resposta de
+// cada lista e confere os campos que usa antes de reaproveitá-la).
+//
+// Atenção aos nomes: `ap.rssi` é o sinal em dBm (ScanAp.level) e `ap.level` é a classificação
+// dele (signalLevel: rótulo, barras, tom). O SSID é entregue como veio (pode trazer emoji,
+// caracteres de controle ou HTML): quem desenha a tela usa textContent, nunca innerHTML.
 
 import { occupancy, channelToFreq, BANDS } from './channels.js';
-import { qualityPct, signalLevel, indoorDistance } from './signal.js';
+import { qualityPct, signalLevel, indoorDistance, sanitizeRssi } from './signal.js';
 import { WIFI_STANDARD, standardInfo, inferGen } from './phy.js';
 import { parseCapabilities, refineWithIes } from './security.js';
 import { parseIes, summarizeIes } from './ies.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 const isObj = (x) => x !== null && typeof x === 'object';
+
+/** Número finito ou null; aceita texto numérico, porque JSON de celular nem sempre é limpo. */
+function toNum(x) {
+  if (typeof x === 'string' && x.trim() !== '') x = Number(x);
+  return isNum(x) ? x : null;
+}
 
 /** Nome mostrado no lugar do SSID de uma rede oculta. */
 export const HIDDEN_NAME = '(rede oculta)';
@@ -84,7 +102,7 @@ export function ssidStem(ssid) {
  * @property {string} ssid          '' quando oculta
  * @property {boolean} hidden
  * @property {string} name          o SSID, ou "(rede oculta)"
- * @property {number|null} rssi     dBm
+ * @property {number|null} rssi     dBm; null = sem leitura (o celular não informou, ou mandou 0, positivo ou −127)
  * @property {number} quality       0..100
  * @property {{key:string, label:string, bars:number, tone:string, hint:string}} level  signalLevel(rssi)
  * @property {number|null} freq     centro do canal primário (MHz)
@@ -223,7 +241,8 @@ export function normalizeAp(raw, options) {
   const mac = parseMac(bssid);
   const ssid = typeof r.ssid === 'string' ? r.ssid : '';
   const hidden = isHiddenSsid(ssid);
-  const rssi = isNum(r.level) ? r.level : null;
+  // 0, valores positivos e −127 não são medidas (veja sanitizeRssi): a rede fica "sem leitura"
+  const rssi = sanitizeRssi(r.level);
 
   const ieInfo = Array.isArray(r.ies) ? parseIes(r.ies) : null;
   const hasIes = ieInfo !== null && ieInfo.count > 0;
@@ -235,9 +254,10 @@ export function normalizeAp(raw, options) {
   let security = parseCapabilities(r.capabilities, { sdk: o.sdk });
   if (hasIes) security = refineWithIes(security, ieInfo);
 
-  const rawAge = isNum(r.ageMs) ? Math.max(0, r.ageMs) : null;
-  const ts = isNum(o.ts) ? o.ts : isNum(o.now) ? o.now : null;
-  const now = isNum(o.now) ? o.now : ts;
+  const age = toNum(r.ageMs);
+  const rawAge = age === null ? null : Math.max(0, age);
+  const ts = toNum(o.ts) ?? toNum(o.now);
+  const now = toNum(o.now) ?? ts;
   const seenAt = ts !== null && rawAge !== null ? ts - rawAge : null;
   const ageMs = seenAt !== null ? Math.max(0, now - seenAt) : rawAge;
 
@@ -286,6 +306,39 @@ function isAp(x) {
  */
 export function asAp(x) {
   return isAp(x) ? x : normalizeAp(x);
+}
+
+// Listas montadas por asApList, com o tamanho que tinham: reconhecê-las poupa refazer a conta
+// quando a mesma lista passa por várias análises (o ranking chama a nota do canal para cada AP).
+const CLEAN_LISTS = new WeakMap();
+
+/**
+ * Lista pronta para as análises: cada item normalizado (asAp), sem o que não é objeto e com um
+ * item só por BSSID. Repetidos (o celular às vezes entrega o mesmo BSSID duas vezes) contariam
+ * como dois vizinhos: fica a leitura mais nova, como em normalizeScan. Itens sem BSSID válido
+ * ficam todos, porque não há como saber se são repetidos.
+ * Uma lista que já saiu daqui volta ela mesma, sem cópia: trate o resultado como somente leitura.
+ * @param {*} aps  lista do ApTracker, de normalizeScan, ou ScanAp crus
+ * @returns {Ap[]}
+ */
+export function asApList(aps) {
+  if (!Array.isArray(aps)) return [];
+  if (CLEAN_LISTS.get(aps) === aps.length && aps.every(isAp)) return aps;
+  const out = [];
+  const at = new Map(); // BSSID -> posição em `out`
+  for (const item of aps) {
+    if (!isObj(item)) continue;
+    const ap = asAp(item);
+    const known = ap.id ? at.get(ap.id) : undefined;
+    if (known === undefined) {
+      if (ap.id) at.set(ap.id, out.length);
+      out.push(ap);
+    } else if ((ap.ageMs ?? Infinity) < (out[known].ageMs ?? Infinity)) {
+      out[known] = ap;
+    }
+  }
+  CLEAN_LISTS.set(out, out.length);
+  return out;
 }
 
 /**
@@ -454,10 +507,60 @@ const bandRank = (band) => {
  *          do sinal mais forte para o mais fraco; `id` = endereço do AP MLD, ou o menor BSSID "de fábrica"
  */
 export function groupByDevice(aps) {
-  const nodes = [];
+  const items = [];
+  let ready = true; // a lista já veio toda normalizada?
   for (const item of Array.isArray(aps) ? aps : []) {
-    if (isObj(item)) nodes.push(deviceNode(asAp(item), nodes.length));
+    if (!isObj(item)) continue;
+    const ap = asAp(item);
+    if (ap !== item) ready = false;
+    items.push(ap);
   }
+  if (!ready || items.length < 2) return groupItems(items);
+  const known = DEVICE_MEMO.get(items[0]);
+  if (known && sameReading(known, items)) return copyDevices(known.devices);
+  const devices = groupItems(items);
+  DEVICE_MEMO.set(items[0], { items: items.slice(), marks: marksOf(items), devices: copyDevices(devices) });
+  return devices;
+}
+
+// A mesma lista passa por aqui várias vezes a cada varredura (store, canais, melhor rede,
+// diagnóstico) e esta é a conta mais cara do módulo, então a resposta de cada lista fica
+// guardada. Chave: o primeiro Ap da lista (a memória some junto com ele). Só vale se a lista
+// for a mesma, item a item, e nenhum campo que o agrupamento lê tiver mudado nesse meio-tempo.
+const DEVICE_MEMO = new WeakMap();
+const MEMO_FIELDS = ['bssid', 'band', 'freq', 'widthMHz', 'rssi', 'ageMs', 'ssid', 'hidden', 'fingerprint', 'mld', 'ie'];
+
+function marksOf(items) {
+  const marks = [];
+  for (const ap of items) for (const field of MEMO_FIELDS) marks.push(ap[field]);
+  return marks;
+}
+
+function sameReading(known, items) {
+  if (known.items.length !== items.length) return false;
+  let k = 0;
+  for (let i = 0; i < items.length; i++) {
+    const ap = items[i];
+    if (known.items[i] !== ap) return false;
+    for (const field of MEMO_FIELDS) if (known.marks[k++] !== ap[field]) return false;
+  }
+  return true;
+}
+
+/** Cópia que quem recebe pode alterar à vontade sem estragar a resposta guardada. */
+function copyDevices(devices) {
+  return devices.map((d) => ({
+    id: d.id,
+    bssids: d.bssids.slice(),
+    aps: d.aps.slice(),
+    ssids: d.ssids.slice(),
+    bands: d.bands.slice(),
+    bestRssi: d.bestRssi,
+  }));
+}
+
+function groupItems(items) {
+  const nodes = items.map((ap, index) => deviceNode(ap, index));
   nodes.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   const n = nodes.length;
 
@@ -541,39 +644,8 @@ export function groupByDevice(aps) {
   }
 
   // --- 2 e 3. endereços próximos, respeitando os vetos
-  /**
-   * Elos entre grupos ainda separados e compatíveis (o mais curto de cada par de grupos).
-   * Tira de `pairs` os pares que não voltam a ser elo: os dois lados já se juntaram, ou os
-   * grupos se vetam (grupos só crescem, e um veto entre eles não some).
-   */
-  const linksOf = (pairs) => {
-    const links = new Map();
-    let kept = 0;
-    for (let k = 0; k < pairs.length; k++) {
-      const p = pairs[k];
-      const a = find(p.i);
-      const b = find(p.j);
-      if (a === b) continue;
-      const x = a < b ? a : b;
-      const y = a < b ? b : a;
-      const key = x * n + y;
-      const known = links.get(key);
-      if (known) {
-        if (p.d < known.d) known.d = p.d;
-        pairs[kept++] = p;
-        continue;
-      }
-      const level = clusterClash(x, y);
-      if (level === VETO) continue;
-      links.set(key, { x, y, d: p.d, strained: level === STRAIN });
-      pairs[kept++] = p;
-    }
-    pairs.length = kept;
-    return [...links.values()].sort((a, b) => a.d - b.d || a.x - b.x || a.y - b.y);
-  };
-
   /** Disputa: os grupos de uma mesma ilha de elos, resolvidos pela explicação mais econômica. */
-  const solve = (links) => {
+  const solve = (links, join) => {
     if (links.length > MAX_SEARCH_LINKS) return;
     const ids = [...new Set(links.flatMap((l) => [l.x, l.y]))].sort((a, b) => a - b);
     const k = ids.length;
@@ -624,56 +696,164 @@ export function groupByDevice(aps) {
     }
     if (best === null || tie) return;
     links.forEach((l, e) => {
-      if (best.mask & (1 << e)) union(l.x, l.y);
+      if (best.mask & (1 << e)) join(l.x, l.y);
     });
   };
 
+  const linkOrder = (a, b) => a.d - b.d || a.x - b.x || a.y - b.y;
+  const other = (l, id) => (l.x === id ? l.y : l.x);
+
   const settle = (pairs) => {
-    const tried = new Set(); // ilhas que já foram resolvidas (ou deram empate)
-    for (;;) {
-      const links = linksOf(pairs);
-      if (!links.length) return;
-      const touching = new Map(); // grupo -> elos que chegam nele
-      for (const l of links) {
-        for (const id of [l.x, l.y]) (touching.get(id) || touching.set(id, []).get(id)).push(l);
+    // Elos = pares de grupos ainda separados e compatíveis, com a menor distância entre eles.
+    // São mantidos a cada junção, não refeitos: uma junção só muda os elos que chegavam a um dos
+    // dois grupos (numa fila de dezenas de APs, refazer tudo a cada passo custava segundos).
+    const links = new Map(); // par de grupos -> elo
+    const touching = new Map(); // grupo -> Set dos elos que chegam nele
+    let order = []; // os elos em ordem (distância, depois grupos); os mortos saem na faxina
+    let dead = 0;
+
+    const attach = (l) => {
+      links.set(l.x * n + l.y, l);
+      for (const id of [l.x, l.y]) {
+        const set = touching.get(id);
+        if (set) set.add(l);
+        else touching.set(id, new Set([l]));
       }
-      const other = (l, id) => (l.x === id ? l.y : l.x);
-      /** Elos que disputam um grupo com `l`: aceitar um impede o outro. */
-      const rivals = (l) => {
-        const out = [];
-        for (const id of [l.x, l.y]) {
-          for (const m of touching.get(id)) if (m !== l && clusterClash(other(m, id), other(l, id)) > 0) out.push(m);
-        }
-        return out;
-      };
-      // O elo mais curto que nenhum concorrente iguala (sem concorrente nenhum também serve).
-      // Um elo "tri-band" só passa direto quando é a única opção dos dois lados.
-      const sole = (l) => touching.get(l.x).length === 1 && touching.get(l.y).length === 1;
-      const clear = links.find((l) => (l.strained ? sole(l) : rivals(l).every((m) => m.d > l.d)));
-      if (clear) {
-        union(clear.x, clear.y);
+    };
+    const detach = (l) => {
+      l.dead = true;
+      dead += 1;
+      links.delete(l.x * n + l.y);
+      for (const id of [l.x, l.y]) {
+        const set = touching.get(id);
+        set.delete(l);
+        if (set.size === 0) touching.delete(id);
+      }
+    };
+    /** Põe o elo no lugar certo de `order` (busca binária). */
+    const insert = (l) => {
+      let lo = 0;
+      let hi = order.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (linkOrder(order[mid], l) < 0) lo = mid + 1;
+        else hi = mid;
+      }
+      order.splice(lo, 0, l);
+    };
+    const sweep = () => {
+      order = order.filter((l) => !l.dead);
+      dead = 0;
+    };
+
+    for (const p of pairs) {
+      const a = find(p.i);
+      const b = find(p.j);
+      if (a === b) continue;
+      const x = a < b ? a : b;
+      const y = a < b ? b : a;
+      const known = links.get(x * n + y);
+      if (known) {
+        if (p.d < known.d) known.d = p.d;
         continue;
       }
+      const level = clusterClash(x, y);
+      if (level !== VETO) attach({ x, y, d: p.d, strained: level === STRAIN, dead: false });
+    }
+    order = [...links.values()].sort(linkOrder);
+
+    /** Junta os grupos de `a` e `b` e refaz os elos que chegavam a um dos dois. */
+    const join = (a, b) => {
+      const x = find(a);
+      const y = find(b);
+      if (x === y) return;
+      const reach = new Map(); // grupo vizinho -> menor distância até o grupo novo
+      for (const id of [x, y]) {
+        for (const l of [...(touching.get(id) || [])]) {
+          const z = other(l, id);
+          detach(l);
+          if (z === x || z === y) continue; // o próprio elo entre os dois
+          const d = reach.get(z);
+          if (d === undefined || l.d < d) reach.set(z, l.d);
+        }
+      }
+      union(x, y);
+      const root = find(x);
+      for (const [z, d] of reach) {
+        // Um veto que só um dos dois tinha passa a valer para o grupo inteiro
+        const level = clusterClash(root, z);
+        if (level === VETO) continue;
+        const l = { x: Math.min(root, z), y: Math.max(root, z), d, strained: level === STRAIN, dead: false };
+        attach(l);
+        insert(l);
+      }
+      if (dead > 64 && dead > order.length / 2) sweep();
+    };
+
+    /** Elos que disputam um grupo com `l`: aceitar um impede o outro. */
+    const rivals = (l) => {
+      const out = [];
+      for (const id of [l.x, l.y]) {
+        for (const m of touching.get(id)) if (m !== l && clusterClash(other(m, id), other(l, id)) > 0) out.push(m);
+      }
+      return out;
+    };
+    /** Nenhum concorrente de `l` é tão curto quanto ele (sem concorrente nenhum também serve). */
+    const unbeaten = (l) => {
+      for (const id of [l.x, l.y]) {
+        for (const m of touching.get(id)) {
+          if (m !== l && m.d <= l.d && clusterClash(other(m, id), other(l, id)) > 0) return false;
+        }
+      }
+      return true;
+    };
+    // Um elo "tri-band" só passa direto quando é a única opção dos dois lados.
+    const sole = (l) => touching.get(l.x).size === 1 && touching.get(l.y).size === 1;
+
+    const tried = new Set(); // ilhas que já foram resolvidas (ou deram empate)
+    for (;;) {
+      if (links.size === 0) return;
+      // O elo mais curto que nenhum concorrente iguala
+      let clear = null;
+      for (const l of order) {
+        if (!l.dead && (l.strained ? sole(l) : unbeaten(l))) {
+          clear = l;
+          break;
+        }
+      }
+      if (clear) {
+        join(clear.x, clear.y);
+        continue;
+      }
+
       // Só sobraram empates: cada ilha de elos é resolvida de uma vez
-      let merged = false;
-      const seen = new Set();
-      for (const start of links) {
-        if (seen.has(start.x)) continue;
-        const ids = new Set([start.x]);
-        for (let grew = true; grew; ) {
-          grew = false;
-          for (const l of links) {
-            if (ids.has(l.x) !== ids.has(l.y)) {
-              ids.add(l.x).add(l.y);
-              grew = true;
+      sweep();
+      const islandOf = new Map(); // grupo -> elos da ilha dele
+      const islands = [];
+      for (const start of order) {
+        if (islandOf.has(start.x)) continue;
+        const island = [];
+        islands.push(island);
+        islandOf.set(start.x, island);
+        const stack = [start.x];
+        while (stack.length) {
+          const id = stack.pop();
+          for (const l of touching.get(id)) {
+            const z = other(l, id);
+            if (!islandOf.has(z)) {
+              islandOf.set(z, island);
+              stack.push(z);
             }
           }
         }
-        for (const id of ids) seen.add(id);
-        const island = links.filter((l) => ids.has(l.x));
+      }
+      for (const l of order) islandOf.get(l.x).push(l);
+
+      let merged = false;
+      for (const island of islands) {
         if (island.length <= MAX_SEARCH_LINKS) {
           const signature = island.map((l) => `${l.x}|${l.y}`).join(' ');
-          if (!tried.has(signature)) solve(island);
+          if (!tried.has(signature)) solve(island, join);
           tried.add(signature);
           continue;
         }
@@ -688,7 +868,7 @@ export function groupByDevice(aps) {
           (l) => (single(l.x) || single(l.y)) && rivals(l).every((m) => m.strained || (!single(m.x) && !single(m.y))),
         );
         if (leaf) {
-          union(leaf.x, leaf.y);
+          join(leaf.x, leaf.y);
           merged = true;
         }
       }
@@ -843,19 +1023,26 @@ export class ApTracker {
   #historyMs;
   #smoothingMs;
   #maxSamples;
+  #maxAps;
   #sdk;
+  #clock;
 
   /**
-   * @param {{historyMs?: number, smoothingMs?: number, maxSamples?: number, sdk?: number}} [options]
+   * @param {{historyMs?: number, smoothingMs?: number, maxSamples?: number, maxAps?: number,
+   *          sdk?: number, clock?: () => number}} [options]
    *        historyMs: janela do histórico (padrão 10 min); smoothingMs: constante de tempo da
-   *        média (padrão 8 s); maxSamples: teto de amostras por BSSID (padrão 600)
+   *        média (padrão 8 s); maxSamples: teto de amostras por BSSID (padrão 600); maxAps: teto
+   *        de BSSIDs na memória (padrão 1000; passando disso saem os ouvidos há mais tempo);
+   *        clock: relógio (ms desde 1970) para as varreduras que chegam sem `ts` (padrão Date.now)
    */
   constructor(options) {
     const o = isObj(options) ? options : {};
     this.#historyMs = isNum(o.historyMs) && o.historyMs > 0 ? o.historyMs : 600_000;
     this.#smoothingMs = isNum(o.smoothingMs) && o.smoothingMs >= 0 ? o.smoothingMs : 8000;
     this.#maxSamples = isNum(o.maxSamples) && o.maxSamples >= 1 ? Math.floor(o.maxSamples) : 600;
+    this.#maxAps = isNum(o.maxAps) && o.maxAps >= 1 ? Math.floor(o.maxAps) : 1000;
     this.#sdk = isNum(o.sdk) ? o.sdk : undefined;
+    this.#clock = typeof o.clock === 'function' ? o.clock : Date.now;
   }
 
   /** Quantos BSSIDs estão na memória. */
@@ -877,7 +1064,12 @@ export class ApTracker {
   update(event) {
     const result = { heard: 0, added: 0, total: this.#aps.size };
     if (!isObj(event)) return result;
-    const ts = isNum(event.ts) ? event.ts : Date.now();
+    let ts = toNum(event.ts);
+    if (ts === null) {
+      // Varredura sem relógio: vale o do aparelho (e, se nem ele servir, o da última varredura)
+      const now = this.#clock();
+      ts = isNum(now) ? now : (this.#lastTs ?? 0);
+    }
     // Relógio do celular voltou no tempo (acerto manual de data): o histórico não vale mais
     if (this.#lastTs !== null && ts < this.#lastTs - CLOCK_JUMP_MS) this.clear();
     this.#lastTs = this.#lastTs === null ? ts : Math.max(this.#lastTs, ts);
@@ -916,6 +1108,12 @@ export class ApTracker {
       let drop = Math.max(0, state.history.length - this.#maxSamples);
       while (drop < state.history.length && state.history[drop].t < limit) drop += 1;
       if (drop > 0) state.history.splice(0, drop);
+    }
+    // Teto de memória: num lugar com milhares de BSSIDs de passagem (ou com um relógio que não
+    // anda, e aí nada envelhece), saem os ouvidos há mais tempo.
+    if (this.#aps.size > this.#maxAps) {
+      const oldest = [...this.#aps].sort((a, b) => a[1].lastSeen - b[1].lastSeen || (a[0] < b[0] ? -1 : 1));
+      for (let i = 0; i < oldest.length - this.#maxAps; i++) this.#aps.delete(oldest[i][0]);
     }
     result.total = this.#aps.size;
     return result;

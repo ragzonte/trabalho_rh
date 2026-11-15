@@ -60,8 +60,6 @@ function ensureCss() {
 // Armazenamento protegido
 // ---------------------------------------------------------------------------
 
-/** O que dizer quando o aparelho não guarda nada de forma permanente. */
-export const NOT_PERSISTENT = 'Este aparelho não deixou o app gravar dados: o mapa fica guardado só enquanto o app estiver aberto.';
 const NO_STORE = 'Não foi possível guardar o mapa neste aparelho.';
 
 /**
@@ -255,7 +253,11 @@ export async function mount(root, ctx) {
       return;
     }
     const key = target.view === 'result' ? `result:${target.id}` : target.view;
-    if (current && current.key === key) return;
+    if (current && current.key === key) {
+      // a moldura repõe o título do destino a cada mudança de rota: a parte aberta põe o dela de volta
+      if (current.instance && typeof current.instance.onShow === 'function') current.instance.onShow();
+      return;
+    }
     const my = ++token;
     leave();
     root.className = 'screen';

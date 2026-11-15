@@ -1,6 +1,9 @@
 // Diagnóstico automático: olha a varredura, a conexão e o celular e diz, em português claro, o
 // que está errado (ou que está tudo certo).
 //
+// O que oferece: buildInsights({ aps, connection, device, status }) -> Insight[] (do mais grave
+// para o mais leve; a lista de ids possíveis está na documentação da função).
+//
 // Regra de ouro: cada aviso só aparece quando o dado que o sustenta veio do celular. Sem os
 // elementos do beacon (Android antigo), sem a conexão ou sem a lista de redes, o aviso
 // correspondente simplesmente não existe: nada é presumido.
@@ -15,7 +18,7 @@ import { signalLevel } from './signal.js';
 import { estimateLink, maxRate, standardInfo } from './phy.js';
 import { parseCapabilities } from './security.js';
 import { parseIes } from './ies.js';
-import { asAp, groupByDevice, groupBySsid, normalizeBssid, ssidStem } from './model.js';
+import { asApList, groupByDevice, groupBySsid, normalizeBssid, ssidStem } from './model.js';
 import { recommendChannel, recommendWidth } from './channel-rating.js';
 import { scoreAp, scoringContext, clientProfile, isInsecure, formatSpeed, formatDbm, timesMore } from './best-network.js';
 
@@ -107,8 +110,7 @@ function securityIssue(code) {
 // ---------------------------------------------------------------------------
 
 function gather(input) {
-  const list = [];
-  for (const item of Array.isArray(input.aps) ? input.aps : []) if (isObj(item)) list.push(asAp(item));
+  const list = asApList(input.aps); // cada BSSID uma vez só
 
   const connection = isObj(input.connection) ? input.connection : null;
   const conn = connection !== null && connection.connected === true ? connection : null;

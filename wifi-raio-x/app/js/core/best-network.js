@@ -1,5 +1,18 @@
 // Melhor rede: "qual Wi-Fi rende mais aqui, agora, para este celular?"
 //
+// O que oferece:
+//   rankNetworks   as redes ao alcance, da melhor para a pior, com nota, velocidade estimada,
+//                  prós, contras e avisos (uma linha por rede)
+//   scoreAp        a mesma conta para um BSSID só; scoringContext prepara a lista uma vez
+//   advise         o conselho em uma frase: ficar, trocar de faixa, de ponto de acesso ou de rede
+//   peças          clientProfile (o que o celular alcança), speedScore, signalCap, isInsecure e
+//                  os pesos do modelo (SPEED_*, WEAK_SIGNAL_*, INSECURE_FACTOR...)
+//   textos         formatSpeed ("290 Mb/s"), formatGain ("2,3x"), formatDbm ("−57 dBm"),
+//                  formatDistance ("cerca de 5 m"), timesMore: os números das frases saem daqui,
+//                  com vírgula decimal e já arredondados como estimativa
+// Em `options`, `device` é o celular (DeviceInfo da ponte); não confundir com `devices`, a
+// lista de aparelhos físicos de groupByDevice.
+//
 // MODELO
 //
 // 1. Enlace. estimateLink (phy.js) diz que taxa física o sinal sustenta entre o AP e o celular,
@@ -33,7 +46,7 @@
 
 import { clamp, lerp, qualityPct, signalLevel } from './signal.js';
 import { estimateLink, usableMbps, standardInfo } from './phy.js';
-import { asAp, groupByDevice, groupBySsid, normalizeBssid, ssidStem } from './model.js';
+import { asAp, asApList, groupByDevice, groupBySsid, normalizeBssid, ssidStem } from './model.js';
 import { rateOwnChannel } from './channel-rating.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
@@ -147,7 +160,7 @@ const comma = (x, digits) => x.toFixed(digits).replace('.', ',').replace(/,0+$/,
  * @returns {string}
  */
 export function formatSpeed(mbps) {
-  if (!isNum(mbps) || mbps < 0) return '—';
+  if (!isNum(mbps) || mbps < 0 || mbps >= 1e6) return '—'; // 1 Tb/s: não é medida, é lixo
   if (mbps < 9.95) return `${comma(mbps, 1)} Mb/s`;
   const magnitude = Math.pow(10, Math.floor(Math.log10(mbps)) - 1);
   const rounded = Math.round(mbps / magnitude) * magnitude;
@@ -162,9 +175,24 @@ export function formatGain(ratio) {
 
 /** Sinal com o menos tipográfico: -57.2 -> "−57 dBm". */
 export function formatDbm(rssi) {
-  if (!isNum(rssi)) return '—';
+  if (!isNum(rssi) || Math.abs(rssi) >= 1000) return '—';
   const n = Math.round(rssi);
   return `${n < 0 ? MINUS : ''}${Math.abs(n)} dBm`;
+}
+
+/**
+ * Distância estimada pelo sinal (indoorDistance), em palavras. É uma ordem de grandeza (uma
+ * parede a mais muda bastante), por isso sai sempre como "cerca de", sem casas decimais:
+ * 0.4 -> "menos de 1 m"; 3.2 -> "cerca de 3 m"; 27 -> "cerca de 25 m"; 100 ou mais -> "mais de
+ * 100 m". Inválido -> "—".
+ * @param {number} meters
+ * @returns {string}
+ */
+export function formatDistance(meters) {
+  if (!isNum(meters) || meters < 0) return '—';
+  if (meters < 1) return 'menos de 1 m';
+  if (meters >= 100) return 'mais de 100 m';
+  return `cerca de ${meters < 10 ? Math.round(meters) : Math.round(meters / 5) * 5} m`;
 }
 
 /** Nome da rede para frases: “Casa” ou "uma rede oculta". */
@@ -235,15 +263,13 @@ export function scoringContext(aps, options) {
   return makeContext(toList(aps), isObj(options) ? options : {});
 }
 
-/** Lista normalizada, sem o que não tem BSSID válido (lixo não vira rede nem vizinho). */
+/**
+ * Lista normalizada, com cada BSSID uma vez só e sem o que não tem BSSID válido (lixo não vira
+ * rede nem vizinho).
+ */
 function toList(aps) {
-  const list = [];
-  for (const item of Array.isArray(aps) ? aps : []) {
-    if (!isObj(item)) continue;
-    const ap = asAp(item);
-    if (ap.id !== '') list.push(ap);
-  }
-  return list;
+  const list = asApList(aps);
+  return list.some((ap) => ap.id === '') ? asApList(list.filter((ap) => ap.id !== '')) : list;
 }
 
 function makeContext(list, o) {
@@ -276,8 +302,7 @@ function contextFor(ap, o) {
   if (isObj(o.context) && o.context[CONTEXT] === true) return o.context;
   const list = toList(o.aps);
   // O AP avaliado entra na conta mesmo que a lista não o traga
-  if (!list.some((x) => x.id === ap.id)) list.push(ap);
-  return makeContext(list, o);
+  return makeContext(list.some((x) => x.id === ap.id) ? list : [...list, ap], o);
 }
 
 // ---------------------------------------------------------------------------
@@ -773,11 +798,30 @@ export function timesMore(gain) {
   return gain >= GAIN_SAY_AT_MOST ? `pelo menos ${GAIN_SAY_AT_MOST}x mais` : `cerca de ${formatGain(gain)} mais`;
 }
 
-/** "deve render cerca de 2,3x mais aqui", ou o motivo que sobrar quando a velocidade não explica. */
-function whyBetter(gain, targetRow, currentRow) {
-  if (gain !== null && gain >= GAIN_WORTH_SAYING) return `deve render ${timesMore(gain)} aqui`;
-  if (isInsecure(currentRow.security) && !isInsecure(targetRow.security)) return 'é protegida por senha e criptografia, ao contrário da rede em uso';
-  return 'deve funcionar melhor aqui';
+/**
+ * "deve render cerca de 2,3x mais aqui (cerca de 120 Mb/s)", ou o motivo que sobrar quando a
+ * velocidade não explica. `speed` = a velocidade estimada do destino já em palavras, ou null.
+ */
+function whyBetter(gain, targetRow, currentRow, speed) {
+  const tail = speed ? ` (${speed})` : '';
+  if (gain !== null && gain >= GAIN_WORTH_SAYING) return `deve render ${timesMore(gain)} aqui${tail}`;
+  if (isInsecure(currentRow.security) && !isInsecure(targetRow.security)) {
+    // a velocidade vai depois, para não parecer que é a da rede em uso
+    return `é protegida por senha e criptografia, ao contrário da rede em uso${speed ? `, e deve render ${speed} aqui` : ''}`;
+  }
+  return `deve funcionar melhor aqui${tail}`;
+}
+
+/**
+ * Os nomes de duas redes para a mesma frase. Quando são iguais (a mesma rede anunciada aberta e
+ * com senha, por exemplo), a segurança entra junto, senão não dá para saber qual é qual.
+ */
+function namesApart(a, b) {
+  const first = quoted(a);
+  const second = quoted(b);
+  if (first !== second) return [first, second];
+  const label = (row) => (isObj(row.security) && typeof row.security.label === 'string' ? ` (${row.security.label})` : '');
+  return [first + label(a), second + label(b)];
 }
 
 function adviseDisconnected(rows, isFav) {
@@ -915,7 +959,6 @@ export function advise(ranking, options) {
     const target = targetOf(row, entry);
     const result = { target, current: here, gain, alternative: null };
     const speed = about(entry);
-    const tail = speed ? ` (${speed})` : '';
 
     if (option.sameNetwork && (otherBox || !otherBand)) {
       // Outro ponto de acesso da mesma rede: só vale se for bem mais forte, porque quem escolhe
@@ -929,7 +972,7 @@ export function advise(ranking, options) {
         headline: 'Há um ponto de acesso mais forte da sua rede',
         text:
           `O celular continua preso a um ponto de acesso distante (${formatDbm(rssiOf(current.ap))}), mas outro da mesma rede chega com ` +
-          `${formatDbm(rssiOf(entry.ap))}${where} e ${whyBetter(gain, row, currentRow)}${tail}. Desligue e ligue o Wi-Fi do celular para ele trocar.`,
+          `${formatDbm(rssiOf(entry.ap))}${where} e ${whyBetter(gain, row, currentRow, speed)}. Desligue e ligue o Wi-Fi do celular para ele trocar.`,
       };
     }
     if (option.sameNetwork) {
@@ -940,7 +983,7 @@ export function advise(ranking, options) {
         headline: `Prefira a faixa de ${BAND_NAME[entry.ap.band] || 'outra faixa'}`,
         text:
           `Você está em ${BAND_NAME[current.ap.band] || 'outra faixa'}. A rede de ${BAND_NAME[entry.ap.band] || 'outra faixa'} ${whose} ` +
-          `${whyBetter(gain, row, currentRow)}${tail}. O nome é o mesmo, então quem escolhe a faixa é o celular: desligue e ligue o Wi-Fi para ele escolher de novo.`,
+          `${whyBetter(gain, row, currentRow, speed)}. O nome é o mesmo, então quem escolhe a faixa é o celular: desligue e ligue o Wi-Fi para ele escolher de novo.`,
       };
     }
     if (option.twin && otherBand) {
@@ -950,19 +993,26 @@ export function advise(ranking, options) {
         kind: 'switch-band',
         headline: `Troque para a rede ${quoted(row)}`,
         text:
-          `A rede de ${BAND_NAME[entry.ap.band] || 'outra faixa'} do mesmo roteador, ${quoted(row)}, ${whyBetter(gain, row, currentRow)}${tail}. ` +
+          `A rede de ${BAND_NAME[entry.ap.band] || 'outra faixa'} do mesmo roteador, ${quoted(row)}, ${whyBetter(gain, row, currentRow, speed)}. ` +
           'Escolha essa rede nas configurações de Wi-Fi; a senha costuma ser a mesma.',
       };
     }
     const speedWins = gain !== null && gain >= GAIN_WORTH_SAYING;
-    const safer = speedWins && currentUnsafe && !isInsecure(row.security) ? ' Além disso, ela é protegida por senha e criptografia, ao contrário da rede em uso.' : '';
+    const safer = currentUnsafe && !isInsecure(row.security);
+    const [there, inUse] = namesApart(row, currentRow);
+    let why;
+    if (safer && !speedWins) {
+      // O motivo é a proteção, não a velocidade
+      why = `Das suas redes, ${there}${inBand(entry.ap)} é protegida por senha e criptografia, ao contrário de ${inUse}${speed ? `, e deve render ${speed} aqui` : ''}.`;
+    } else {
+      why = `Das suas redes, ${there}${inBand(entry.ap)} ${whyBetter(gain, row, currentRow, speed)}, em comparação com ${inUse}.`;
+      if (safer) why += ' Além disso, ela é protegida por senha e criptografia, ao contrário da rede em uso.';
+    }
     return {
       ...result,
       kind: 'switch-network',
-      headline: `A rede ${quoted(row)} está melhor aqui`,
-      text:
-        `Das suas redes, ${quoted(row)}${inBand(entry.ap)} ${whyBetter(gain, row, currentRow)}${tail}, ` +
-        `em comparação com ${quoted(currentRow)}.${safer} Vale trocar nas configurações de Wi-Fi.`,
+      headline: `A rede ${there} está melhor aqui`,
+      text: `${why} Vale trocar nas configurações de Wi-Fi.`,
     };
   }
 
@@ -980,7 +1030,7 @@ export function advise(ranking, options) {
     alternative = targetOf(stranger.row, stranger.entry);
     const gain = gainOf(stranger.entry, current);
     const more = gain !== null && gain >= GAIN_WORTH_SAYING ? ` (${timesMore(gain)})` : '';
-    text += ` A rede ${quoted(stranger.row)} parece render mais aqui${more}; se ela for sua e você tiver a senha, vale testar.`;
+    text += ` A rede ${namesApart(stranger.row, currentRow)[0]} parece render mais aqui${more}; se ela for sua e você tiver a senha, vale testar.`;
   }
   return {
     kind: 'ok',

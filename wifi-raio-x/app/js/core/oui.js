@@ -1,6 +1,16 @@
 // Fabricante de um rádio pelo começo do MAC (o "OUI"), sem internet: a tabela da IEEE vai
 // dentro do APK, em assets/oui.json (gerada por tools/build-oui.mjs).
 //
+// O que oferece:
+//   loadOui(url)           carrega a tabela (nunca rejeita) e devolve a consulta: vendor(mac),
+//                          label(mac) e isRandomized(mac); createOuiLookup faz o mesmo a partir
+//                          do conteúdo já lido
+//   isLocallyAdministered  o bit "administrado localmente" do MAC; isRandomized = a regra completa
+//   normalizeMac           qualquer grafia de MAC -> só os dígitos hexadecimais ("aabbcc..."), ou
+//                          null. (Para BSSIDs o app usa normalizeBssid, de model.js, que é
+//                          estrita e devolve "aa:bb:cc:dd:ee:ff" ou ''.)
+//   encodeVlq, OUI_FORMAT, NAME_SEPARATOR   para o gerador da tabela
+//
 // Tudo função pura; MAC torto, tabela corrompida ou arquivo que não carregou viram null /
 // tabela vazia, nunca exceção.
 //

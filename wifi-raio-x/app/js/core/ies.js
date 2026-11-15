@@ -1,5 +1,11 @@
 // Elementos de informação (IEs) dos beacons 802.11.
 //
+// O que oferece:
+//   parseIes      ScanAp.ies -> IeInfo (tudo o que foi entendido, elemento por elemento)
+//   summarizeIes  IeInfo -> IeSummary (o resumo plano que vira `ap.ie` em model.js)
+//   shortSsid     CRC-32 do nome, para casar com o Reduced Neighbor Report
+//   encodeIes     o caminho inverso, para o simulador e os testes
+//
 // O Android (11+) entrega cada elemento cru em ScanResult.getInformationElements(): o
 // número do elemento (`id`), a extensão (`ext`, só quando id = 255) e o corpo em hexadecimal,
 // sem os bytes de id e de tamanho. Aqui o corpo vira informação útil: quantos aparelhos
@@ -128,6 +134,14 @@
 // bytes
 // ---------------------------------------------------------------------------
 
+/** Valor de um dígito hexadecimal pelo código do caractere; -1 se não for um. */
+function hexDigit(code) {
+  if (code >= 48 && code <= 57) return code - 48; // 0-9
+  if (code >= 97 && code <= 102) return code - 87; // a-f
+  if (code >= 65 && code <= 70) return code - 55; // A-F
+  return -1;
+}
+
 /** Corpo em hexadecimal -> bytes. null quando não é hexadecimal válido. */
 function toBytes(hex) {
   if (hex instanceof Uint8Array) return hex;
@@ -140,6 +154,19 @@ function toBytes(hex) {
     return arr;
   }
   if (typeof hex !== 'string') return null;
+  // Caminho de sempre (só dígitos hexadecimais, aos pares): uma passada, sem expressões regulares.
+  // Isto roda para cada elemento de cada beacon, a cada varredura.
+  if (hex.length % 2 === 0) {
+    const fast = new Uint8Array(hex.length / 2);
+    let i = 0;
+    for (; i < fast.length; i++) {
+      const hi = hexDigit(hex.charCodeAt(2 * i));
+      const lo = hexDigit(hex.charCodeAt(2 * i + 1));
+      if (hi < 0 || lo < 0) break;
+      fast[i] = (hi << 4) | lo;
+    }
+    if (i === fast.length) return fast;
+  }
   let s = hex.trim();
   if (s.startsWith('0x') || s.startsWith('0X')) s = s.slice(2);
   if (/[^0-9a-fA-F]/.test(s)) s = s.replace(/[\s:-]/g, '');
@@ -149,9 +176,11 @@ function toBytes(hex) {
   return out;
 }
 
+const hex2 = (v) => (v < 16 ? '0' : '') + (v & 0xff).toString(16);
+
 function toHex(bytes) {
   let s = '';
-  for (const v of bytes) s += (v & 0xff).toString(16).padStart(2, '0');
+  for (const v of bytes) s += hex2(v & 0xff);
   return s;
 }
 
@@ -839,7 +868,7 @@ function vendorApName(oui, b) {
 function readVendor(info, acc, b) {
   if (b.length < 3) return;
   const oui = (b[0] << 16) | (b[1] << 8) | b[2];
-  const ouiText = `${toHex(b.subarray(0, 1))}:${toHex(b.subarray(1, 2))}:${toHex(b.subarray(2, 3))}`;
+  const ouiText = `${hex2(b[0])}:${hex2(b[1])}:${hex2(b[2])}`;
   if (!info.vendorOuis.includes(ouiText)) info.vendorOuis.push(ouiText);
   if (b.length < 4) return;
   const type = b[3];
@@ -1260,7 +1289,8 @@ function wpsAttr(type, bytes) {
  *
  * @param {Object} spec
  * @param {number} [spec.frequency]   MHz do canal primário de 20 MHz
- * @param {number} [spec.widthMhz]    largura de operação (padrão: a maior que as capacidades permitem)
+ * @param {number} [spec.widthMHz]    largura de operação (padrão: a maior que as capacidades permitem);
+ *                                    a grafia antiga `widthMhz` continua aceita
  * @param {{legacy11b?:boolean}} [spec.rates]
  * @param {string|{code:string, environment?:('any'|'indoor'|'outdoor'), triplets?:{first:number,count:number,maxTxDbm:number}[]}} [spec.country]
  * @param {{stations:number, utilization:number, admissionCapacity?:number}} [spec.bssLoad]  utilization de 0 a 1
@@ -1314,7 +1344,8 @@ function encodeInto(s, out) {
   else if (wide160) width = 160;
   else if ((band === '5' && (vht || he)) || (band === '6' && he)) width = 80;
   else if (ht && ht.width40) width = 40;
-  if ([20, 40, 80, 160, 320].includes(s.widthMhz)) width = Math.min(width, s.widthMhz);
+  const asked = s.widthMHz !== undefined ? s.widthMHz : s.widthMhz;
+  if ([20, 40, 80, 160, 320].includes(asked)) width = Math.min(width, asked);
   if (band === '2.4') width = channel === 14 ? 20 : Math.min(width, 40);
   else while (width > 20 && blockCenter(band, channel, width) === null) width /= 2;
   // 2,4 GHz: o canal secundário fica acima enquanto couber (até o 7), a não ser que peçam o contrário

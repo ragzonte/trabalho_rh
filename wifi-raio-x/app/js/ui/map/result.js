@@ -24,7 +24,7 @@
 
 import { h, patch, sheet, toast, confirmDialog, fmtDbm, fmtNum, plural, THIN } from '../dom.js';
 import { icon } from '../icons.js';
-import { button, iconButton, badge, banner, ssidLabel, displaySsid, select, slider, errorState, spinner } from '../components.js';
+import { button, iconButton, badge, banner, displaySsid, select, slider, errorState, spinner } from '../components.js';
 import { buildMap, heatField, coverage, suggestRouterSpot, describeMap } from '../../mapping/mapmodel.js';
 import { recorderFromJSON } from '../../mapping/recorder.js';
 import { createViewer } from './viewer3d.js';
@@ -686,7 +686,7 @@ export async function mountResult(root, env, { id }) {
 
   function signalRows(valueOf) {
     const nets = [];
-    for (const c of choices()) if (c.kind === 'own' || c.key === V.show) nets.push(c);
+    for (const c of choices()) if (c.kind === 'own' || (c.kind === 'other' && c.key === V.show)) nets.push(c);
     if (!nets.length && choices()[1]) nets.push(choices()[1]);
     const rows = nets.slice(0, 4).map((c) => {
       const dbm = valueOf(c.key);
@@ -797,11 +797,12 @@ export async function mountResult(root, env, { id }) {
     const theme = store.get().theme;
     const scale = signalScale(theme);
     const pos = (dbm) => `${Math.max(0, Math.min(100, ((dbm - LEGEND_MIN) / (LEGEND_MAX - LEGEND_MIN)) * 100)).toFixed(1)}%`;
+    const breaks = [...SIGNAL_BREAKS_DBM].sort((a, b) => a - b); // da esquerda (fraco) para a direita (forte), como a barra
     return h(
       'div.mrs-legend',
       { key: 'legend', role: 'img', 'aria-label': `Legenda do sinal: ${scale.map((b) => b.label).join(', ')}, do mais forte ao mais fraco; as divisas ficam em ${SIGNAL_BREAKS_DBM.join(', ')} dBm` },
-      h('div.mrs-legend__ticks', { 'aria-hidden': 'true' }, SIGNAL_BREAKS_DBM.map((d) => h('span', { style: { left: pos(d) } }, fmtDbm(d, { unit: false }))), h('span.mrs-legend__unit', null, 'dBm')),
-      h('div.mrs-legend__bar', { style: { backgroundImage: signalGradientCss(theme, { min: LEGEND_MIN, max: LEGEND_MAX }) } }, SIGNAL_BREAKS_DBM.map((d) => h('i', { style: { left: pos(d) } }))),
+      h('div.mrs-legend__ticks', { 'aria-hidden': 'true' }, breaks.map((d) => h('span', { style: { left: pos(d) } }, fmtDbm(d, { unit: false }))), h('span.mrs-legend__unit', null, 'dBm')),
+      h('div.mrs-legend__bar', { style: { backgroundImage: signalGradientCss(theme, { min: LEGEND_MIN, max: LEGEND_MAX }) } }, breaks.map((d) => h('i', { style: { left: pos(d) } }))),
       h(
         'div.mrs-legend__words',
         { 'aria-hidden': 'true' },
@@ -1081,6 +1082,7 @@ export async function mountResult(root, env, { id }) {
   function setOpen(open) {
     V.open = !!open;
     panelEl.dataset.open = String(V.open);
+    el.classList.toggle('mrs--open', V.open);
     handle.setAttribute('aria-expanded', String(V.open));
     handleLabel.textContent = V.open ? 'Fechar os detalhes' : 'Cobertura, qualidade e ações';
     handleIcon.replaceChildren(icon(V.open ? 'chevron-down' : 'chevron-up', { size: 18 }));
@@ -1186,6 +1188,10 @@ export async function mountResult(root, env, { id }) {
   );
 
   return {
+    /** A rota mudou sem trocar de parte (ex.: o mapa acabou de ganhar um id): a moldura repôs o título. */
+    onShow() {
+      if (!dead) setTop();
+    },
     unmount() {
       if (dead) return;
       dead = true;

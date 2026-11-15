@@ -7,7 +7,7 @@
 // console.error, alert(), violação de CSP ou recurso que não carregou.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startEnv, withApp, shot, goto, back, settle, simEval, appState, horizontalOverflow } from './helpers.mjs';
+import { startEnv, withApp, shot, goto, back, settle, simEval, horizontalOverflow } from './helpers.mjs';
 
 const LONG = { timeout: 300_000 };
 const T = { timeout: 150_000 };
@@ -127,7 +127,13 @@ const savedMaps = (page) =>
     const full = [];
     for (const row of list) {
       const rec = await store.get(row.id);
-      full.push({ id: row.id, name: row.name, scans: rec.survey.scans.length, known: rec.survey.knownDistances || [], thumb: !!row.thumb, labels: [...new Set(rec.survey.scans.map((s) => s.label).filter(Boolean))], areaM2: row.stats.areaM2 });
+      const known = (rec.survey.knownDistances || []).map((k) => {
+        // a distância que a solução guardada dá entre as duas varreduras da calibração
+        const p = rec.solution.points[k.a];
+        const q = rec.solution.points[k.b];
+        return { ...k, solved: Math.hypot(p.x - q.x, p.y - q.y, p.z - q.z) };
+      });
+      full.push({ id: row.id, name: row.name, scans: rec.survey.scans.length, known, thumb: !!row.thumb, labels: [...new Set(rec.survey.scans.map((s) => s.label).filter(Boolean))], areaM2: row.stats.areaM2 });
     }
     const draft = await store.draft.load();
     store.close();
@@ -144,8 +150,7 @@ async function mapImage(page) {
   });
   await page.click(SHARE);
   await page.locator('.map-actions .row', { hasText: 'Imagem do mapa' }).click();
-  await page.waitForFunction(() => window.__e2eSim && window.__e2eSim().device.lastFile !== null, null, { timeout: 30_000 });
-  const file = await simEval(page, (sim) => sim.device.lastFile);
+  const { file } = await waitDevice(page, (d) => d.file !== null, 'a imagem do mapa');
   assert.equal(file.mime, 'image/png');
   assert.match(file.name, /^[a-z0-9-]+\.png$/);
   const stats = await page.evaluate(async (base64) => {
@@ -163,6 +168,17 @@ async function mapImage(page) {
     return { width: img.width, height: img.height, colors: colors.size };
   }, file.base64);
   return { ...stats, size: file.size, name: file.name };
+}
+
+/** Espera o "celular" receber um arquivo (ou um compartilhamento) que satisfaça `test`. */
+async function waitDevice(page, test, what, timeout = 30_000) {
+  const t0 = Date.now();
+  for (;;) {
+    const got = await simEval(page, (sim) => ({ file: sim.device.lastFile, share: sim.device.lastShare }));
+    if (test(got)) return got;
+    if (Date.now() - t0 > timeout) throw new Error(`o celular não recebeu ${what}`);
+    await page.waitForTimeout(150);
+  }
 }
 
 const openPanel = async (page) => {
@@ -295,32 +311,35 @@ test('fluxo completo: demonstração automática -> prévia -> resultado -> salv
     assert.match(await page.getAttribute('.mlib-map__thumb img', 'src'), /^data:image\/(webp|jpeg);base64,/);
     await shot(page, 'mapa-biblioteca-com-mapa');
 
-    // abrir de novo e ajustar a escala: o dobro da distância que o mapa estima entre dois lugares
+    // abrir de novo e ajustar a escala: a distância "medida" é 30% maior do que o mapa estimava
     await page.click(`[data-map-id="${id}"]`);
     await resultReady(page);
     await openPanel(page);
     await panelButton(page, 'Ajustar a escala').click();
     await page.waitForSelector('.mrs-scale');
+    assert.match(await text(page, '.mrs-scale'), /25% maior ou menor/);
     const estimate = await text(page, '.mrs-scale__now');
     const meters = Number(estimate.match(/≈\s*([\d,]+)/)[1].replace(',', '.'));
     assert.ok(meters >= 1, `distância estimada: ${estimate}`);
     await page.fill('.mrs-scale input', 'abc');
     await page.click('.sheet__footer .btn--primary');
     assert.match(await text(page, '.mrs-scale .field__error'), /metros/);
-    await page.fill('.mrs-scale input', String(meters * 2).replace('.', ','));
+    const real = Math.round(meters * 13) / 10;
+    await page.fill('.mrs-scale input', String(real).replace('.', ','));
     await page.click('.sheet__footer .btn--primary');
     await toastWith(page, /Escala ajustada/, 60_000);
     stored = await savedMaps(page);
     assert.equal(stored.maps[0].known.length, 1);
-    assert.equal(stored.maps[0].known[0].meters, meters * 2);
-    assert.ok(stored.maps[0].areaM2 > areaBefore * 1.5, `o mapa cresceu: de ${areaBefore} para ${stored.maps[0].areaM2} m²`);
+    assert.equal(stored.maps[0].known[0].meters, real);
+    // o mapa refeito respeita a medida: os dois lugares ficam à distância informada
+    assert.ok(Math.abs(stored.maps[0].known[0].solved - real) < real * 0.05, `distância no mapa: ${stored.maps[0].known[0].solved} (informada: ${real})`);
+    assert.ok(stored.maps[0].areaM2 >= areaBefore, `a área não encolheu: de ${areaBefore} para ${stored.maps[0].areaM2} m²`);
     await resultReady(page);
 
     // exportar o arquivo do mapa
     await page.click(SHARE);
     await page.locator('.map-actions .row', { hasText: 'Arquivo do mapa' }).click();
-    await page.waitForFunction(() => /\.json$/.test((window.__e2eSim().device.lastFile || {}).name || ''));
-    const exported = await simEval(page, (sim) => sim.device.lastFile);
+    const exported = (await waitDevice(page, (d) => /\.json$/.test((d.file || {}).name || ''), 'o arquivo do mapa')).file;
     assert.equal(exported.name, 'meu-ape.wifi-raio-x.json');
     assert.equal(exported.mime, 'application/json');
     const fileData = JSON.parse(exported.text);
@@ -331,8 +350,8 @@ test('fluxo completo: demonstração automática -> prévia -> resultado -> salv
     // resumo em texto
     await page.click(SHARE);
     await page.locator('.map-actions .row', { hasText: 'Resumo em texto' }).click();
-    await page.waitForFunction(() => window.__e2eSim().device.lastShare !== null);
-    assert.match((await device(page)).share.text, /Mapa aproximado, feito só com o sinal do Wi-Fi/);
+    const shared = (await waitDevice(page, (d) => d.share !== null, 'o resumo em texto')).share;
+    assert.match(shared.text, /Mapa aproximado, feito só com o sinal do Wi-Fi/);
 
     // apagar (com confirmação)
     await openPanel(page);
@@ -353,7 +372,7 @@ test('fluxo completo: demonstração automática -> prévia -> resultado -> salv
 // ---------------------------------------------------------------------------
 
 test('ponto a ponto: com o Android limitando as buscas, o passo inicial explica e o levantamento conta a espera', T, async () => {
-  await withApp(env, { params: { world: 'apartamento', throttle: 1, speed: 20 }, route: '/mapa' }, async ({ page }) => {
+  await withApp(env, { params: { world: 'apartamento', throttle: 1, speed: 1 }, route: '/mapa' }, async ({ page }) => {
     await page.waitForSelector('.mlib-hero');
     await page.waitForFunction(() => window.__wrx.app.store.get().loop.throttled === true, null, { timeout: 60_000 });
     await page.click('.mlib-hero .btn');
@@ -377,9 +396,9 @@ test('ponto a ponto: com o Android limitando as buscas, o passo inicial explica 
     await markPlace(page, 'Cozinha');
     assert.match(await text(page, '.msv-status__title'), /Parado em: Cozinha/);
     assert.match(await text(page, '.msv-status__detail'), /Fique parado até a leitura chegar/);
-    // a leitura pedida ao marcar chega e o ponto fica pronto com UMA leitura
-    await page.waitForFunction(() => /1 leitura aqui/.test(document.querySelector('.msv-status__detail')?.textContent || ''), null, { timeout: 60_000 });
-    assert.match(await text(page, '.msv-status__detail'), /Pode seguir/);
+    // a leitura pedida ao marcar chega em segundos (sem esperar os 30 s) e o ponto fica pronto com UMA leitura
+    await page.waitForFunction(() => /\d+ leituras? aqui/.test(document.querySelector('.msv-status__detail')?.textContent || ''), null, { timeout: 20_000 });
+    assert.match(await text(page, '.msv-status__detail'), /^1 leitura aqui\. Pode seguir/);
     assert.equal((await counters(page))[1], 1);
     await page.click('.msv__bar .btn--primary');
     await page.waitForSelector('.msv-status[data-state="walking"]');
@@ -469,7 +488,9 @@ test('nome hostil: o lugar digitado e o nome do mapa aparecem como texto em todo
     assert.equal(await text(page, '.topbar__title'), HOSTILE_NAME);
     const stored = await savedMaps(page);
     assert.ok(stored.maps[0].labels.includes(HOSTILE));
-    await back(page);
+    assert.equal(await back(page), true); // fecha o painel de detalhes
+    assert.equal(await hash(page), `#/mapa/ver/${stored.maps[0].id}`);
+    assert.equal(await back(page), true); // volta para a lista
     await page.waitForSelector('.mlib-map');
     assert.equal(await text(page, '.mlib-map__name'), HOSTILE_NAME);
     assert.equal(await noInjection(page), 0);

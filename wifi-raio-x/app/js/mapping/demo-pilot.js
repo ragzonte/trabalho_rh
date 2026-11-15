@@ -4,14 +4,21 @@
 // SÓ para o modo demonstração (precisa dos controles do simulador: currentSim() de sim/backend.js).
 //
 //   const pilot = createDemoPilot({ sim, recorder, scanLoop, onStep });
-//   pilot.start({ speed = 8, spots = true })   -> true se começou
+//   pilot.start({ speed = 8, spots = true })   -> true se começou (também aceita minScans). Se o gravador
+//                                              ainda não começou (ou está em pausa), o piloto o põe para gravar;
+//                                              quem encerra a gravação, no fim, é a tela.
 //   pilot.stop()                               para e devolve o simulador como estava
 //   pilot.running
 //
 //   onStep({ phase, room, progress, scans, spots, rooms: { marked, total }, complete })
 //     phase: 'walking' (andando) | 'marking' (parado, marcando um ponto) | 'paused' (a gravação está em
-//            pausa) | 'done' (terminou) | 'stopped' (interrompido por stop())
-//     room:  nome do cômodo em que a pessoa virtual está (ou null); progress: 0..1
+//            pausa: a pessoa virtual espera) | 'done' (terminou; complete = true se marcou todos os cômodos
+//            e juntou as varreduras, false se desistiu pelo prazo) | 'stopped' (interrompido: stop(), gravação
+//            encerrada pela tela ou casa virtual trocada)
+//     room:  nome do cômodo em que a pessoa virtual está (ou null); progress: 0..1, nunca volta
+//
+// Duração (relógio, velocidade 8): cerca de 30 s na kitnet e no apartamento, 45 s no sobrado e no
+// escritório. O mínimo de varreduras acompanha o tamanho da casa (uma por m², entre 80 e 110).
 //
 // O que ele faz: põe a pessoa para passear ('auto'); ao chegar ao meio de um cômodo ainda sem
 // ponto, para ('still'), marca um ponto com o nome do cômodo (o simulador sabe onde ela está),
@@ -93,6 +100,7 @@ export function createDemoPilot({ sim, recorder, scanLoop = null, onStep, reques
   let wantSpots = true;
   let minScans = cfg.minScans;
 
+  let world = null; // a casa em que o piloto começou (se trocarem de casa no meio, ele para)
   let rooms = [];
   let marks = new Map(); // índice do cômodo -> [{x, y}] pontos marcados nele
   let skipped = new Set(); // cômodos aonde não deu para chegar
@@ -190,7 +198,7 @@ export function createDemoPilot({ sim, recorder, scanLoop = null, onStep, reques
     if (pending().length) return false;
     const quota = Math.max(1, Math.min(3, Math.round(room.area / 9)));
     if (list.length >= quota || nowS - lastSpotEndS < cfg.extraGapS) return false;
-    if (typeof sim.world.wallDistance === 'function' && sim.world.wallDistance(pos.x, pos.y, pos.floor) < cfg.extraWallM) return false;
+    if (typeof world.wallDistance === 'function' && world.wallDistance(pos.x, pos.y, pos.floor) < cfg.extraWallM) return false;
     return list.every((p) => dist(p, pos) >= cfg.extraSpotM);
   }
 
@@ -236,8 +244,9 @@ export function createDemoPilot({ sim, recorder, scanLoop = null, onStep, reques
     const nowS = walkS();
     const state = recorder.state;
     if (state === 'stopped' || state === 'idle') return finish('stopped');
+    if (sim.world !== world) return finish('stopped'); // trocaram de casa virtual: os cômodos não são mais estes
     const pos = sim.truth();
-    const room = typeof sim.world.roomAt === 'function' ? sim.world.roomAt(pos.x, pos.y, pos.floor) : null;
+    const room = typeof world.roomAt === 'function' ? world.roomAt(pos.x, pos.y, pos.floor) : null;
     const roomName = room ? room.name : null;
 
     if (state === 'paused') {
@@ -250,15 +259,17 @@ export function createDemoPilot({ sim, recorder, scanLoop = null, onStep, reques
       return report({ room: roomName });
     }
     if (phase === 'paused') {
+      // retomou: segue para o próximo cômodo sem ponto (ou volta ao passeio)
       phase = 'walking';
-      sim.walker.setMode('auto');
+      headOn(pos, nowS);
     }
 
     if (nowS - lastAskS >= cfg.scanEveryS) ask(nowS);
 
     if (phase === 'marking') {
       const spot = recorder.currentSpot;
-      const enough = spot && spot.scans >= cfg.scansPerSpot;
+      // a meta do gravador cai para 1 quando as varreduras estão demorando (simulador com o limite do Android)
+      const enough = spot && spot.scans >= Math.min(cfg.scansPerSpot, Number.isFinite(spot.target) ? spot.target : cfg.scansPerSpot);
       if (!spot || enough || nowS - spotSinceS > cfg.spotTimeoutS) {
         if (spot) recorder.endSpot();
         if (spotRoom && (!spot || spot.scans > 0)) {
@@ -318,6 +329,7 @@ export function createDemoPilot({ sim, recorder, scanLoop = null, onStep, reques
   function start(options = {}) {
     if (running) return false;
     if (!sim || !sim.walker || typeof sim.truth !== 'function' || !sim.world || !recorder) return false;
+    if (recorder.state === 'stopped') return false; // levantamento encerrado: não há o que gravar
     const opts = options && typeof options === 'object' ? options : {};
     wantSpots = opts.spots !== false;
 
@@ -333,7 +345,8 @@ export function createDemoPilot({ sim, recorder, scanLoop = null, onStep, reques
     if (recorder.state === 'idle') recorder.start();
     else if (recorder.state === 'paused') recorder.resume();
 
-    rooms = reachableRooms(sim.world);
+    world = sim.world;
+    rooms = reachableRooms(world);
     const area = rooms.reduce((sum, r) => sum + (Number.isFinite(r.area) ? r.area : 0), 0);
     minScans = Number.isFinite(opts.minScans) && opts.minScans > 0 ? opts.minScans : Math.max(cfg.minScans, Math.min(cfg.maxScans, Math.round(area * cfg.scansPerM2)));
     marks = new Map();

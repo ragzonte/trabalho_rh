@@ -244,8 +244,6 @@ public class ContractConformanceTest extends AllSdks {
                 Fixtures.element(48, 0, new byte[] {0x01, 0x00, 0x00, 0x0f, (byte) 0xac, 0x04}),
                 Fixtures.element(255, 35, new byte[] {(byte) 0xff, 0x00}),
                 Fixtures.element(221, 0, new byte[0]),
-                Fixtures.element(7, 0, null),
-                null,
             });
             ReflectionHelpers.callInstanceMethod(home, "setWifiStandard", ClassParameter.from(int.class, 6));
         }
@@ -263,7 +261,13 @@ public class ContractConformanceTest extends AllSdks {
         list.add(ap("", "0C:11:22:33:44:55", "[ESS]", -80, 5500, ScanResult.CHANNEL_WIDTH_40MHZ, 5510, 2500)); // oculta
         list.add(ap("\u0000\u0000\u0000\u0000", "0C:11:22:33:44:56", "[WEP][ESS]", -85, 2412, ScanResult.CHANNEL_WIDTH_20MHZ, 0, 3000));
         list.add(ap("<unknown ssid>", "0C:11:22:33:44:57", "[WPA-PSK-TKIP][ESS]", -88, 2462, ScanResult.CHANNEL_WIDTH_20MHZ, 0, 3100));
-        list.add(ap("Café \"do\" João <b>&amp;", "0C:11:22:33:44:58", "", -70, 2462, ScanResult.CHANNEL_WIDTH_20MHZ, 0, 50));
+        ScanResult cafe = ap("Café \"do\" João <b>&amp;", "0C:11:22:33:44:58", "", -70, 2462, ScanResult.CHANNEL_WIDTH_20MHZ, 0, 50);
+        if (Build.VERSION.SDK_INT >= 30) { // elementos estragados: corpo ausente e posição vazia são pulados
+            ReflectionHelpers.setField(cafe, "informationElements", new ScanResult.InformationElement[] {
+                Fixtures.element(7, 0, null), null, Fixtures.element(1, 0, new byte[] {(byte) 0x82, (byte) 0x84}),
+            });
+        }
+        list.add(cafe);
 
         ScanResult hotspot = ap("Aeroporto", "0C:11:22:33:44:59", "[RSN-EAP-CCMP][ESS]", -75, 5745,
                 ScanResult.CHANNEL_WIDTH_80MHZ, 5775, 1200);
@@ -475,7 +479,6 @@ public class ContractConformanceTest extends AllSdks {
                 "};",
                 "const bridge = await import(pathToFileURL(bridgePath).href);",
                 "await bridge.connect('native');",
-                "let collisions = 0;",
                 "for (const s of samples) {",
                 "  current = s;",
                 "  try {",
@@ -490,14 +493,15 @@ public class ContractConformanceTest extends AllSdks {
                 "      if (got.length !== 1 || !isDeepStrictEqual(got[0], s.value)) fail(s, 'o evento chegou diferente: ' + JSON.stringify(got));",
                 "    } else {",
                 "      const promise = bridge[s.name]();",
-                "      if (typeof current.id !== 'number') { fail(s, 'bridge.js não chamou callAsync'); continue; }",
-                "      (0, eval)(s.script.replace(/resolve\\((-?\\d+),/, `resolve(${current.id},`));",
+                "      if (contract.isAsyncMethod(s.name)) {",
+                "        if (typeof current.id !== 'number') { fail(s, 'bridge.js não chamou callAsync'); continue; }",
+                "        (0, eval)(s.script.replace(/resolve\\((-?\\d+),/, `resolve(${current.id},`));",
+                "      } // método imediato: bridge.js usa call(), que devolveu este mesmo JSON",
                 "      const settled = await promise.then((value) => ({ value }), (error) => ({ error }));",
                 "      if (s.kind === 'reject') {",
                 "        if (!settled.error || settled.error.message !== s.value.error) fail(s, 'a falha não chegou como erro: ' + JSON.stringify(settled));",
-                "      } else if (settled.error && typeof s.value.error === 'string' && settled.error.message === s.value.error) {",
-                "        collisions += 1; // resultado com campo `error` (SpeedSummary que falhou): bridge.js o entrega como exceção",
                 "      } else if (settled.error || !isDeepStrictEqual(settled.value, s.value)) {",
+                "        // inclui o resumo do teste de velocidade com ok:false e error:'offline': é resultado, não falha da ponte",
                 "        fail(s, 'a Promise terminou diferente: ' + JSON.stringify(settled.error ? String(settled.error) : settled.value));",
                 "      }",
                 "    }",
@@ -505,7 +509,7 @@ public class ContractConformanceTest extends AllSdks {
                 "    fail(s, 'exceção: ' + err);",
                 "  }",
                 "}",
-                "console.log(`conferidas ${samples.length}, fora do contrato ${bad}, resultados entregues como exceção ${collisions}`);",
+                "console.log(`conferidas ${samples.length}, fora do contrato ${bad}`);",
                 "process.exit(bad ? 1 : 0);");
         File checker = tmp.newFile("conferir" + samples.size() + ".mjs");
         try (FileOutputStream out = new FileOutputStream(checker)) {
@@ -652,12 +656,12 @@ public class ContractConformanceTest extends AllSdks {
 
         // os dois caminhos do evento 'scan': pedido nosso e varredura do próprio sistema
         Fixtures.wifi().setStartScanSucceeds(true);
+        // (com a lista preenchida, o Robolectric dispara sozinho o aviso que responde ao pedido)
         assertEquals(true, answer(async("scan", "{}")).get("accepted"));
-        systemAnnouncesScan(true);
         systemAnnouncesScan(true);
         systemAnnouncesScan(false);
         List<JSONObject> events = page.events("scan");
-        assertEquals(3, events.size());
+        assertEquals(String.valueOf(events), 3, events.size());
         assertEquals("request", events.get(0).get("source"));
         assertEquals("system", events.get(1).get("source"));
         assertEquals(false, events.get(2).get("fresh"));
@@ -1178,6 +1182,27 @@ public class ContractConformanceTest extends AllSdks {
         gate.countDown();
         assertTrue(answer(lanTwo).getJSONArray("devices").length() >= 2);
         verifyEverythingThePageReceived();
+    }
+
+    @Test
+    public void theJavaScriptSideAcceptsWhatAndroidSends() throws Exception {
+        assumeTrue("sem Node ou fora do repositório completo: só o esquema em Java conferiu",
+                hasNode() && repoFile("tests/helpers/contract.mjs").isFile() && repoFile("app/js/bridge.js").isFile());
+        everythingOn();
+        bridge.onStart();
+        bridge.onResume();
+        for (String method : new String[] {"info", "status", "lastScan", "connection"}) call(method, "{}");
+        call("watchRssi", "{\"intervalMs\":250}");
+        ShadowLooper.idleMainLooper(600, TimeUnit.MILLISECONDS);
+        Fixtures.wifi().setStartScanSucceeds(true);
+        answer(async("scan", "{}"));
+        systemAnnouncesScan(true);
+        answer(async("ping", "{\"host\":\"exemplo.com\",\"count\":2}"));
+        answer(async("lanScan", "{}"));
+        answer(async("speedTest", "{\"mode\":\"light\"}")); // 'offline': resultado com campo error
+        mustFail.add(async("ping", "{\"host\":\"-f\"}"));
+        verifyEverythingThePageReceived();
+        assertTrue("as amostras passaram pelo conferidor JavaScript e por app/js/bridge.js", crossChecked >= 12);
     }
 
     @Test

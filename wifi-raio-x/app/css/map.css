@@ -1819,6 +1819,11 @@
   box-shadow: var(--shadow-2);
 }
 
+/* com os detalhes abertos o cartão "ainda não foi salvo" já traz o botão */
+.mrs--open .mrs__save {
+  display: none;
+}
+
 /* com o botão de salvar no canto, o cartão do toque desce para não ficar por baixo dele */
 .mrs--unsaved .mrs__float {
   top: calc(var(--sp-2) + 48px);

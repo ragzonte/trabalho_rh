@@ -83,7 +83,7 @@ final class Sharer {
         return s.matches("[a-z0-9][a-z0-9.+-]{0,60}/[a-z0-9*][a-z0-9.+*-]{0,80}") ? s : DEFAULT_MIME;
     }
 
-    /** Bytes do arquivo a partir de `text` (UTF-8) ou `base64`. null = grande demais. Base64 inválido lança. */
+    /** Bytes do arquivo a partir de `text` (UTF-8) ou `base64`. null = grande demais. Base64 inválido lança IllegalArgumentException. */
     static byte[] payload(String text, String base64) {
         if (text != null) {
             if (text.length() > MAX_BYTES) return null;
@@ -91,8 +91,24 @@ final class Sharer {
             return bytes.length > MAX_BYTES ? null : bytes;
         }
         if (base64.length() / 4L * 3L > MAX_BYTES + 3) return null;
+        if (!isBase64(base64)) throw new IllegalArgumentException("base64");
         byte[] bytes = Base64.decode(base64, Base64.DEFAULT);
         return bytes.length > MAX_BYTES ? null : bytes;
+    }
+
+    /**
+     * Só o alfabeto do base64 (e quebras de linha). O decodificador do Android pula em silêncio
+     * qualquer outro caractere: um "data:image/png;base64,..." mandado por engano viraria um
+     * arquivo corrompido em vez de um erro.
+     */
+    static boolean isBase64(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            boolean ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                    || c == '+' || c == '/' || c == '=' || c == '\n' || c == '\r' || c == ' ' || c == '\t';
+            if (!ok) return false;
+        }
+        return true;
     }
 
     /** Grava em cache/shared/<nome limpo>, apagando exportações antigas. */
@@ -175,7 +191,8 @@ final class Sharer {
     /** Nome do arquivo .txt que leva um texto grande demais para ir dentro do Intent. */
     static String textFileName(String rawTitle) {
         String title = cleanTitle(rawTitle);
-        String base = title == null ? "texto" : sanitizeName(title);
+        // num título, a barra é só um caractere (sanitizeName a trataria como pasta e cortaria o começo)
+        String base = title == null ? "texto" : sanitizeName(title.replace('/', '_').replace('\\', '_'));
         if (base.length() > 60) base = base.substring(0, 60).trim();
         return base + ".txt";
     }

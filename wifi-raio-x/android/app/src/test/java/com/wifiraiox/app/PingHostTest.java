@@ -44,6 +44,20 @@ public class PingHostTest {
     }
 
     @Test
+    public void rejectsLookAlikeCharactersFromOtherAlphabets() {
+        // Character.digit() aceita algarismos de qualquer alfabeto; o validador não pode.
+        String[] sosias = {
+            "１::１", "fe80::１", "ＦＥ８０::1", "٢٠٠١:db8::1", "२००१::१", "::ｆｆｆｆ:1.2.3.4",   // "IPv6" com algarismos de largura cheia, arábicos, devanágari
+            "８.８.８.８", "٨.٨.٨.٨", "1.1.1.１",                                           // "IPv4"
+            "ｇｏｏｇｌｅ.com", "gооgle.com", "google。com", "google．com", "goo​gle.com", "‮moc.elgoog", // nomes
+            "fe80::1%ｗlan0", "fe80::1%wlan０",                                           // escopo
+        };
+        for (String h : sosias) assertFalse(h, PingHost.isValid(h));
+        assertTrue(PingHost.isHex('0') && PingHost.isHex('9') && PingHost.isHex('a') && PingHost.isHex('F'));
+        assertFalse(PingHost.isHex('g') || PingHost.isHex('１') || PingHost.isHex('٨') || PingHost.isHex(':'));
+    }
+
+    @Test
     public void rejectsMalformedInput() {
         String[] bad = {
             null, "", ".", "..", "a..b", ".com", "-host.com", "host-.com", "a.-b.c",

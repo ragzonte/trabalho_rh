@@ -10,7 +10,8 @@
 //     quick,        // true = prévia rápida (solveQuick), para o mapa ao vivo durante a caminhada
 //     previous,     // MapSolution anterior (a última prévia): o resultado sai no mesmo referencial,
 //                   // sem girar nem espelhar o mapa na tela de uma atualização para a outra
-//     budgetMs,     // tempo que o solucionador pode gastar
+//     budgetMs,     // teto de tempo do solucionador (padrão: 15 s no cálculo completo). É teto, não meta:
+//                   // num aparelho rápido ele termina antes; com pouco tempo deixa de fora os motores mais caros
 //     onProgress,   // (fração 0..1, rótulo em pt-BR) => void
 //   });
 //   (o resultado traz ainda solveMs, buildMs e worker: true/false = onde rodou)
@@ -34,6 +35,12 @@
 // Sem imports estáticos de propósito: o solucionador e o construtor do modelo só são carregados
 // na thread principal se o caminho de reserva for mesmo necessário.
 
+/**
+ * Teto de tempo do cálculo completo quando quem chama não diz nada. O padrão do solucionador (6 s)
+ * foi medido num computador; um celular é de 3 a 5 vezes mais lento, e com tempo curto o
+ * solucionador deixa motores de fora — vale mais esperar alguns segundos por um mapa melhor.
+ */
+export const DEFAULT_BUDGET_MS = 15_000;
 /** O worker tem este tempo para carregar e avisar que está pronto. */
 const READY_TIMEOUT_MS = 10_000;
 /** Um cálculo que passa disto travou: o worker é encerrado. */
@@ -95,6 +102,7 @@ export function createMapEngine({ workerUrl, readyTimeoutMs = READY_TIMEOUT_MS }
       // já estava encerrado
     }
     if (handle === h) handle = null;
+    if (h.settle) h.settle(false); // quem esperava o worker ficar pronto não espera mais
   }
 
   function spawn() {
@@ -105,8 +113,14 @@ export function createMapEngine({ workerUrl, readyTimeoutMs = READY_TIMEOUT_MS }
       canWorker = false;
       return null;
     }
-    const h = { worker, ready: null, alive: true, isReady: false, onMessage: null, onCrash: null };
-    h.ready = new Promise((resolve) => {
+    const h = { worker, ready: null, settle: null, alive: true, isReady: false, onMessage: null, onCrash: null };
+    h.ready = new Promise((done) => {
+      const resolve = (ok) => {
+        clearTimeout(timer);
+        h.settle = null;
+        done(ok);
+      };
+      h.settle = resolve;
       const giveUp = (reason) => {
         if (h.isReady) {
           // já estava funcionando e quebrou no meio de um trabalho; na segunda vez, desiste dele
@@ -119,15 +133,13 @@ export function createMapEngine({ workerUrl, readyTimeoutMs = READY_TIMEOUT_MS }
         }
         // nunca chegou a carregar: este aparelho não roda o worker
         canWorker = false;
-        kill(h);
-        resolve(false);
+        kill(h); // (também avisa quem esperava: ready = false)
       };
       const timer = setTimeout(() => giveUp(new Error('o worker não respondeu')), readyTimeoutMs);
       worker.onmessage = (event) => {
         const msg = event.data;
         if (!msg || typeof msg !== 'object') return;
         if (msg.type === 'ready') {
-          clearTimeout(timer);
           h.isReady = true;
           resolve(true);
         } else if (h.onMessage) {
@@ -136,7 +148,6 @@ export function createMapEngine({ workerUrl, readyTimeoutMs = READY_TIMEOUT_MS }
       };
       worker.onerror = (event) => {
         if (event && typeof event.preventDefault === 'function') event.preventDefault(); // tratado aqui: não vira erro da página
-        clearTimeout(timer);
         giveUp(new Error((event && event.message) || 'o worker falhou'));
       };
       worker.onmessageerror = () => giveUp(new Error('mensagem do worker ilegível'));
@@ -273,7 +284,7 @@ export function createMapEngine({ workerUrl, readyTimeoutMs = READY_TIMEOUT_MS }
       own: opts.own ? [...opts.own].filter((x) => typeof x === 'string') : [],
       quick: !!opts.quick,
       previous: opts.previous && typeof opts.previous === 'object' ? opts.previous : null,
-      budgetMs: Number.isFinite(opts.budgetMs) && opts.budgetMs > 0 ? opts.budgetMs : undefined,
+      budgetMs: Number.isFinite(opts.budgetMs) && opts.budgetMs > 0 ? opts.budgetMs : opts.quick ? undefined : DEFAULT_BUDGET_MS,
       seed: Number.isFinite(opts.seed) ? opts.seed : undefined,
     };
     return new Promise((resolve, reject) => {

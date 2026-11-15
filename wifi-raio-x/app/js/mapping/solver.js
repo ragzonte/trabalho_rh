@@ -608,17 +608,20 @@ function applyKnownDistances(view, pairs, full) {
       }
     }
   };
-  for (const kd of pairs) {
-    const dx = x[kd.b] - x[kd.a];
-    const dy = y[kd.b] - y[kd.a];
-    const d = Math.hypot(dx, dy);
-    if (d < 1e-6) {
-      move(kd.b, kd.meters, 0);
-      continue;
+  // (Com várias medidas que dividem um ponto, acertar um par desfaz um pouco o outro: algumas voltas.)
+  for (let pass = 0; pass < (pairs.length > 1 ? 8 : 1); pass++) {
+    for (const kd of pairs) {
+      const dx = x[kd.b] - x[kd.a];
+      const dy = y[kd.b] - y[kd.a];
+      const d = Math.hypot(dx, dy);
+      if (d < 1e-6) {
+        move(kd.b, kd.meters, 0);
+        continue;
+      }
+      const shift = (0.5 * (kd.meters - d)) / d;
+      move(kd.a, -shift * dx, -shift * dy);
+      move(kd.b, shift * dx, shift * dy);
     }
-    const shift = (0.5 * (kd.meters - d)) / d;
-    move(kd.a, -shift * dx, -shift * dy);
-    move(kd.b, shift * dx, shift * dy);
   }
   return trust;
 }

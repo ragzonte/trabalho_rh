@@ -1,7 +1,14 @@
 // Camada física: gerações do Wi-Fi, taxas de dados (calculadas a partir dos parâmetros do
 // OFDM, não de tabela copiada) e estimativa da velocidade de um enlace a partir do sinal.
 //
-// Tudo função pura; entrada inválida vira null, nunca exceção.
+// O que oferece:
+//   gerações    WIFI_STANDARD, standardInfo ("Wi-Fi 6 (802.11ax)"), phyOfGen, inferGen
+//   taxas       dataRate (uma combinação), maxRate (a "de caixa"), mcsName, MIN_SNR_DB
+//   enlace      estimateLink (taxa física que o sinal sustenta), usableMbps (o que sobra dela
+//               num download de verdade), MAC_EFFICIENCY
+//
+// Tudo função pura; entrada inválida vira null, nunca exceção. As taxas saem em Mbps (número);
+// quem escreve para a pessoa é formatSpeed (best-network.js), que usa "Mb/s".
 
 import { bandOf } from './channels.js';
 import { noiseFloorDbm } from './signal.js';
@@ -181,11 +188,12 @@ export function dataRate(params) {
 /** Maior taxa do 802.11a/g (OFDM, 20 MHz, 1 fluxo). */
 const LEGACY_MAX_MBPS = 54;
 
+// Larguras de cada camada física, em ordem crescente (lidas uma vez de PHY).
+for (const phy of Object.values(PHY)) phy.widths = Object.keys(phy.nsd).map(Number).sort((a, b) => a - b);
+
 function snapWidth(phy, widthMHz) {
   let best = null;
-  for (const w of Object.keys(phy.nsd).map(Number)) {
-    if (w <= widthMHz && (best === null || w > best)) best = w;
-  }
+  for (const w of phy.widths) if (w <= widthMHz) best = w;
   return best;
 }
 
@@ -306,8 +314,9 @@ export function estimateLink(params) {
 
   const standard = phyOfGen(gen);
   const legacy = standard === 'legacy';
-  const rssi = isNum(o.rssi) ? o.rssi : null;
-  const noise20 = isNum(o.noiseDbm) ? o.noiseDbm : noiseFloorDbm(20);
+  // (±1000 dBm não é medida de nada: além disso as contas só produziriam números sem sentido)
+  const rssi = isNum(o.rssi) && Math.abs(o.rssi) < 1000 ? o.rssi : null;
+  const noise20 = isNum(o.noiseDbm) && Math.abs(o.noiseDbm) < 1000 ? o.noiseDbm : noiseFloorDbm(20);
 
   let widthMHz = 20;
   let nss = 1;
@@ -346,10 +355,11 @@ export function estimateLink(params) {
   // Da largura negociada para baixo: em cada uma, o maior MCS que cabe; fica a de maior taxa
   // (a comparação estrita mantém a mais larga nos empates).
   const phy = PHY[standard];
-  const widths = Object.keys(phy.nsd).map(Number).filter((w) => w <= widthMHz).sort((a, b) => b - a);
   let best = null;
   let floor = null; // menor MCS válido da menor largura, para quando nada cabe
-  for (const w of widths) {
+  for (let k = phy.widths.length - 1; k >= 0; k--) {
+    const w = phy.widths[k];
+    if (w > widthMHz) continue;
     const snr = snrAt(w);
     for (let mcs = phy.maxMcs; mcs >= 0; mcs--) {
       const rate = dataRate({ standard, widthMHz: w, nss, mcs });
@@ -387,5 +397,6 @@ export const MAC_EFFICIENCY = 0.6;
 export function usableMbps(phyMbps, efficiency = MAC_EFFICIENCY) {
   if (!isNum(phyMbps) || phyMbps < 0) return null;
   const e = isNum(efficiency) && efficiency > 0 && efficiency <= 1 ? efficiency : MAC_EFFICIENCY;
-  return round1(phyMbps * e);
+  const mbps = round1(phyMbps * e);
+  return Number.isFinite(mbps) ? mbps : null; // taxa absurda de tão grande: sem resposta
 }

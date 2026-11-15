@@ -714,6 +714,85 @@ test('níveis: com o celular limitado valem os pontos — 12 para o mínimo, 20 
   assert.equal(rec.stats().spot.target, 1);
 });
 
+test('ponto com o celular lento: se a segunda varredura demora, uma já basta — e a meta do ponto não volta atrás', () => {
+  const { rec, clock } = started();
+  feed(rec, clock, 0);
+  rec.beginSpot('Cozinha');
+  feed(rec, clock, 1, 2500);
+  assert.equal(rec.currentSpot.target, 3);
+  assert.match(rec.stats().hint, /Fique parado: 1 de 3/);
+  assert.equal(rec.stats().throttled, false);
+  clock.advance(7000);
+  assert.equal(rec.stats().spot.target, 3, 'aos 7 s ainda pode ser só uma varredura mais demorada');
+  clock.advance(1500);
+  // 8,5 s sem a segunda: o celular não está varrendo no ritmo normal
+  assert.equal(rec.stats().spot.target, 1);
+  assert.match(rec.stats().hint, /Ponto marcado/);
+  assert.equal(rec.stats().throttled, false, 'ainda não dá para dizer que é o limite do Android');
+  // a seguinte chega logo depois: a meta deste ponto continua 1 (a tela não volta a pedir espera)
+  feed(rec, clock, 2, 1000);
+  assert.deepEqual([rec.currentSpot.scans, rec.currentSpot.target], [2, 1]);
+  rec.endSpot();
+  // o ponto seguinte começa de novo com a meta normal
+  rec.beginSpot('Sala');
+  assert.equal(rec.currentSpot.target, 3);
+  // sem nenhuma varredura no ponto, esperar não o deixa pronto
+  clock.advance(15_000);
+  assert.deepEqual([rec.currentSpot.scans, rec.currentSpot.target], [0, 3]);
+  // uma espera longa no meio de um ritmo normal é só um soluço, não o limite do Android
+  clock.advance(6500);
+  assert.equal(rec.stats().throttled, false);
+
+  // começo de um levantamento com o celular limitado: chega a primeira varredura e mais nada.
+  // 21 s depois já é limite, mesmo sem nenhum intervalo gravado para comparar.
+  const slow = started();
+  feed(slow.rec, slow.clock, 0, 2600);
+  slow.rec.beginSpot('Quarto');
+  slow.clock.advance(19_000);
+  assert.equal(slow.rec.stats().throttled, false);
+  slow.clock.advance(2000);
+  const s = slow.rec.stats();
+  assert.equal(s.throttled, true);
+  assert.equal(s.cadenceS, null);
+  assert.equal(s.spot.target, 1);
+  assert.match(s.hint, /Fique parado até a varredura deste ponto chegar/);
+});
+
+test('limite informado pela tela: setThrottled (ou o contexto de onScan) vale na hora', () => {
+  const { rec, clock } = started();
+  const events = [];
+  rec.subscribe((e) => events.push(e.type));
+  feed(rec, clock, 0);
+  assert.equal(rec.stats().throttled, false);
+  rec.setThrottled(true);
+  rec.setThrottled(true); // sem mudança: sem aviso
+  assert.deepEqual(events, ['scan', 'pace']);
+  assert.equal(rec.stats().throttled, true);
+  rec.beginSpot('Sala');
+  assert.equal(rec.currentSpot.target, 1, 'a primeira varredura do ponto já basta');
+  assert.match(rec.stats().hint, /Fique parado até a varredura/);
+  feed(rec, clock, 1);
+  assert.match(rec.stats().hint, /Ponto marcado/);
+  rec.endSpot();
+  assert.match(rec.stats().hint, /limitando as buscas/);
+
+  rec.setThrottled(false);
+  assert.equal(rec.stats().throttled, false);
+  // pelo contexto de onScan, junto com a lista do store
+  clock.advance(3000);
+  rec.onScan(scanEvent(clock, walkingAps(2)), { aps: [], throttled: true });
+  assert.equal(rec.stats().throttled, true);
+  clock.advance(3000);
+  rec.onScan(scanEvent(clock, walkingAps(3)), { throttled: 'sim' }); // valor estranho não muda nada
+  assert.equal(rec.stats().throttled, true);
+  rec.setThrottled(null); // "não sei": volta a valer só o ritmo observado
+  assert.equal(rec.stats().throttled, false);
+  // o ritmo observado continua valendo mesmo quando a tela diz que não há limite
+  rec.setThrottled(false);
+  for (let i = 0; i < 4; i++) feed(rec, clock, 10 + i, 30_000);
+  assert.equal(rec.stats().throttled, true);
+});
+
 test('níveis: ficar parado num ponto só conta até a terceira varredura', () => {
   const { rec, clock } = started();
   rec.beginSpot('Sofá');
@@ -1366,14 +1445,65 @@ test('piloto: respeita a pausa e o fim da gravação, e funciona sem marcar pont
 
   // gravação encerrada pela tela: o piloto para sozinho
   const again = createDemoPilot({ sim: s.sim, recorder: s.rec, clock: s.clock, requestScan: s.requestScan, onStep: (x) => steps.push(x) });
-  again.start({});
+  assert.equal(again.start({}), true);
   await s.clock.advanceAsync(500);
   s.rec.stop();
   await s.clock.advanceAsync(500);
   assert.equal(again.running, false);
   assert.equal(steps[steps.length - 1].phase, 'stopped');
   assert.equal(s.sim.speed, 1);
+  // e com o levantamento encerrado ele nem começa (nada é mexido no simulador)
+  assert.equal(again.start({ speed: 20 }), false);
+  assert.equal(s.sim.speed, 1);
+
+  // trocaram de casa virtual no meio: os cômodos já não são os mesmos, o piloto para
+  s.rec.resume();
+  const moved = createDemoPilot({ sim: s.sim, recorder: s.rec, clock: s.clock, requestScan: s.requestScan, onStep: (x) => steps.push(x) });
+  assert.equal(moved.start({}), true);
+  await s.clock.advanceAsync(300);
+  s.sim.loadWorld('apartamento');
+  await s.clock.advanceAsync(300);
+  assert.equal(moved.running, false);
+  assert.equal(steps[steps.length - 1].phase, 'stopped');
+  assert.equal(s.sim.speed, 1);
   s.backend.dispose();
+});
+
+test('piloto: pausar a caminho de um cômodo e retomar não deixa cômodo para trás; com o limite do Android, uma varredura por ponto basta', async () => {
+  const s = session({ world: 'apartamento', timeScale: 1 });
+  const steps = [];
+  const pilot = createDemoPilot({ sim: s.sim, recorder: s.rec, clock: s.clock, requestScan: s.requestScan, onStep: (x) => steps.push(x) });
+  pilot.start({});
+  // espera o primeiro ponto terminar: daí em diante a pessoa é mandada de cômodo em cômodo
+  for (let i = 0; i < 600 && s.rec.stats().spots < 1; i++) await s.clock.advanceAsync(20);
+  for (let i = 0; i < 600 && !(steps[steps.length - 1].phase === 'walking' && s.sim.walker.mode === 'manual'); i++) await s.clock.advanceAsync(20);
+  assert.equal(s.sim.walker.mode, 'manual', 'a caminho do próximo cômodo');
+  s.rec.pause();
+  await s.clock.advanceAsync(500);
+  assert.equal(s.sim.walker.mode, 'still');
+  s.rec.resume();
+  while (pilot.running && s.rec.stats().scans < 400) await s.clock.advanceAsync(100);
+  const last = steps[steps.length - 1];
+  assert.equal(last.phase, 'done');
+  assert.equal(last.complete, true);
+  assert.deepEqual(last.rooms, { marked: s.sim.world.rooms.length, total: s.sim.world.rooms.length }, 'nenhum cômodo ficou de fora por causa da pausa');
+  s.backend.dispose();
+
+  // simulador com o limite de 4 varreduras a cada 2 minutos: o piloto não fica preso esperando 3 por ponto
+  const slow = session({ world: 'kitnet', timeScale: 1 });
+  slow.sim.setState({ throttle: true });
+  const slowSteps = [];
+  const slowPilot = createDemoPilot({ sim: slow.sim, recorder: slow.rec, clock: slow.clock, requestScan: slow.requestScan, onStep: (x) => slowSteps.push(x), config: { maxWalkS: 600 } });
+  slowPilot.start({ minScans: 12 });
+  for (let i = 0; i < 2000 && slowPilot.running; i++) await slow.clock.advanceAsync(100);
+  const end = slowSteps[slowSteps.length - 1];
+  const stats = slow.rec.stats();
+  slow.backend.dispose();
+  assert.equal(end.phase, 'done');
+  assert.equal(end.complete, true, JSON.stringify(end));
+  assert.equal(stats.throttled, true);
+  assert.deepEqual([...stats.labels].sort(), [...new Set(slow.sim.world.rooms.map((r) => r.name))].sort());
+  assert.ok(stats.scans >= 12 && stats.scans < 40, `${stats.scans} varreduras`);
 });
 
 test('piloto: sem simulador não começa; pedido de varredura que falha não o derruba', async () => {

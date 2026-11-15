@@ -1,7 +1,15 @@
 // Sinal: conversões de potência, qualidade, ruído térmico, estimativa de distância e os
 // pequenos utilitários numéricos usados pelo resto do app.
 //
-// Tudo função pura; entrada inválida vira null (ou o valor neutro documentado), nunca exceção.
+// O que oferece:
+//   leitura     sanitizeRssi (o que vale como sinal medido), qualityPct, signalLevel
+//   potência    dbmToMw, mwToDbm, sumDbm, noiseFloorDbm
+//   distância   indoorDistance (a recomendada), expectedRssi, freeSpaceDistance, referenceRssiAt1m
+//   números     clamp, lerp, mean, median, percentile, stddev, createEma, createKalman1D
+//
+// Tudo função pura; entrada inválida vira null (ou o valor neutro documentado), nunca exceção,
+// e nenhum resultado sai NaN. Exceções documentadas: clamp e lerp são aritmética pura (lixo nos
+// limites sai como entrou) e "potência nenhuma" é -Infinity em mwToDbm(0) e sumDbm([]).
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 
@@ -28,13 +36,16 @@ export function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
+/** Número finito ou null (a conta estourou com valores absurdos: não há resposta que preste). */
+const finiteOrNull = (x) => (Number.isFinite(x) ? x : null);
+
 /** Média dos valores finitos; null se não houver nenhum. */
 export function mean(arr) {
   const v = finite(arr);
   if (!v.length) return null;
   let sum = 0;
   for (const x of v) sum += x;
-  return sum / v.length;
+  return finiteOrNull(sum / v.length);
 }
 
 /**
@@ -47,7 +58,7 @@ export function percentile(arr, p) {
   const pos = (clamp(p, 0, 100) / 100) * (v.length - 1);
   const i = Math.floor(pos);
   const next = v[Math.min(i + 1, v.length - 1)];
-  return v[i] + (next - v[i]) * (pos - i);
+  return finiteOrNull(v[i] + (next - v[i]) * (pos - i));
 }
 
 /** Mediana dos valores finitos; null se não houver nenhum. */
@@ -64,9 +75,10 @@ export function stddev(arr, sample = false) {
   const n = v.length;
   if (n === 0 || (sample && n < 2)) return null;
   const m = mean(v);
+  if (m === null) return null;
   let sq = 0;
   for (const x of v) sq += (x - m) * (x - m);
-  return Math.sqrt(sq / (sample ? n - 1 : n));
+  return finiteOrNull(Math.sqrt(sq / (sample ? n - 1 : n)));
 }
 
 /**
@@ -81,7 +93,10 @@ export function createEma(alpha = 0.3) {
   const a = isNum(alpha) ? clamp(alpha, 0.001, 1) : 0.3;
   let value = null;
   const step = (x) => {
-    if (isNum(x)) value = value === null ? x : value + a * (x - value);
+    if (isNum(x)) {
+      const next = value === null ? x : value + a * (x - value);
+      if (Number.isFinite(next)) value = next; // valor absurdo que estoura a conta é ignorado
+    }
     return value;
   };
   step.reset = () => {
@@ -118,8 +133,11 @@ export function createKalman1D(options) {
     p += q;
     if (isNum(z)) {
       const k = p / (p + r);
-      x += k * (z - x);
-      p *= 1 - k;
+      const next = x + k * (z - x);
+      if (Number.isFinite(next)) {
+        x = next;
+        p *= 1 - k;
+      }
     }
     return x;
   };
@@ -136,10 +154,10 @@ export function createKalman1D(options) {
 // Potência
 // ---------------------------------------------------------------------------
 
-/** dBm -> miliwatts. null para entrada inválida. */
+/** dBm -> miliwatts. null para entrada inválida (ou tão grande que a conta estoura). */
 export function dbmToMw(dbm) {
   if (dbm === -Infinity) return 0;
-  return isNum(dbm) ? Math.pow(10, dbm / 10) : null;
+  return isNum(dbm) ? finiteOrNull(Math.pow(10, dbm / 10)) : null;
 }
 
 /** miliwatts -> dBm. 0 mW = -Infinity; negativo ou inválido = null. */
@@ -156,7 +174,10 @@ export function mwToDbm(mw) {
  */
 export function sumDbm(list) {
   let mw = 0;
-  for (const dbm of finite(list)) mw += Math.pow(10, dbm / 10);
+  for (const dbm of finite(list)) {
+    const next = mw + Math.pow(10, dbm / 10);
+    if (Number.isFinite(next)) mw = next; // valor absurdo (a potência estoura) conta como inválido
+  }
   return mw === 0 ? -Infinity : 10 * Math.log10(mw);
 }
 
@@ -173,12 +194,29 @@ export const NOISE_FIGURE_DB = 7;
 export function noiseFloorDbm(widthMHz = 20, noiseFigureDb = NOISE_FIGURE_DB) {
   if (!isNum(widthMHz) || widthMHz <= 0) return null;
   const nf = isNum(noiseFigureDb) ? noiseFigureDb : NOISE_FIGURE_DB;
-  return -174 + 10 * Math.log10(widthMHz * 1e6) + nf;
+  return finiteOrNull(-174 + 10 * Math.log10(widthMHz * 1e6) + nf);
 }
 
 // ---------------------------------------------------------------------------
 // Qualidade
 // ---------------------------------------------------------------------------
+
+/** WifiInfo.INVALID_RSSI: o que o Android entrega quando não há medida de sinal. */
+export const INVALID_RSSI_DBM = -127;
+
+/**
+ * O que vale como sinal medido: um número de dBm negativo e acima de −127, ou null.
+ * Aceita texto numérico ("-57"). Zero e valores positivos são lixo de driver (nenhum celular
+ * recebe 1 mW de um roteador) e −127 é o "sem leitura" do Android: tratados como medida, poriam
+ * a rede no topo de toda lista e estragariam a nota dos canais em volta dela.
+ * @param {*} level  ScanAp.level, Connection.rssi...
+ * @returns {number|null} dBm
+ */
+export function sanitizeRssi(level) {
+  let n = level;
+  if (typeof n === 'string' && n.trim() !== '') n = Number(n);
+  return isNum(n) && n < 0 && n > INVALID_RSSI_DBM ? n : null;
+}
 
 /**
  * Qualidade do sinal em % (inteiro): −50 dBm ou melhor = 100, −100 dBm ou pior = 0, reta no meio.
@@ -292,5 +330,5 @@ export function indoorDistance(rssi, freqMHz, options) {
  */
 export function freeSpaceDistance(rssi, freqMHz) {
   if (!isNum(rssi) || !isNum(freqMHz) || freqMHz <= 0) return null;
-  return Math.pow(10, (27.55 - 20 * Math.log10(freqMHz) + Math.abs(rssi)) / 20);
+  return finiteOrNull(Math.pow(10, (27.55 - 20 * Math.log10(freqMHz) + Math.abs(rssi)) / 20));
 }
