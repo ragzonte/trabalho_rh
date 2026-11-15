@@ -61,7 +61,6 @@ if (args[0] === '--preview') {
     n += 3;
   }
   writeFileSync(join(ROOT, 'app/assets/logo.svg'), logo);
-  await render(preview, join(ROOT, 'app/assets/icon-512.png'), 512);
   console.log(`${n} ícones Android + logo gerados`);
 }
 await browser.close();

@@ -196,6 +196,15 @@ function makeRadio(members) {
   };
 }
 
+/**
+ * Ordem fixa dos rádios: pelo BSSID da rede que representa cada um (a posição na lista só
+ * desempata endereços inválidos). Com ela, as somas e os empates da nota não mudam com a ordem
+ * em que o celular entregou a lista.
+ */
+function radioOrder(a, b) {
+  return a.ap.id < b.ap.id ? -1 : a.ap.id > b.ap.id ? 1 : a.first - b.first;
+}
+
 // Os APs de uma faixa já separados em rádios, ainda sem tirar ninguém da conta. Fica guardado
 // por lista de aparelhos (groupByDevice): quem avalia vários roteadores da mesma lista
 // (best-network avalia todos, a cada varredura) reaproveita em vez de refazer a cada chamada.
@@ -243,7 +252,7 @@ function bandBase(all, band, devices) {
   for (const group of groups.values()) group.radio = makeRadio(group.members);
 
   // A lista é copiada: se quem chamou alterar a dele depois, a comparação acima percebe
-  const base = { all: all.slice(), inBand, groups: [...groups.values()] };
+  const base = { all: all.slice(), inBand, groups: [...groups.values()].sort((a, b) => radioOrder(a.radio, b.radio)) };
   perBand.set(band, base);
   return base;
 }
@@ -265,22 +274,22 @@ function buildContext(all, band, excluded, devices) {
     } else if (entry.audible) others.push(entry);
   }
 
+  // Os rádios já estão em ordem fixa (radioOrder) na base; só um rádio que perdeu parte das
+  // redes pode ter mudado de representante, e aí a ordem é refeita.
   const radios = [];
-  if (touched.size === 0) {
-    for (const group of base.groups) radios.push(group.radio);
-  } else {
-    for (const group of base.groups) {
-      if (!touched.has(group)) {
-        radios.push(group.radio);
-        continue;
-      }
-      const left = group.members.filter((m) => !(m.ap.id && excluded.has(m.ap.id)));
-      if (left.length) radios.push(makeRadio(left));
+  let reorder = false;
+  for (const group of base.groups) {
+    if (!touched.has(group)) {
+      radios.push(group.radio);
+      continue;
+    }
+    const left = group.members.filter((m) => !(m.ap.id && excluded.has(m.ap.id)));
+    if (left.length) {
+      radios.push(makeRadio(left));
+      reorder = true;
     }
   }
-  // Ordem fixa (pelo BSSID da rede que representa o rádio; a posição na lista só desempata
-  // endereços inválidos): as somas e os empates não mudam com a ordem em que a lista chegou.
-  radios.sort((a, b) => (a.ap.id < b.ap.id ? -1 : a.ap.id > b.ap.id ? 1 : a.first - b.first));
+  if (reorder) radios.sort(radioOrder);
   return { band, own, others, radios };
 }
 
@@ -625,7 +634,7 @@ export function recommendChannel(aps, options, more) {
   const top = ranking.slice(0, 5);
   if (current === null) {
     const text =
-      best.score >= 90
+      best.score >= FREE_SCORE
         ? `O ${channelName(best, true)} está livre: é a melhor escolha agora.`
         : `O ${channelName(best, true)} é o menos disputado agora (nota ${Math.round(best.score)} de 100).`;
     return { best, current: null, ranking: top, gain: null, verdict: 'change', text };
@@ -638,7 +647,7 @@ export function recommendChannel(aps, options, more) {
 
   if (sameSpot(best, current) || (advantage < KEEP_MARGIN && !offStandard)) {
     const tail =
-      current.score >= 90
+      current.score >= FREE_SCORE
         ? 'Pode deixar como está.'
         : 'Nenhum outro canal está claramente melhor: pode deixar como está.';
     return { best, current, ranking: top, gain, verdict: 'keep', text: `${where} ${tail}` };

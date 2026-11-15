@@ -283,7 +283,7 @@ function bandUpgrade(f) {
   const level = signalLevel(rssiOf(pick.ap)).label.toLowerCase();
   const speed =
     gain !== null && gain >= GAIN_WORTH_SAYING
-      ? ` Ela deve render ${timesMore(gain)} (perto de ${formatSpeed(pick.result.estMbps)}).`
+      ? ` Nessa faixa a conexão deve render ${timesMore(gain)} (perto de ${formatSpeed(pick.result.estMbps)}).`
       : '';
   const how = sameName
     ? ' O nome é o mesmo, então quem escolhe a faixa é o celular: desligue e ligue o Wi-Fi para ele escolher de novo.'

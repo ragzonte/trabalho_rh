@@ -489,6 +489,13 @@ describe('entrada hostil: toda função exportada', () => {
     }
     const broken = new ApTracker({ clock: 'não é função' });
     assert.ok(broken.update({ aps: apartment.aps }).total > 0);
+    const throwing = new ApTracker({
+      clock: () => {
+        throw new Error('sem relógio');
+      },
+    });
+    assert.ok(throwing.update({ aps: apartment.aps }).total > 0);
+    assert.deepEqual(nonFinite(throwing.list()), []);
   });
 
   test('loadOui nunca rejeita: endereço, busca e resposta com defeito viram consulta vazia', async () => {
@@ -1171,7 +1178,22 @@ describe('memória', () => {
     }
     assert.deepEqual(sample.map(([lo, hi, a, b]) => interferenceFactor({ segments: [{ lo, hi }] }, a, b)), before);
     // o caminho geral (texto numérico não passa pela memória) dá o mesmo número
-    assert.deepEqual(sample.map(([lo, hi, a, b]) => interferenceFactor({ segments: [{ lo: String(lo), hi: String(hi) }] }, String(a), String(b))), before);
+    const general = ([lo, hi, a, b]) => interferenceFactor({ segments: [{ lo: String(lo), hi: String(hi) }] }, String(a), String(b));
+    assert.deepEqual(sample.map(general), before);
+    // ...também para canais de larguras diferentes com o mesmo centro e para bandas vizinhas,
+    // os pares mais fáceis de confundir numa chave de memória malfeita
+    for (const center of [2412, 2437, 5210, 5250, 6025]) {
+      for (const width of [20, 40, 80, 160]) {
+        for (const rxCenter of [center - 40, center - 5, center, center + 20, center + 85]) {
+          for (const rxWidth of [20, 40, 80]) {
+            const pair = [center - width / 2, center + width / 2, rxCenter - rxWidth / 2, rxCenter + rxWidth / 2];
+            const memo = interferenceFactor({ lo: pair[0], hi: pair[1] }, pair[2], pair[3]);
+            assert.equal(memo, general(pair), pair.join(' '));
+            assert.equal(interferenceFactor({ segments: [{ lo: pair[0], hi: pair[1] }] }, pair[3], pair[2]), memo, 'de novo, agora da memória');
+          }
+        }
+      }
+    }
   });
 });
 
@@ -1201,14 +1223,15 @@ describe('desempenho', () => {
     return rankNetworks(aps, { device: PHONE, connectionBssid: aps[0].id });
   };
 
-  test('varredura de 200 APs: normalizar + agrupar + notas + ranking em bem menos de 50 ms', () => {
+  test('varredura de 200 APs: normalizar + agrupar + notas + ranking em bem menos de 50 ms', (t) => {
     const events = [randomScan(200, 7), randomScan(200, 8), randomScan(200, 9)];
     for (const event of events) analyse(event); // aquecimento
-    const ms = best(12, (i) => analyse(events[i % events.length]));
+    const ms = best(15, (i) => analyse(events[i % events.length]));
+    t.diagnostic(`200 APs: ${ms.toFixed(1)} ms`);
     assert.ok(ms < 50, `levou ${ms.toFixed(1)} ms`);
   });
 
-  test('o ranking não refaz o agrupamento para cada rede: 400 APs custam poucas vezes 200', () => {
+  test('o ranking não refaz o agrupamento para cada rede: 400 APs custam poucas vezes 200', (t) => {
     const small = normalizeScan(randomScan(200, 21));
     const large = normalizeScan(randomScan(400, 21));
     const run = (aps) => rankNetworks(aps.map((ap) => ({ ...ap })), { device: PHONE });
@@ -1216,11 +1239,12 @@ describe('desempenho', () => {
     run(large);
     const a = best(7, () => run(small));
     const b = best(7, () => run(large));
+    t.diagnostic(`rankNetworks: 200 APs ${a.toFixed(1)} ms, 400 APs ${b.toFixed(1)} ms`);
     assert.ok(b < 150, `400 APs: ${b.toFixed(1)} ms`);
     assert.ok(b < a * 12 + 5, `200 APs: ${a.toFixed(1)} ms; 400 APs: ${b.toFixed(1)} ms`);
   });
 
-  test('prédio corporativo: 500 BSSIDs com MACs em sequência agrupados em bem menos de 1 s', () => {
+  test('prédio corporativo: 500 BSSIDs com MACs em sequência agrupados em bem menos de 1 s', (t) => {
     const sequence = (make) => normalizeScan({ ts: TS, aps: Array.from({ length: 500 }, (_, i) => ({ bssid: `aa:bb:cc:00:${hex2(i >> 8)}:${hex2(i)}`, level: -40 - (i % 50), channelWidth: 0, capabilities: '[WPA2-PSK-CCMP][ESS]', ageMs: 100, ...make(i) })) });
     const cases = {
       'um nome só, seis canais': sequence((i) => ({ ssid: 'Corp', frequency: [2412, 2437, 2462, 5180, 5200, 5745][i % 6] })),
@@ -1229,16 +1253,19 @@ describe('desempenho', () => {
     };
     for (const [name, aps] of Object.entries(cases)) {
       const ms = best(3, () => groupByDevice(aps.map((ap) => ({ ...ap }))));
+      t.diagnostic(`${name}: ${ms.toFixed(1)} ms`);
       assert.ok(ms < 400, `${name}: ${ms.toFixed(1)} ms`);
     }
   });
 
-  test('a mesma lista analisada por várias telas agrupa uma vez só', () => {
+  test('a mesma lista analisada por várias telas agrupa uma vez só', (t) => {
     const aps = normalizeScan(randomScan(300, 31));
-    const fresh = best(5, () => groupByDevice(aps.map((ap) => ({ ...ap }))));
+    const copies = Array.from({ length: 5 }, () => aps.map((ap) => ({ ...ap })));
+    const fresh = best(5, (i) => groupByDevice(copies[i]));
     groupByDevice(aps);
     const repeat = best(5, () => groupByDevice(aps));
-    assert.ok(repeat < fresh, `do zero: ${fresh.toFixed(2)} ms; repetida: ${repeat.toFixed(2)} ms`);
+    t.diagnostic(`groupByDevice de 300 APs: ${fresh.toFixed(2)} ms do zero, ${repeat.toFixed(2)} ms repetida`);
+    assert.ok(repeat * 3 < fresh, `do zero: ${fresh.toFixed(2)} ms; repetida: ${repeat.toFixed(2)} ms`);
   });
 });
 

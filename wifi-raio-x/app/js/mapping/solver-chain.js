@@ -834,15 +834,16 @@ function fieldStage(P, lin, alive) {
         minY = Math.min(minY, X[a][1]);
         maxY = Math.max(maxY, X[a][1]);
       }
-      if (minX === Infinity) continue;
+      // Andar sem nós, ou posições que deixaram de ser números: sem grade neste andar.
+      if (!Number.isFinite(maxX - minX) || !Number.isFinite(maxY - minY)) continue;
       let h = sigma;
       // Alarga a grade até caber no teto de bases deste andar. O laço tem fim garantido: com muitos
       // andares o teto por andar cai abaixo de 4 (o mínimo da conta, 2 x 2) e, sem o limite de
       // voltas, `h` crescia para sempre — o motor travava com 31 andares ou mais.
       const maxBasis = Math.max(4, TUNE.fieldMaxBasis / F);
       for (let grow = 0; grow < 400 && ((maxX - minX) / h + 2) * ((maxY - minY) / h + 2) > maxBasis; grow++) h *= 1.1;
-      const nx = Math.max(1, Math.ceil((maxX - minX) / h) + 1);
-      const ny = Math.max(1, Math.ceil((maxY - minY) / h) + 1);
+      const nx = Math.min(64, Math.max(1, Math.ceil((maxX - minX) / h) + 1));
+      const ny = Math.min(64, Math.max(1, Math.ceil((maxY - minY) / h) + 1));
       const ox = (minX + maxX) / 2 - ((nx - 1) * h) / 2;
       const oy = (minY + maxY) / 2 - ((ny - 1) * h) / 2;
       for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) centres.push({ x: ox + i * h, y: oy + j * h, f, s2: h * h });

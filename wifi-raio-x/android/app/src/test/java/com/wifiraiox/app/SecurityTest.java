@@ -336,8 +336,10 @@ public class SecurityTest extends AllSdks {
             assertFalse(file.getName() + ": atributo on...=\"\" não roda sob a política da página",
                     java.util.regex.Pattern.compile("(?is)<[a-z][^>]*\\son[a-z]+\\s*=").matcher(html).find());
             assertFalse(file.getName() + ": endereço javascript:", html.toLowerCase().contains("javascript:"));
-            assertFalse(file.getName() + ": <iframe>/<object>/<embed> não combinam com a política",
-                    java.util.regex.Pattern.compile("(?i)<(iframe|object|embed|base)\\b").matcher(html).find());
+            assertFalse(file.getName() + ": <object>, <embed> e <base> não passam pela política",
+                    java.util.regex.Pattern.compile("(?i)<(object|embed|base)\\b").matcher(html).find());
+            assertFalse(file.getName() + ": quadro que não vem do próprio APK (outro site, data:, blob:, srcdoc) não passa pela política",
+                    java.util.regex.Pattern.compile("(?is)<iframe\\b[^>]*\\b(srcdoc\\s*=|src\\s*=\\s*[\"']?\\s*(https?:|//|data:|blob:|javascript:))").matcher(html).find());
             assertFalse(file.getName() + ": folha de estilo ou módulo de outro site",
                     java.util.regex.Pattern.compile("(?is)<link\\b[^>]*\\bhref\\s*=\\s*[\"']?(https?:)?//").matcher(html).find());
         }

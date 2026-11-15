@@ -23,7 +23,7 @@
 // Custo: O(nós² x rádios) por iteração. É o motor que melhor aproveita vários roteadores próprios
 // (escritório, casa com malha).
 
-import { FLOOR_HEIGHT, SWEEP_MID_S, classicalMds, finite, flatCloudStats, indexFloors, lbfgs, now, placesOf, shortestPaths } from './solver-common.js';
+import { FLOOR_HEIGHT, SWEEP_MID_S, clamp, classicalMds, finite, flatCloudStats, indexFloors, lbfgs, now, placesOf, shortestPaths } from './solver-common.js';
 
 // ---------------------------------------------------------------------------
 // Constantes físicas e de comportamento (com a justificativa de cada uma)
@@ -109,7 +109,7 @@ export function solveFields(view, options = {}) {
     data.edges = motionEdges(data);
     X = embedUnfolded(data, P);
     // Escala provisória: passo de quem anda, ou o raio de uma casa típica.
-    const k0 = stepScale(data, X, P) ?? P.defaultRadius / Math.max(1e-9, radiusOf(X));
+    const k0 = clamp(stepScale(data, X, P) ?? sizeRatio(P.defaultRadius, radiusOf(X)), 1e-9, 1e9);
     for (let q = 0; q < X.length; q++) X[q] *= k0;
     X = refineFields(data, X, P);
     solved = true;
@@ -230,6 +230,12 @@ function stepScale(data, X, P) {
 
 // Raio quadrático médio dos nós em torno do centro.
 const radiusOf = (X) => flatCloudStats(X, X.length / 2).radius;
+
+// Fator que leva um mapa de raio `radius` ao raio `target`. Mapa sem tamanho (todos os nós no mesmo
+// lugar: acontece com um nó por andar, quando o reencaixe dos andares põe um em cima do outro) não
+// tem o que esticar: o fator é 1. Dividir por "quase zero" multiplicava as coordenadas por bilhões
+// a cada rodada, e esse mapa absurdo entrava no consenso.
+const sizeRatio = (target, radius) => (radius > 1e-3 ? target / radius : 1);
 
 // ---------------------------------------------------------------------------
 // Imersão inicial "desdobrada"
@@ -970,8 +976,8 @@ function refineFields(data, X0, P) {
     if (kStep != null && kPhys != null) kk = Math.pow(kStep, 1 - wPhys) * Math.pow(kPhys, wPhys);
     else if (kStep != null) kk = kStep;
     else if (kPhys != null) kk = Math.pow(kPhys, P.physDamp); // amortecido: a posição do roteador ainda está mudando
-    else kk = radius0 / Math.max(1e-9, radiusOf(X));
-    if (Number.isFinite(kk) && kk > 0) rescale(X, model, kk);
+    else kk = sizeRatio(radius0, radiusOf(X));
+    if (Number.isFinite(kk) && kk > 0) rescale(X, model, clamp(kk, 1e-3, 1e3));
   }
   model = fitApModels(data, X, P, model, false);
   let physOnly = false;
@@ -980,7 +986,7 @@ function refineFields(data, X0, P) {
     const phys = physScale(data, X, model, P);
     if (phys) {
       // A física erra por dezenas de por cento; o tamanho típico de uma casa (prior largo) segura os exageros.
-      const kPrior = P.defaultRadius / Math.max(1e-9, radiusOf(X));
+      const kPrior = sizeRatio(P.defaultRadius, radiusOf(X));
       const w = phys.devices >= 3 ? Math.max(P.sparsePhysW, P.sparsePhysWMulti) : P.sparsePhysW;
       const kk = Math.pow(Math.max(0.5, Math.min(2, phys.k)), w) * Math.pow(kPrior, 1 - w);
       rescale(X, model, kk);
@@ -1047,6 +1053,25 @@ function refineFields(data, X0, P) {
 
 // Muda a escala do mapa inteiro (em torno da origem): nós e roteadores juntos.
 function rescale(X, model, k) {
+  // Fator fora do comum (só acontece com mapa degenerado): em torno do CENTRO dos nós, para um mapa
+  // quase colapsado longe da origem não ser arremessado para mais longe ainda.
+  if (k > 10 || k < 0.1) {
+    const { cx, cy } = flatCloudStats(X, X.length / 2);
+    for (let q = 0; q < X.length; q += 2) {
+      X[q] -= cx;
+      X[q + 1] -= cy;
+    }
+    if (model) {
+      for (let q = 0; q < model.ax.length; q++) {
+        model.ax[q] -= cx;
+        model.ay[q] -= cy;
+      }
+      for (const d of model.devs) {
+        d.ax -= cx;
+        d.ay -= cy;
+      }
+    }
+  }
   for (let q = 0; q < X.length; q++) X[q] *= k;
   if (!model) return;
   for (let q = 0; q < model.ax.length; q++) {

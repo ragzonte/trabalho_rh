@@ -894,7 +894,7 @@ describe('recommendWidth', () => {
     const apt = recommendWidth(aptAps, '2.4', { own: apt24 });
     assert.deepEqual(Object.keys(apt).sort(), ['options', 'text', 'widthMHz']);
     assert.equal(apt.widthMHz, 20);
-    assert.equal(apt.text, 'Use 20 MHz: há 21 redes vizinhas em 2,4 GHz e um canal de 40 MHz ocuparia mais da metade da faixa.');
+    assert.equal(apt.text, 'Use 20 MHz: há 21 redes vizinhas em 2,4 GHz e um canal de 40 MHz ocuparia cerca de metade da faixa.');
     assert.deepEqual(apt.options.map((o) => o.widthMHz), [40, 20]);
     assert.ok(apt.options[0].score < apt.options[1].score);
     assert.ok(apt.options.every((o) => [1, 6, 11].includes(o.channel)));
@@ -907,7 +907,7 @@ describe('recommendWidth', () => {
     assert.equal(rec.text, 'A faixa de 2,4 GHz está praticamente vazia aqui: dá para usar 40 MHz.');
     // sem dizer qual é o roteador da casa, ele conta como vizinho forte
     assert.equal(recommendWidth(quiet, '2.4').widthMHz, 20);
-    assert.equal(recommendWidth(quiet, '2.4').text, 'Use 20 MHz: há 2 redes vizinhas em 2,4 GHz e um canal de 40 MHz ocuparia mais da metade da faixa.');
+    assert.equal(recommendWidth(quiet, '2.4').text, 'Use 20 MHz: há 2 redes vizinhas em 2,4 GHz e um canal de 40 MHz ocuparia cerca de metade da faixa.');
     // um único vizinho de sinal bom já basta para ficar em 20 MHz
     assert.equal(recommendWidth([n24(6, -65)], '2.4').widthMHz, 20);
     assert.match(recommendWidth([n24(6, -65)], '2.4').text, /há 1 rede vizinha em 2,4 GHz/);

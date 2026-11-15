@@ -11,8 +11,9 @@
 // Convenções que valem para tudo:
 //   - nenhuma função lança exceção com dado torto: o que não der para entender vira null,
 //     "desconhecido" ou nota 0, e nenhum número sai NaN;
-//   - nada altera os objetos recebidos, e (fora o relógio do ApTracker para varreduras que
-//     chegam sem `ts`) o resultado só depende dos argumentos;
+//   - nada altera os objetos recebidos e o resultado só depende dos argumentos: mesma entrada,
+//     mesma saída, em qualquer ordem da lista (as duas exceções são o relógio do ApTracker,
+//     usado só em varreduras que chegam sem `ts`, e loadOui, que busca um arquivo);
 //   - todo texto é pt-BR pronto para a tela, com vírgula decimal. Nomes de rede e de aparelho
 //     são entregues como vieram: a interface escreve com textContent, nunca com innerHTML;
 //   - velocidade e distância são estimativas, e os textos dizem isso ("cerca de").

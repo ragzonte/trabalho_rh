@@ -1067,7 +1067,12 @@ export class ApTracker {
     let ts = toNum(event.ts);
     if (ts === null) {
       // Varredura sem relógio: vale o do aparelho (e, se nem ele servir, o da última varredura)
-      const now = this.#clock();
+      let now = null;
+      try {
+        now = this.#clock();
+      } catch {
+        // relógio injetado com defeito
+      }
       ts = isNum(now) ? now : (this.#lastTs ?? 0);
     }
     // Relógio do celular voltou no tempo (acerto manual de data): o histórico não vale mais

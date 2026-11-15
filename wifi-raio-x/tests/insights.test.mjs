@@ -177,7 +177,7 @@ describe('conectado em 2,4 GHz com 5/6 GHz à disposição', () => {
     assert.equal(up.severity, 'warning');
     assert.match(up.title, /2,4 GHz com 5 GHz à disposição/);
     assert.match(up.text, /o mesmo roteador também tem 5 GHz chegando aqui com −55 dBm \(sinal ótimo\)/);
-    assert.match(up.text, /Ela deve render cerca de \d+(,\d)?x mais \(perto de \d+ Mb\/s\)/);
+    assert.match(up.text, /Nessa faixa a conexão deve render cerca de \d+(,\d)?x mais \(perto de \d+ Mb\/s\)/);
     assert.match(up.text, /desligue e ligue o Wi-Fi/);
     assert.deepEqual(up.action, { label: 'Abrir o Wi-Fi do celular', kind: 'open-settings-wifi' });
     assertShape(out);

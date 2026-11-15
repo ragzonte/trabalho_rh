@@ -62,6 +62,30 @@ const DEFAULT_BUDGET_MS = 6000;
 /** Acima disto as visitas são raleadas antes de resolver (o custo dos motores cresce com o quadrado ou o cubo). */
 const MAX_VISITS = 300;
 const QUICK_MAX_VISITS = 240;
+/** Andares distintos que os motores recebem; além disto os menos visitados se juntam ao vizinho (ver limitFloors). */
+const MAX_FLOORS = 8;
+/** Distância medida pelo usuário acima disto (m) não é de um levantamento de Wi-Fi dentro de casa: erro de digitação. */
+const KNOWN_MAX_M = 150;
+/** Nenhuma coordenada passa disto (m): o que passar é lixo numérico, e o motor que a devolveu fica de fora. */
+const MAX_COORD_M = 1e5;
+/**
+ * Motor cujo mapa sai mais do que isto maior ou menor que o dos outros fica fora do consenso. É
+ * rede de segurança contra conta que degenerou (mapa quase colapsado, escala que explodiu): nos
+ * levantamentos da bancada os motores nunca discordam no tamanho por mais de 1,7 vez.
+ */
+const SIZE_OUTLIER = 4;
+/**
+ * Rádios que os motores recebem, no máximo (os mais ouvidos e mais fortes). O custo deles cresce em
+ * linha reta com o número de rádios, e num prédio com duzentas redes à vista a prévia levava vários
+ * segundos; as redes além das primeiras dezenas repetem o que as outras já dizem. Os levantamentos
+ * da bancada têm no máximo ~30 rádios e não chegam a este teto.
+ */
+const MAX_RADIOS = 64;
+const QUICK_MAX_RADIOS = 48;
+/** Levantamento enorme: em quantos blocos de visitas seguidas, no máximo, os motores o recebem (ver engineView). */
+const MAX_BLOCKS = 4;
+/** Teto do raio (rms, m) de um mapa: ver capSize(). */
+const MAX_RADIUS_M = 300;
 
 // Os motores, do mais barato ao mais caro. `cost` é o custo relativo medido na bancada: serve para
 // o andamento e para decidir, com pouco tempo, quem fica de fora (o mais caro sai primeiro).
@@ -130,7 +154,8 @@ async function solveConsensus(survey, options) {
   const view = readSurvey(survey);
   if (view.n === 0) return { points: [], aps: {}, scaleConf: 0, debug: { members: [], skipped: [] } };
   progress(0.02, 'Lendo as varreduras');
-  const { sub, keep } = reduceView(view, MAX_VISITS);
+  const prepared = engineView(view, MAX_VISITS, MAX_RADIOS);
+  const { sub, keep, heard, hidden, spare } = prepared;
 
   // Cada motor resolve o levantamento inteiro por conta própria. Os mais caros só entram se o
   // tempo que sobra der para eles, pela velocidade medida nos anteriores.
@@ -171,21 +196,32 @@ async function solveConsensus(survey, options) {
     doneCost += member.cost;
   }
   if (!results.length) {
-    const out = collapsed(survey, stopped ? 'cancelado' : 'nenhum motor conseguiu resolver');
+    const out = collapsed(survey, stopped ? 'cancelado' : sub.n === 0 ? 'sem leituras' : 'nenhum motor conseguiu resolver');
     out.debug.cancelled = stopped;
     return out;
   }
 
   progress(0.92, 'Juntando as soluções');
   const merged = combine(results, sub);
-  const full = expand(view, keep, merged);
+  placeHidden(heard, [...hidden, ...spare], merged);
+  const full = expand(view, prepared, merged);
+  const sane = capSize(view, full);
   const known = knownPairs(survey, view);
   const trust = applyKnownDistances(view, known, full);
   orient(view, full, options.previous);
-  const solution = toSolution(view, full, trust > 0 ? Math.max(merged.scaleConf, 0.95 * trust) : merged.scaleConf);
+  const ownScale = sane ? merged.scaleConf : 0;
+  const solution = toSolution(view, full, trust > 0 ? Math.max(ownScale, 0.95 * trust) : ownScale);
   solution.debug = {
     members: used,
     skipped,
+    // motores que rodaram mas ficaram fora da média (mapa sem tamanho, ou de tamanho destoante)
+    outliers: used.filter((_, c) => !merged.pool.includes(c)).map((m) => m.name),
+    // redes que ligaram ou desligaram no meio do levantamento e por isso não entraram na conta (BSSIDs)
+    unstable: hiddenIds(heard, hidden),
+    // trechos longos parado sem marcar ponto, tratados como um ponto só
+    standstills: heard.standstills || 0,
+    // levantamento enorme: em quantos blocos foi resolvido (1 = inteiro); o resto entra pela impressão digital
+    blocks: prepared.blocks,
     cancelled: stopped,
     agreementM: round2(merged.agreementM),
     expectedErrorM: round2(merged.expectedErrorM),
@@ -220,17 +256,21 @@ export function solveQuick(survey, options) {
     const t0 = now();
     const view = readSurvey(survey);
     if (view.n === 0) return { points: [], aps: {}, scaleConf: 0, debug: { members: [], skipped: [] } };
-    const { sub, keep } = reduceView(view, QUICK_MAX_VISITS);
+    const prepared = engineView(view, QUICK_MAX_VISITS, QUICK_MAX_RADIOS);
+    const { sub, keep, heard, hidden, spare } = prepared;
     if (sub.n === 0) return collapsed(survey, 'sem leituras');
     const r = solveIsomap(sub, { budgetMs: Number.isFinite(opts.budgetMs) && opts.budgetMs > 0 ? opts.budgetMs : 60000 });
     if (!usable(r, sub.n)) return collapsed(survey, 'prévia sem solução');
     // Um motor só: não há discordância para medir; fica a confiança dele, rebaixada (é só a prévia).
     const conf = Float64Array.from(r.conf, (c) => 0.8 * c);
-    const full = expand(view, keep, { x: r.x, y: r.y, conf, aps: r.aps });
+    const part = { x: r.x, y: r.y, conf, aps: { ...r.aps } };
+    placeHidden(heard, [...hidden, ...spare], part);
+    const full = expand(view, prepared, part);
+    const ownScale = capSize(view, full) ? 0.8 * r.scaleConf : 0;
     const trust = applyKnownDistances(view, knownPairs(survey, view), full);
     orient(view, full, opts.previous);
-    const solution = toSolution(view, full, trust > 0 ? Math.max(0.8 * r.scaleConf, 0.95 * trust) : 0.8 * r.scaleConf);
-    solution.debug = { members: [{ name: 'isomap', ms: Math.round(now() - t0) }], skipped: [], quick: true };
+    const solution = toSolution(view, full, trust > 0 ? Math.max(ownScale, 0.95 * trust) : ownScale);
+    solution.debug = { members: [{ name: 'isomap', ms: Math.round(now() - t0) }], skipped: [], unstable: hiddenIds(heard, hidden), standstills: heard.standstills || 0, quick: true };
     return solution;
   } catch (err) {
     return collapsed(survey, String((err && err.message) || err));
@@ -258,41 +298,476 @@ function breathe() {
   });
 }
 
-/** A resposta de um motor serve? (tamanho certo e tudo finito) */
+/** A resposta de um motor serve? (tamanho certo, tudo finito e nenhuma coordenada absurda) */
 function usable(r, n) {
   if (!r || !r.x || !r.y || !r.conf || r.x.length !== n || r.y.length !== n || r.conf.length !== n) return false;
-  for (let i = 0; i < n; i++) if (!Number.isFinite(r.x[i]) || !Number.isFinite(r.y[i]) || !Number.isFinite(r.conf[i])) return false;
+  for (let i = 0; i < n; i++) if (!(Math.abs(r.x[i]) <= MAX_COORD_M) || !(Math.abs(r.y[i]) <= MAX_COORD_M) || !Number.isFinite(r.conf[i])) return false;
   return Number.isFinite(r.scaleConf);
 }
 
 /**
- * O que os motores recebem: só as varreduras que dizem algo (com pelo menos uma leitura fresca;
- * as outras confundem as comparações de impressão digital) e, em levantamentos enormes, uma
- * visita a cada `stride`. As que ficam de fora são colocadas depois por interpolação no tempo.
+ * O que os motores recebem, depois de quatro cuidados:
+ *   1. andares limitados (limitFloors);
+ *   2. só as varreduras que dizem algo — com pelo menos uma leitura fresca; as outras confundem as
+ *      comparações de impressão digital e entram depois, por interpolação no tempo;
+ *   3. quem ficou muito tempo parado sem marcar ponto vira um ponto só (markStandstills);
+ *   4. em levantamentos enormes (o custo dos motores cresce com o quadrado ou o cubo das visitas),
+ *      só alguns BLOCOS de visitas seguidas, espalhados do começo ao fim. Blocos, e não "uma visita
+ *      a cada tantas": dentro de um bloco o intervalo entre as varreduras continua o de verdade, e
+ *      é dele que os motores tiram a escala (o passo de quem anda). Raleando por igual, o mapa de
+ *      uma caminhada de meia hora saía 35 a 40% menor que o real. As varreduras de fora dos blocos
+ *      são colocadas depois, pela impressão digital (expand);
+ * sem os rádios que ligaram ou desligaram no meio do caminho (unstableRadios)
+ * e sem os rádios que sobram quando há redes demais à vista (spareRadios).
+ *
+ * @returns {{sub, keep, heard, hidden, spare, cols, blocks}}  `sub`: a visão dos motores; `keep`:
+ *          índices (no levantamento) das varreduras de `sub`; `heard`: `sub` ainda com todos os
+ *          rádios; `hidden`: os rádios instáveis, `spare`: os que sobraram e `cols`: os que os
+ *          motores veem (índices em `heard`); `blocks`: em quantos blocos foi resolvido (1 = inteiro)
  */
-function reduceView(view, maxVisits) {
-  let keep = [];
-  for (let i = 0; i < view.n; i++) if (view.fresh[i] > 0) keep.push(i);
-  let sub = keep.length === view.n ? view : pickScans(view, keep);
-  const visits = visitsOf(sub);
+function engineView(view, maxVisits, maxRadios) {
+  const limited = limitFloors(view);
+  const denseIdx = [];
+  for (let i = 0; i < view.n; i++) if (view.fresh[i] > 0) denseIdx.push(i);
+  const dense = markStandstills(denseIdx.length === view.n ? limited : pickScans(limited, denseIdx));
+  const visits = visitsOf(dense);
+  let heard = dense;
+  let keep = denseIdx;
+  let blocks = 1;
   if (visits.length > maxVisits) {
-    const stride = Math.ceil(visits.length / maxVisits);
+    // Dois blocos, o começo e o fim (poucos e compridos: é a continuidade dentro do bloco que dá a
+    // escala); mais um ou dois no meio só se algum andar com visitas ficar sem nenhuma nos blocos
+    // (sem referência no andar, as varreduras dele não teriam onde cair).
+    const floors = new Map();
+    for (const v of visits) floors.set(v.floor, (floors.get(v.floor) || 0) + 1);
+    let chosen = [];
+    for (blocks = 2; blocks <= MAX_BLOCKS; blocks++) {
+      const size = Math.floor(maxVisits / blocks);
+      chosen = [];
+      for (let b = 0; b < blocks; b++) {
+        const start = Math.round((b * (visits.length - size)) / (blocks - 1));
+        for (let v = start; v < start + size; v++) chosen.push(v);
+      }
+      const covered = new Set(chosen.map((v) => visits[v].floor));
+      if (blocks === MAX_BLOCKS || [...floors].every(([f, count]) => count < 8 || covered.has(f))) break;
+    }
     const thin = [];
-    visits.forEach((v, j) => {
-      if (j % stride === 0) for (const q of v.members) thin.push(keep[q]);
-    });
-    keep = thin;
-    sub = pickScans(view, keep);
+    for (const v of chosen) for (const q of visits[v].members) thin.push(q);
+    heard = pickScans(dense, thin);
+    keep = thin.map((q) => denseIdx[q]);
   }
-  return { sub, keep };
+  // Primeiro o teto de rádios; os instáveis são procurados só entre os que ficaram (a comparação
+  // de impressões digitais custa na proporção dos rádios).
+  const spare = spareRadios(heard, maxRadios);
+  const left = new Set(spare);
+  let cols = [];
+  for (let k = 0; k < heard.K; k++) if (!left.has(k)) cols.push(k);
+  let sub = spare.length ? pickRadios(heard, cols) : heard;
+  const unstable = unstableRadios(sub);
+  const hidden = unstable.map((c) => cols[c]);
+  if (unstable.length) {
+    cols = cols.filter((k) => !hidden.includes(k));
+    sub = pickRadios(heard, cols);
+  }
+  return { sub, keep, heard, hidden, spare, cols, blocks };
 }
 
 /**
- * Leva a solução das varreduras resolvidas (`keep`) para todas: as que ficaram de fora entram por
- * interpolação no tempo entre as vizinhas resolvidas, com confiança menor. Devolve vetores do
- * tamanho do levantamento e garante que as varreduras de um mesmo ponto marcado dividam a posição.
+ * Rádios que sobram quando há mais do que `limit`: ficam os de maior "presença" (soma, sobre as
+ * varreduras, de quanto o nível passa do limiar — ouvido muitas vezes e forte vale mais do que
+ * ouvido às vezes e no limite). Devolve os índices dos que saem (vazio quando todos cabem).
  */
-function expand(view, keep, part) {
+function spareRadios(view, limit) {
+  const { n, K, rssi } = view;
+  const fill = Number.isFinite(view.lowLevel) ? view.lowLevel - 2 : -92;
+  const ranked = [];
+  for (let k = 0; k < K; k++) {
+    let presence = 0;
+    for (let i = 0; i < n; i++) {
+      const v = rssi[i * K + k];
+      if (v === v) presence += Math.max(1, v - fill);
+    }
+    if (presence > 0) ranked.push({ k, presence });
+  }
+  if (ranked.length <= limit) return [];
+  ranked.sort((p, q) => q.presence - p.presence || p.k - q.k);
+  return ranked.slice(limit).map((e) => e.k);
+}
+
+/** A mesma visão só com os rádios de `cols` (índices crescentes). */
+function pickRadios(view, cols) {
+  const { n, K } = view;
+  const R = cols.length;
+  const rssi = new Float64Array(n * R);
+  const count = new Float64Array(n * R);
+  for (let i = 0; i < n; i++) {
+    for (let c = 0; c < R; c++) {
+      rssi[i * R + c] = view.rssi[i * K + cols[c]];
+      count[i * R + c] = view.count[i * K + cols[c]];
+    }
+  }
+  const at = new Int32Array(K).fill(-1);
+  cols.forEach((k, c) => (at[k] = c));
+  const track = view.track.map((q) => ({ ...q, k: q.k >= 0 ? at[q.k] : -1 }));
+  return { ...view, K: R, radios: cols.map((k) => view.radios[k]), rssi, count, track };
+}
+
+// Parado sem marcar ponto: quantas varreduras seguidas, e quão iguais.
+const STILL = {
+  minScans: 10, // ~35 s na cadência livre: menos que isto é pausa comum, que os motores já toleram
+  maxGapS: 12, // varreduras mais espaçadas que isto não dizem que o usuário ficou no lugar
+  sameDb: 4, // parado, uma varredura difere ~2,5 dB da média do trecho (ruído); a ~2 m dali, 6 a 8 dB
+  strongDb: 3.5, // e os três rádios mais fortes do trecho, em média, menos que isto
+  joinScans: 6, // dois trechos iguais separados por até 6 varreduras são a mesma parada
+};
+
+/**
+ * Parou para atender o telefone? Os motores supõem que, entre duas varreduras "andando", o usuário
+ * deu alguns passos: dezenas de varreduras seguidas no mesmo lugar, sem "marcar ponto", contradizem
+ * isso e deformam o mapa inteiro (medido: 5 minutos parado custam até 20 pontos de nota). Um trecho
+ * longo de varreduras seguidas com a MESMA impressão digital (cada uma dentro do ruído em torno da
+ * média do trecho) é tratado como um ponto marcado pelo próprio solucionador: uma posição só, sem
+ * passo esperado lá dentro. Devolve a própria visão quando não há nenhum trecho assim.
+ */
+function markStandstills(view) {
+  const { n, K, rssi, time, floor } = view;
+  if (n < STILL.minScans || !Number.isFinite(view.lowLevel)) return view;
+  const fill = view.lowLevel - 2;
+  const bins = new Int32Array(81);
+  // Percentil 70 de |a - b| entre dois perfis de nível (NaN = não ouvido, entra no limiar).
+  const profileGap = (levelA, levelB) => {
+    bins.fill(0);
+    let count = 0;
+    for (let k = 0; k < K; k++) {
+      const u = levelA(k);
+      const v = levelB(k);
+      const hasU = u === u;
+      const hasV = v === v;
+      if (!hasU && !hasV) continue;
+      const gap = Math.abs((hasU ? u : fill) - (hasV ? v : fill));
+      bins[gap >= 40 ? 80 : Math.round(2 * gap)]++;
+      count++;
+    }
+    if (count < 4) return Infinity;
+    let acc = 0;
+    for (let b = 0; b <= 80; b++) {
+      acc += bins[b];
+      if (acc >= 0.7 * count) return b / 2;
+    }
+    return 40;
+  };
+  // Média do trecho em andamento: um rádio conta se foi ouvido em pelo menos metade das varreduras dele.
+  const sum = new Float64Array(K);
+  const cnt = new Int32Array(K);
+  let length = 0;
+  const add = (i) => {
+    for (let k = 0; k < K; k++) {
+      const v = rssi[i * K + k];
+      if (v === v) {
+        sum[k] += v;
+        cnt[k]++;
+      }
+    }
+    length++;
+  };
+  const meanOf = (k) => (cnt[k] >= 0.5 * length ? sum[k] / cnt[k] : NaN);
+  // A varredura c cabe no trecho? A maioria dos rádios dentro do ruído em torno da média E os três
+  // mais fortes também. Numa casa pequena quase todos os rádios são vizinhos distantes, que mal
+  // mudam em 2 ou 3 metros: quem denuncia o movimento é o roteador de dentro de casa.
+  const fits = (c) => {
+    if (profileGap((k) => rssi[c * K + k], meanOf) > STILL.sameDb) return false;
+    const top = [-1, -1, -1];
+    for (let k = 0; k < K; k++) {
+      const v = meanOf(k);
+      if (v !== v) continue;
+      let at = 3;
+      while (at > 0 && (top[at - 1] < 0 || meanOf(top[at - 1]) < v)) at--;
+      if (at < 3) {
+        top.splice(at, 0, k);
+        top.length = 3;
+      }
+    }
+    let total = 0;
+    let used = 0;
+    for (const k of top) {
+      if (k < 0) continue;
+      const v = rssi[c * K + k];
+      total += Math.abs((v === v ? v : fill) - meanOf(k));
+      used++;
+    }
+    return used > 0 && total / used <= STILL.strongDb;
+  };
+  const runs = [];
+  for (let from = 0; from < n; ) {
+    if (view.spot[from] !== null) {
+      from++;
+      continue;
+    }
+    sum.fill(0);
+    cnt.fill(0);
+    length = 0;
+    add(from);
+    let to = from;
+    for (;;) {
+      // A próxima varredura que cabe na média do trecho; uma ou duas destoantes no meio (leitura
+      // ruim, alguém passou na frente) não encerram a parada: ficam no trecho, fora da média.
+      let next = -1;
+      for (let c = to + 1; c <= to + 3 && c < n; c++) {
+        if (view.spot[c] !== null || floor[c] !== floor[from] || time[c] - time[c - 1] > STILL.maxGapS) break;
+        if (fits(c)) {
+          next = c;
+          break;
+        }
+      }
+      if (next < 0) break;
+      add(next);
+      to = next;
+    }
+    if (length < STILL.minScans) {
+      from++;
+      continue;
+    }
+    runs.push({ from, to, mean: Float64Array.from(sum, (_, k) => meanOf(k)), key: runs.length });
+    from = to + 1;
+  }
+  if (!runs.length) return view;
+  // O ruído às vezes parte uma parada em duas: trechos vizinhos com a mesma média são um só.
+  const spot = view.spot.slice();
+  let places = 0;
+  runs.forEach((run, r) => {
+    const prev = r > 0 ? runs[r - 1] : null;
+    let joined = !!prev && run.from - prev.to - 1 <= STILL.joinScans && floor[run.from] === floor[prev.from];
+    for (let i = prev ? prev.to + 1 : 0; joined && i < run.from; i++) if (view.spot[i] !== null || time[i + 1] - time[i] > STILL.maxGapS) joined = false;
+    if (joined && profileGap((k) => run.mean[k], (k) => prev.mean[k]) > STILL.sameDb) joined = false;
+    run.key = joined ? prev.key : places++;
+    // Chave que nenhum ponto marcado pelo usuário tem (as dele vêm de String(spot)).
+    for (let i = joined ? prev.to + 1 : run.from; i <= run.to; i++) spot[i] = `\u0000parado:${run.key}`;
+  });
+  return { ...view, spot, standstills: places };
+}
+
+/**
+ * Diferença típica (dB) entre as impressões digitais de duas varreduras: o percentil 70 de
+ * |nível_i - nível_j| sobre os rádios ouvidos em pelo menos uma das duas (quem falta entra em
+ * `fill`, o limiar de detecção). Percentil e não média: uns poucos rádios que mudaram por outro
+ * motivo (ligaram, desligaram, beacon perdido) não escondem que o lugar é o mesmo. Infinity quando
+ * os andares são diferentes ou há rádios de menos para comparar. `bins` é um rascunho de 81 casas.
+ */
+function fingerGap(view, i, j, fill, bins) {
+  if (view.floor[i] !== view.floor[j]) return Infinity;
+  const { K, rssi } = view;
+  bins.fill(0);
+  let count = 0;
+  for (let k = 0; k < K; k++) {
+    const u = rssi[i * K + k];
+    const v = rssi[j * K + k];
+    const hasU = u === u;
+    const hasV = v === v;
+    if (!hasU && !hasV) continue;
+    const gap = Math.abs((hasU ? u : fill) - (hasV ? v : fill));
+    bins[gap >= 40 ? 80 : Math.round(2 * gap)]++;
+    count++;
+  }
+  if (count < 4) return Infinity;
+  let acc = 0;
+  for (let b = 0; b <= 80; b++) {
+    acc += bins[b];
+    if (acc >= 0.7 * count) return b / 2;
+  }
+  return 40;
+}
+
+// Rádio instável: quanto tempo calado, o que conta como "o mesmo lugar" e como "dava para ouvir".
+const UNSTABLE = {
+  minScans: 24, // com menos varreduras que isto não há voltas ao mesmo lugar para comparar
+  minRun: 6, // varreduras seguidas sem ouvir o rádio (ou 12% do levantamento, o que for maior)
+  minHits: 6,
+  maxCompared: 400, // a comparação é quadrática: levantamentos maiores são amostrados
+  apart: 4, // o "mesmo lugar" tem de ser uma VOLTA: a mais de 4 varreduras do trecho calado
+  matchDb: 5, // impressões digitais a menos disto são o mesmo lugar (ruído de leitura: ~3 dB)
+  clearDb: 10, // nível acima do limiar em que um rádio não passa despercebido
+  minClashes: 4, // contradições (as fracas valem meia)...
+  minClear: 3, // ...das quais pelo menos estas com o rádio chegando forte
+};
+
+/**
+ * Rádios que ligaram ou desligaram NO MEIO do levantamento (o vizinho ligou o roteador, alguém
+ * abriu o ponto de acesso do celular, um repetidor reiniciou). Os motores entendem "não ouvi" como
+ * "estou longe dele": um rádio que só existe na segunda metade do tempo faz o mesmo cômodo parecer
+ * dois lugares diferentes e o mapa se parte em dois (medido: a nota passa de 100, pior do que
+ * juntar tudo num ponto só).
+ *
+ * O sinal de que a ausência é no TEMPO e não no espaço: o usuário voltou ao mesmo lugar (as outras
+ * redes dizem isso) e lá o rádio, antes calado por um longo trecho, chega forte. Com várias voltas
+ * assim o rádio é escondido dos motores por inteiro — perde-se a informação dele, mas o mapa não
+ * se parte. Sem voltas ao mesmo lugar (um ponto a cada 30 s, poucas varreduras) não há como saber.
+ *
+ * @returns {number[]} índices dos rádios a esconder (quase sempre vazio)
+ */
+function unstableRadios(view) {
+  const { n, K, rssi } = view;
+  if (n < UNSTABLE.minScans || K < 5 || !Number.isFinite(view.lowLevel)) return [];
+  const fill = view.lowLevel - 2;
+  const clear = fill + UNSTABLE.clearDb;
+  const stride = Math.ceil(n / UNSTABLE.maxCompared);
+  const pick = [];
+  for (let i = 0; i < n; i += stride) pick.push(i);
+  const m = pick.length;
+  const minRun = Math.max(UNSTABLE.minRun, Math.ceil(0.12 * m));
+  // Candidatos: ouvidos forte em algum lugar e calados por um trecho longo e contínuo.
+  const cands = [];
+  for (let k = 0; k < K; k++) {
+    let hits = 0;
+    let top = -Infinity;
+    let run = 0;
+    let best = 0;
+    let bestEnd = -1;
+    for (let q = 0; q < m; q++) {
+      const v = rssi[pick[q] * K + k];
+      if (v === v) {
+        hits++;
+        if (v > top) top = v;
+        run = 0;
+      } else if (++run > best) {
+        best = run;
+        bestEnd = q;
+      }
+    }
+    if (hits >= UNSTABLE.minHits && top >= clear && best >= minRun) cands.push({ k, from: bestEnd - best + 1, to: bestEnd });
+  }
+  if (!cands.length) return [];
+  const bins = new Int32Array(81);
+  const gap = new Float32Array(m * m);
+  const hidden = [];
+  // Um rádio que mudou atrapalha a própria comparação ("mesmo lugar" deixa de parecer o mesmo):
+  // escondidos os mais evidentes, a comparação é refeita sem eles e outros aparecem.
+  for (let round = 0; round < 4; round++) {
+    const seen = hidden.length ? withoutRadios(view, hidden) : view;
+    for (let p = 0; p < m; p++) for (let q = p + 1; q < m; q++) gap[p * m + q] = gap[q * m + p] = fingerGap(seen, pick[p], pick[q], fill, bins);
+    const found = [];
+    for (const { k, from, to } of cands) {
+      if (hidden.includes(k)) continue;
+      let matched = 0;
+      let clashes = 0;
+      let loud = 0;
+      for (let p = from; p <= to; p++) {
+        // A varredura mais parecida fora do trecho calado (e longe dele no tempo): uma volta ao lugar.
+        let twin = -1;
+        let nearest = UNSTABLE.matchDb;
+        for (let q = 0; q < m; q++) {
+          if (q >= from - UNSTABLE.apart && q <= to + UNSTABLE.apart) continue;
+          if (gap[p * m + q] <= nearest) {
+            nearest = gap[p * m + q];
+            twin = q;
+          }
+        }
+        if (twin < 0) continue;
+        matched++;
+        // Lá o rádio chega forte: contradição inteira. Chega fraco: meia (pode ser a borda do alcance).
+        const level = rssi[pick[twin] * K + k];
+        if (level >= clear) {
+          clashes++;
+          loud++;
+        } else if (level === level) clashes += 0.5;
+      }
+      if (loud >= UNSTABLE.minClear && clashes >= UNSTABLE.minClashes && clashes >= 0.5 * matched) found.push(k);
+    }
+    if (!found.length) break;
+    hidden.push(...found);
+  }
+  return hidden;
+}
+
+/** A mesma visão sem as leituras dos rádios de `hidden` (eles continuam na lista, sem nunca aparecer). */
+function withoutRadios(view, hidden) {
+  const { n, K } = view;
+  const rssi = Float64Array.from(view.rssi);
+  const count = Float64Array.from(view.count);
+  for (const k of hidden) {
+    for (let i = 0; i < n; i++) {
+      rssi[i * K + k] = NaN;
+      count[i * K + k] = 0;
+    }
+  }
+  return { ...view, rssi, count };
+}
+
+/**
+ * Posição dos rádios escondidos dos motores: a do outro rádio do mesmo aparelho, se ele foi
+ * posicionado; senão o centro das varreduras onde chegou mais forte. Confiança baixa.
+ * `part` tem x, y (por varredura de `view`) e aps.
+ */
+function placeHidden(view, hidden, part) {
+  const { n, K, rssi, radios } = view;
+  for (const k of hidden) {
+    const seen = [];
+    for (let i = 0; i < n; i++) if (rssi[i * K + k] === rssi[i * K + k]) seen.push(i);
+    if (!seen.length) continue;
+    seen.sort((p, q) => rssi[q * K + k] - rssi[p * K + k] || p - q);
+    const top = seen.slice(0, 3);
+    const peak = rssi[top[0] * K + k];
+    let w = 0;
+    let x = 0;
+    let y = 0;
+    for (const i of top) {
+      const wi = Math.pow(10, (rssi[i * K + k] - peak) / 10);
+      w += wi;
+      x += wi * part.x[i];
+      y += wi * part.y[i];
+    }
+    let ap = { x: x / w, y: y / w, z: view.floor[top[0]] * FLOOR_HEIGHT + 1, p0: Math.min(-20, peak + 5), n: 3, conf: 0.1 };
+    for (const other of radios) {
+      if (other === radios[k] || other.device !== radios[k].device) continue;
+      const twin = other.ids.map((id) => part.aps[id]).find((a) => a && Number.isFinite(a.x) && Number.isFinite(a.y) && Number.isFinite(a.z));
+      if (twin) ap = { ...ap, x: twin.x, y: twin.y, z: twin.z };
+    }
+    for (const id of radios[k].ids) if (!part.aps[id]) part.aps[id] = { ...ap };
+  }
+}
+
+/** BSSIDs dos rádios escondidos (para o resumo; no máximo 20). */
+function hiddenIds(view, hidden) {
+  const ids = [];
+  for (const k of hidden) for (const id of view.radios[k].ids) if (ids.length < 20) ids.push(id);
+  return ids;
+}
+
+/**
+ * Um levantamento de uma casa tem dois, três andares. Com andares demais (marcação errada, dados
+ * corrompidos) o custo dos motores cresce com o número de andares e um deles nem terminava: os
+ * motores recebem no máximo MAX_FLOORS, os mais visitados; as varreduras dos outros entram no andar
+ * mantido mais próximo. A saída continua com o andar marcado em cada varredura (z = andar x pé-direito).
+ */
+function limitFloors(view) {
+  const count = new Map();
+  for (let i = 0; i < view.n; i++) count.set(view.floor[i], (count.get(view.floor[i]) || 0) + 1);
+  if (count.size <= MAX_FLOORS) return view;
+  const kept = [...count.entries()]
+    .sort((p, q) => q[1] - p[1] || p[0] - q[0])
+    .slice(0, MAX_FLOORS)
+    .map((e) => e[0])
+    .sort((p, q) => p - q);
+  const nearest = new Map();
+  for (const f of count.keys()) {
+    let best = kept[0];
+    for (const k of kept) if (Math.abs(k - f) < Math.abs(best - f)) best = k;
+    nearest.set(f, best);
+  }
+  return { ...view, floor: Int32Array.from(view.floor, (f) => nearest.get(f)) };
+}
+
+/**
+ * Leva a solução das varreduras resolvidas (`prepared.keep`) para todas. As que ficaram de fora
+ * entram, com confiança menor:
+ *   - pela impressão digital, quando o levantamento foi resolvido em blocos (placeByFingerprint);
+ *   - junto das outras varreduras do mesmo ponto marcado, quando alguma foi resolvida;
+ *   - por interpolação no tempo entre as vizinhas já colocadas (é o caso das varreduras sem
+ *     nenhuma leitura fresca).
+ * Devolve vetores do tamanho do levantamento e garante que as varreduras de um mesmo ponto marcado
+ * dividam a posição.
+ */
+function expand(view, prepared, part) {
+  const { keep } = prepared;
   const n = view.n;
   // Cópia dos roteadores: um motor pode devolver o mesmo objeto para vários BSSIDs, e daqui em
   // diante cada entrada é movida uma vez só.
@@ -306,24 +781,25 @@ function expand(view, keep, part) {
   const x = new Float64Array(n);
   const y = new Float64Array(n);
   const conf = new Float64Array(n);
-  const solved = new Int32Array(n).fill(-1);
+  const placed = new Uint8Array(n); // 1 = resolvida pelos motores, 2 = colocada pela impressão digital
   keep.forEach((i, q) => {
     x[i] = part.x[q];
     y[i] = part.y[q];
     conf[i] = part.conf[q];
-    solved[i] = q;
+    placed[i] = 1;
   });
-  const next = new Int32Array(n).fill(-1);
-  for (let i = n - 1, at = -1; i >= 0; i--) {
-    if (solved[i] >= 0) at = i;
-    next[i] = at;
-  }
   // Ponto marcado com varreduras resolvidas: as outras varreduras dele ficam no mesmo lugar.
   const spotAt = new Map();
   for (const i of keep) if (view.spot[i] !== null && !spotAt.has(view.spot[i])) spotAt.set(view.spot[i], i);
+  if (prepared.blocks > 1) placeByFingerprint(view, prepared, spotAt, x, y, conf, placed);
+  const next = new Int32Array(n).fill(-1);
+  for (let i = n - 1, at = -1; i >= 0; i--) {
+    if (placed[i]) at = i;
+    next[i] = at;
+  }
   let prev = -1;
   for (let i = 0; i < n; i++) {
-    if (solved[i] >= 0) {
+    if (placed[i]) {
       prev = i;
       continue;
     }
@@ -350,11 +826,118 @@ function expand(view, keep, part) {
   return { x, y, conf, aps };
 }
 
+/**
+ * Levantamento resolvido em blocos: as varreduras de fora deles já têm um mapa onde cair. Cada uma
+ * vai para a média das posições das 4 varreduras resolvidas de impressão digital mais parecida, no
+ * mesmo andar (é a localização por "fingerprinting" de sempre, com o mapa que os motores acabaram
+ * de fazer). Duas passadas de média com as vizinhas no tempo tiram o serrilhado: quem anda não
+ * pula de um canto para o outro entre duas varreduras. Varredura sem parecida nenhuma (outro
+ * andar, leituras de menos) fica para a interpolação no tempo. Mexe em x, y, conf e placed.
+ */
+function placeByFingerprint(view, prepared, spotAt, x, y, conf, placed) {
+  const { n } = view;
+  if (!Number.isFinite(view.lowLevel)) return;
+  // Compara pelos mesmos rádios que os motores usaram.
+  const seen = prepared.cols.length < view.K ? pickRadios(view, prepared.cols) : view;
+  const fill = view.lowLevel - 2;
+  const bins = new Int32Array(81);
+  // Referências: as varreduras resolvidas (amostradas quando são muitas: a busca é quadrática).
+  const stride = Math.ceil(prepared.keep.length / 500);
+  const refs = prepared.keep.filter((_, q) => q % stride === 0);
+  const NEAR = 4;
+  const gapOf = new Float64Array(NEAR);
+  const refOf = new Int32Array(NEAR);
+  const added = [];
+  for (let i = 0; i < n; i++) {
+    if (placed[i] || view.fresh[i] === 0) continue;
+    if (view.spot[i] !== null && spotAt.has(view.spot[i])) continue; // vai junto do ponto marcado
+    gapOf.fill(Infinity);
+    refOf.fill(-1);
+    for (const j of refs) {
+      const gap = fingerGap(seen, i, j, fill, bins);
+      if (!(gap < gapOf[NEAR - 1])) continue;
+      let at = NEAR - 1;
+      while (at > 0 && gapOf[at - 1] > gap) {
+        gapOf[at] = gapOf[at - 1];
+        refOf[at] = refOf[at - 1];
+        at--;
+      }
+      gapOf[at] = gap;
+      refOf[at] = j;
+    }
+    if (refOf[0] < 0) continue;
+    let w = 0;
+    let sx = 0;
+    let sy = 0;
+    let sc = 0;
+    for (let q = 0; q < NEAR && refOf[q] >= 0; q++) {
+      const wq = 1 / ((1 + gapOf[q]) * (1 + gapOf[q]));
+      w += wq;
+      sx += wq * x[refOf[q]];
+      sy += wq * y[refOf[q]];
+      sc += wq * conf[refOf[q]];
+    }
+    x[i] = sx / w;
+    y[i] = sy / w;
+    // Parecida de verdade (~3 dB) vale quase o que vale a referência; pouco parecida, bem menos.
+    conf[i] = (0.75 * sc * clamp(1.3 - gapOf[0] / 10, 0.3, 1)) / w;
+    added.push(i);
+  }
+  for (const i of added) placed[i] = 2;
+  for (let pass = 0; pass < 2; pass++) {
+    const px = Float64Array.from(x);
+    const py = Float64Array.from(y);
+    for (const i of added) {
+      let sx = 0;
+      let sy = 0;
+      let c = 0;
+      for (const j of [i - 1, i + 1]) {
+        if (j < 0 || j >= n || !placed[j] || view.floor[j] !== view.floor[i] || Math.abs(view.time[j] - view.time[i]) > 8) continue;
+        sx += px[j];
+        sy += py[j];
+        c++;
+      }
+      if (!c) continue;
+      x[i] = 0.5 * px[i] + (0.5 * sx) / c;
+      y[i] = 0.5 * py[i] + (0.5 * sy) / c;
+    }
+  }
+}
+
+/**
+ * Tamanho máximo que um mapa pode ter. Quem anda a no máximo ~2 m/s durante T segundos não se
+ * afasta do centro do próprio caminho mais do que 0,3 x 2 x T (raio rms de uma reta), e um
+ * levantamento de Wi-Fi não passa de algumas centenas de metros. Um mapa maior do que isso é conta
+ * que degenerou: é encolhido até o teto (em torno do centro, roteadores juntos) e a escala passa a
+ * valer nada. Quem desenha o mapa aloca uma grade do tamanho dele: sem teto, um número absurdo
+ * aqui derrubava a etapa seguinte. Devolve false quando precisou encolher.
+ */
+function capSize(view, full) {
+  const { x, y } = full;
+  const { cx, cy, radius } = cloudStats(x, y);
+  const duration = view.n > 1 ? view.time[view.n - 1] - view.time[0] : 0;
+  const limit = clamp(0.6 * duration, 15, MAX_RADIUS_M);
+  if (!(radius > limit)) return true;
+  const k = limit / radius;
+  for (let i = 0; i < view.n; i++) {
+    x[i] = (x[i] - cx) * k;
+    y[i] = (y[i] - cy) * k;
+  }
+  for (const a of Object.values(full.aps)) {
+    a.x = (a.x - cx) * k;
+    a.y = (a.y - cy) * k;
+    a.p0 += 10 * a.n * Math.log10(k);
+  }
+  return false;
+}
+
 /** Monta a MapSolution: z pelo andar marcado, tudo finito, confianças em 0..1. */
 function toSolution(view, full, scaleConf) {
   const points = new Array(view.n);
   for (let i = 0; i < view.n; i++) {
-    points[i] = { x: finite(full.x[i]), y: finite(full.y[i]), z: view.floor[i] * FLOOR_HEIGHT, conf: clamp(finite(full.conf[i]), 0, 1) };
+    // Posição que não é número (não deveria acontecer) vai para a origem com confiança zero.
+    const ok = Number.isFinite(full.x[i]) && Number.isFinite(full.y[i]);
+    points[i] = { x: ok ? full.x[i] : 0, y: ok ? full.y[i] : 0, z: view.floor[i] * FLOOR_HEIGHT, conf: ok ? clamp(finite(full.conf[i]), 0, 1) : 0 };
   }
   const aps = {};
   for (const [id, a] of Object.entries(full.aps)) {
@@ -382,13 +965,14 @@ function toSolution(view, full, scaleConf) {
  *    confiante: média de alturas cairia entre dois andares); os BSSIDs de um aparelho ficam juntos.
  *    Roteador que só parte dos motores posicionou sai com confiança menor.
  *
- * @returns {{x, y, conf, aps, scaleConf, agreementM, expectedErrorM}}
+ * @returns {{x, y, conf, aps, scaleConf, agreementM, expectedErrorM, pool}}  `pool`: índices das soluções que entraram na média
  */
 function combine(results, view) {
   const n = view.n;
   // Solução sem tamanho (tudo num ponto só) não tem forma para alinhar: fica de fora se houver outra.
   const stats = results.map((r) => cloudStats(r.x, r.y));
   let pool = results.map((_, c) => c).filter((c) => stats[c].radius > 1e-6);
+  pool = agreeingOnSize(pool, stats, results);
   if (!pool.length) pool = [0];
   const C = pool.length;
   const shapes = pool.map((c) => {
@@ -502,7 +1086,37 @@ function combine(results, view) {
   if (C > 1) scaleConf *= clamp(1.15 - 1.5 * logSpread, 0.5, 1);
   scaleConf *= clamp(1 - 0.16 * (cloudStats(x, y).radius - 3.5), 0.6, 1);
   const expectedErrorM = C > 1 ? SURVEY_ERR_FLOOR_M + SURVEY_ERR_PER_SPREAD * agreementM : NaN;
-  return { x, y, conf, aps, scaleConf, agreementM, expectedErrorM };
+  return { x, y, conf, aps, scaleConf, agreementM, expectedErrorM, pool };
+}
+
+/**
+ * Tira do consenso o motor cujo mapa tem tamanho muito diferente do dos outros (mais de
+ * SIZE_OUTLIER vezes): depois de normalizada, a forma de um mapa quase colapsado é só ruído, e uma
+ * escala que explodiu levaria a média geométrica junto. A referência é a mediana dos tamanhos,
+ * pesada pela confiança que cada motor declara na própria escala (o motor que colapsou avisa).
+ * Com dois motores que não se entendem, fica o que mais confia na sua.
+ */
+function agreeingOnSize(pool, stats, results) {
+  if (pool.length < 2) return pool;
+  const limit = Math.log(SIZE_OUTLIER);
+  const size = (c) => Math.log(stats[c].radius);
+  const trust = (c) => Math.max(0, finite(results[c].scaleConf)) + 0.01;
+  if (pool.length === 2) {
+    if (Math.abs(size(pool[0]) - size(pool[1])) <= limit) return pool;
+    return [trust(pool[1]) > trust(pool[0]) ? pool[1] : pool[0]];
+  }
+  const order = pool.slice().sort((p, q) => size(p) - size(q));
+  const half = 0.5 * order.reduce((t, c) => t + trust(c), 0);
+  let acc = 0;
+  let mid = size(order[order.length - 1]);
+  for (const c of order) {
+    acc += trust(c);
+    if (acc >= half) {
+      mid = size(c);
+      break;
+    }
+  }
+  return pool.filter((c) => Math.abs(size(c) - mid) <= limit);
 }
 
 /** Os BSSIDs de um mesmo aparelho são uma caixa só: ficam na mesma posição (média pesada pela confiança; altura do mais confiante). */
@@ -546,6 +1160,7 @@ function knownPairs(survey, view) {
   const out = [];
   for (const kd of survey && Array.isArray(survey.knownDistances) ? survey.knownDistances : []) {
     if (!kd || !Number.isInteger(kd.a) || !Number.isInteger(kd.b) || !Number.isFinite(kd.meters) || !(kd.meters > 0)) continue;
+    if (kd.meters > KNOWN_MAX_M) continue; // erro de digitação (ou outra unidade): esticaria o mapa até o absurdo
     if (kd.a < 0 || kd.b < 0 || kd.a >= view.n || kd.b >= view.n || kd.a === kd.b) continue;
     if (view.spot[kd.a] !== null && view.spot[kd.a] === view.spot[kd.b]) continue; // mesmo ponto: distância zero
     // A medida é no espaço; no mapa conta a parte horizontal.
@@ -570,10 +1185,20 @@ function knownPairs(survey, view) {
  *   e a escala fica como está.
  * - Em qualquer caso cada par medido sai EXATAMENTE com a distância pedida: os dois extremos (e as
  *   varreduras do mesmo ponto marcado) se afastam ou se aproximam por igual.
+ * - Menos as medidas absurdas (mais de KNOWN_MAX_M, ou mais de 4 vezes o diâmetro do mapa): essas
+ *   são ignoradas por inteiro.
  */
-function applyKnownDistances(view, pairs, full) {
-  if (!pairs.length) return 0;
+function applyKnownDistances(view, known, full) {
+  if (!known.length) return 0;
   const { x, y } = full;
+  // Medida muito maior do que o mapa inteiro não é um erro do mapa, é da medida (4,2 m digitado
+  // como 42): honrá-la jogaria dois pontos para fora da casa. Fica de fora.
+  const { cx: mx, cy: my } = cloudStats(x, y);
+  let reach = 0;
+  for (let i = 0; i < view.n; i++) reach = Math.max(reach, Math.hypot(x[i] - mx, y[i] - my));
+  const longest = Math.max(10, 8 * reach); // 8 x o raio = 4 x o diâmetro do mapa
+  const pairs = known.filter((kd) => kd.meters <= longest);
+  if (!pairs.length || !Number.isFinite(reach)) return 0;
   let num = 0;
   let den = 0;
   let base2 = 0;
@@ -659,6 +1284,13 @@ function orient(view, full, previous) {
       const qx = only.map((i) => px[i]);
       const qy = only.map((i) => py[i]);
       if (cloudStats(ox, oy).radius > 0.05 && cloudStats(qx, qy).radius > 0.05) place = fitRigid(x, y, px, py, { only }).apply;
+    }
+    // Solução anterior com lixo (coordenadas absurdas): o encaixe levaria o mapa junto. Vale o referencial próprio.
+    if (place) {
+      for (let i = 0; i < n && place; i++) {
+        const p = place(x[i], y[i]);
+        if (!(Math.abs(p[0]) <= MAX_COORD_M) || !(Math.abs(p[1]) <= MAX_COORD_M)) place = null;
+      }
     }
   }
   if (!place) {

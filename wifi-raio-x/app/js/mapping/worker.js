@@ -16,6 +16,7 @@
 // segundos sem ceder a vez, então quem cancela é a página, encerrando o worker (engine.js cria
 // outro quando precisar).
 
+import '../polyfills.js'; // primeiro de tudo: completa o que falta em WebViews antigos (também dentro do Worker)
 import { buildMap } from './mapmodel.js';
 import { solve, solveQuick, SOLVER_INFO } from './solver.js';
 
