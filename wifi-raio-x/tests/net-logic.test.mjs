@@ -14,6 +14,7 @@ import {
   whereIsTheDelay,
   niceAxis,
   DEVICE_TYPES,
+  DEVICE_SHORT,
   guessDeviceType,
   deviceName,
   ipToNumber,
@@ -219,7 +220,11 @@ test('pingVerdict: internet', () => {
   assert.equal(lossy.level, 'poor');
   assert.match(lossy.title, /instável/);
   assert.match(lossy.text, /4 respostas perdidas em 20 \(20%\)/);
-  assert.equal(v({ sent: 25, received: 24, lossPct: 4, avg: 18, jitter: 2 }).level, 'fair', 'uma perda em 25 já não é "ótimo"');
+  const oneLost = v({ sent: 25, received: 24, lossPct: 4, avg: 18, jitter: 2 });
+  assert.equal(oneLost.level, 'fair', 'uma perda em 25 já não é "ótimo"');
+  assert.equal(oneLost.title, 'Resposta rápida, mas perdeu resposta');
+  assert.match(oneLost.text, /Uma perda isolada pode ser acaso/);
+  assert.doesNotMatch(oneLost.text, /Sites e vídeos funcionam/, 'o texto fala da perda, não do tempo');
   assert.equal(v({ sent: 50, received: 49, lossPct: 2, avg: 18, jitter: 2 }).level, 'good');
   assert.match(v({ sent: 50, received: 49, lossPct: 2, avg: 18, jitter: 2 }).text, /1 resposta perdida em 50 \(2%\)/);
   assert.equal(v({ sent: 10, received: 9, lossPct: 10, avg: 18, jitter: 2 }).level, 'fair', 'uma única perda em 10 não vira "instável"');
@@ -244,6 +249,13 @@ test('pingVerdict: dentro de casa a régua é outra', () => {
   const fair = v({ sent: 25, received: 25, lossPct: 0, avg: 45, jitter: 12 });
   assert.equal(fair.level, 'fair');
   assert.match(fair.title, /oscilando/);
+  // tempo ótimo com uma perda: o texto não diz que o tempo está ruim
+  const quickButLost = v({ sent: 25, received: 24, lossPct: 4, avg: 4.4, jitter: 1.9 });
+  assert.equal(quickButLost.level, 'fair');
+  assert.equal(quickButLost.title, 'Wi-Fi rápido, mas perdeu resposta');
+  assert.doesNotMatch(quickButLost.text, /o normal é ficar abaixo/);
+  assert.match(v({ sent: 40, received: 38, lossPct: 5, avg: 4, jitter: 1 }).title, /perdeu respostas/);
+  assert.match(v({ sent: 50, received: 49, lossPct: 2, avg: 4, jitter: 1 }).text, /perda isolada em tantas medidas não preocupa/);
   const poor = v({ sent: 25, received: 25, lossPct: 0, avg: 120, jitter: 60 });
   assert.equal(poor.level, 'poor');
   assert.match(poor.text, /Canais/);
@@ -326,22 +338,24 @@ test('guessDeviceType: os aparelhos da casa virtual e nomes comuns', () => {
     'coisa-qualquer-123': 'unknown',
   };
   for (const [host, expected] of Object.entries(cases)) assert.equal(type(host), expected, host);
-  for (const t of Object.keys(DEVICE_TYPES)) assert.equal(typeof DEVICE_TYPES[t], 'string');
+  assert.deepEqual(Object.keys(DEVICE_SHORT), Object.keys(DEVICE_TYPES), 'todo tipo tem o nome curto');
+  for (const t of Object.keys(DEVICE_TYPES)) assert.ok(DEVICE_SHORT[t].length <= 13 && DEVICE_SHORT[t].length <= DEVICE_TYPES[t].length, t);
 });
 
 test('guessDeviceType: marcações, fabricante e ausência de pistas', () => {
-  assert.deepEqual(guessDeviceType({ host: 'Smart TV', gateway: true }), { type: 'router', label: 'Roteador', source: 'flag' });
-  assert.deepEqual(guessDeviceType({ host: 'Pixel-7', self: true }), { type: 'phone', label: 'Celular', source: 'flag' });
-  assert.deepEqual(guessDeviceType({ host: 'notebook', vendor: 'Seiko Epson Corporation' }), { type: 'computer', label: 'Computador', source: 'name' }, 'o nome vale mais que o fabricante');
-  assert.deepEqual(guessDeviceType({ vendor: 'Seiko Epson Corporation' }), { type: 'printer', label: 'Impressora', source: 'vendor' });
+  assert.deepEqual(guessDeviceType({ host: 'Smart TV', gateway: true }), { type: 'router', label: 'Roteador', short: 'Roteador', source: 'flag' });
+  assert.deepEqual(guessDeviceType({ host: 'Pixel-7', self: true }), { type: 'phone', label: 'Celular', short: 'Celular', source: 'flag' });
+  assert.deepEqual(guessDeviceType({ host: 'notebook', vendor: 'Seiko Epson Corporation' }), { type: 'computer', label: 'Computador', short: 'Computador', source: 'name' }, 'o nome vale mais que o fabricante');
+  assert.deepEqual(guessDeviceType({ vendor: 'Seiko Epson Corporation' }), { type: 'printer', label: 'Impressora', short: 'Impressora', source: 'vendor' });
+  assert.deepEqual(guessDeviceType({ host: 'Smart TV da Sala' }), { type: 'tv', label: 'TV ou streaming', short: 'TV', source: 'name' });
   assert.equal(guessDeviceType({ vendor: 'Espressif Inc.' }).type, 'iot');
   assert.equal(guessDeviceType({ vendor: 'TP-Link Corporation Limited' }).type, 'network');
   assert.equal(guessDeviceType({ vendor: 'Sony Interactive Entertainment Inc.' }).type, 'console');
   assert.equal(guessDeviceType({ vendor: 'Intel Corporate' }).type, 'computer');
   assert.equal(guessDeviceType({ vendor: 'Apple, Inc.' }).type, 'unknown', 'Apple pode ser celular, tablet ou computador: sem palpite');
   assert.equal(guessDeviceType({ vendor: 'Samsung Electronics Co.,Ltd' }).type, 'unknown');
-  assert.deepEqual(guessDeviceType({}), { type: 'unknown', label: 'Aparelho', source: null });
-  assert.deepEqual(guessDeviceType(null), { type: 'unknown', label: 'Aparelho', source: null });
+  assert.deepEqual(guessDeviceType({}), { type: 'unknown', label: 'Aparelho', short: 'Aparelho', source: null });
+  assert.deepEqual(guessDeviceType(null), { type: 'unknown', label: 'Aparelho', short: 'Aparelho', source: null });
   assert.equal(guessDeviceType({ host: '   ', vendor: '' }).type, 'unknown');
   // texto hostil é só texto
   assert.equal(typeof guessDeviceType({ host: '<b onmouseover=alert(3)>tv</b>' }).type, 'string');

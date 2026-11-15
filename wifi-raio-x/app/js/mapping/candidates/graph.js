@@ -15,7 +15,14 @@
 //   3. plano + bases radiais numa grade (só fica se a validação cruzada mostrar ganho claro:
 //      é o caso de ambientes com muitos roteadores próprios, como um escritório).
 //
-// A escala (metros) vem do ritmo da caminhada; a rotação e o espelhamento não são observáveis.
+// Em todos, um "não ouvi" é dado censurado no limiar de detecção do celular (não um valor inventado).
+// A escala (metros) vem do ritmo da caminhada; quando o Android só deixa varrer a cada 30 s, o tempo
+// de caminhada entre dois pontos marcados sai do sinal da rede conectada (ele estabiliza quando o
+// usuário chega). A rotação e o espelhamento não são observáveis.
+//
+// O que foi medido e ficou de fora está no diário de experimentos do time (correção da sombra do
+// corpo e do atraso dentro da varredura, zonas por cômodo, anel de passo constante, inferência
+// exata numa grade sobre o modelo radial: nenhum ganhou do que está aqui fora do conjunto de treino).
 
 import { FLOOR_HEIGHT } from '../types.js';
 
@@ -38,7 +45,6 @@ const MAX_WALK_S = 8;
 const STEP_SPREAD = 1.3; // E|passo|² / L²: os passos variam em torno do comprimento típico L
 
 // --- rádio ---
-const IMPUTE_VAR = 36; // dB²: incerteza extra de um "não ouvi" tratado como leitura no limiar de detecção
 const MISS_PROB = 0.05; // chance de um rádio audível faltar numa varredura (beacon perdido)
 const FLOOR_SPLIT_DB = 8; // diferença de nível entre andares que denuncia um roteador de dentro da casa
 const AP_CLEARANCE = 1.0; // m: distância mínima efetiva até um roteador (ele não está na altura do celular)
@@ -51,10 +57,11 @@ const MAX_NODES = 400; // acima disto as varreduras "andando" são dizimadas e d
 // Ajustes finos (podem ser trocados em options.tune nos experimentos).
 const TUNE = {
   linIters: 60,
-  psiPool: 1, // 1 = ruído comum a todos os rádios (evita que o EM "decore" dois ou três deles)
+  psiPool: 0.5, // quanto o ruído de cada rádio é puxado para o ruído comum (0 = nada, 1 = igual para todos)
+  tobit: 1, // 1 = "não ouvi" tratado como dado censurado no limiar de detecção
   gradRidge: 0.05,
   floorSplit: 1, // 1 = roteador de dentro da casa ganha um gradiente por andar
-  radIters: 10,
+  radIters: 5,
   slopeRidge: 20,
   radDamp: 0.05,
   fieldIters: 30,
@@ -63,18 +70,19 @@ const TUNE = {
   fieldRidge: 1,
   fieldMaxBasis: 120,
   fieldDamp: 0.5,
-  fieldGate: 0.8, // os campos curvos só ficam se o erro de validação cruzada cair abaixo desta fração
-  ratioMinL: 0, // m: passos mais curtos que isto não entram na conta da escala
-  scaleGain: 1, // correção final do tamanho do mapa
-  apMode: 2,
-  apPeak: -50,
+  fieldGate: 0.62, // os campos curvos só ficam se o erro de validação cruzada cair abaixo desta fração
+  fieldFromFlat: 1, // 1 = os campos curvos partem da solução plana (0 = da radial)
+  scaleGain: 1, // fator final no tamanho do mapa (1 = o que a caminhada disser)
+  apPeak: -50, // dBm: rádio que chega mais forte que isto esteve a poucos passos do celular
 };
 
 const now = () => (typeof performance !== 'undefined' && performance && typeof performance.now === 'function' ? performance.now() : 0);
 
 /**
+ * Resolve o mapa. Determinístico (não sorteia nada: `seed` é aceito e ignorado) e nunca lança erro.
  * @param {import('../types.js').Survey} survey
- * @param {{seed?: number, budgetMs?: number, onProgress?: (fraction: number, stage: string) => void}} [options]
+ * @param {{seed?: number, budgetMs?: number, onProgress?: (fraction: number, stage: string) => void, tune?: Object}} [options]
+ *        budgetMs: limite de tempo (padrão 4000); tune: troca valores de TUNE (só para experimentos)
  * @returns {import('../types.js').MapSolution}
  */
 export function solve(survey, options = {}) {
@@ -346,28 +354,22 @@ function pca2(M, N, K) {
 // ---------------------------------------------------------------------------
 
 // Comprimento típico do passo entre nós seguidos (L) e o peso do passo gaussiano (e = 1/variância por eixo).
-function motionModel(P, tune) {
+function motionModel(P) {
   const { N, walk } = P;
   const L = new Float64Array(Math.max(0, N - 1));
   const e = new Float64Array(Math.max(0, N - 1));
-  // Passos que contam para a escala: os muito curtos (chegada a um ponto marcado) são dominados
-  // pelo tremor da estimativa e fariam o mapa encolher.
-  const counted = new Uint8Array(Math.max(0, N - 1));
-  let any = 0;
   for (let a = 0; a + 1 < N; a++) {
     L[a] = (PACE * walk[a]) / (1 + walk[a] / (P.direct[a] ? STRAIGHT_DIRECT_S : STRAIGHT_S));
     e[a] = 2 / (STEP_SPREAD * L[a] * L[a]);
-    counted[a] = L[a] >= tune.ratioMinL ? 1 : 0;
-    any += counted[a];
   }
-  return { L, e, counted: any >= 3 ? counted : null };
+  return { L, e };
 }
 
 // Cada nó traz a informação das suas leituras (J 2x2, h); nós seguidos são ligados por um passo
 // gaussiano. Sistema tridiagonal em blocos: devolve em X a média e em cov a covariância a posteriori,
 // e a razão entre os passos esperados a posteriori (E|passo|² = média² + covariâncias) e os do modelo.
 // Razão 1 = o tamanho do mapa bate com a caminhada (é o ponto fixo do EM na direção da escala).
-function chainSolve(N, Jxx, Jxy, Jyy, hx, hy, e, X, cov, counted) {
+function chainSolve(N, Jxx, Jxy, Jyy, hx, hy, e, X, cov) {
   const Dxx = new Float64Array(N);
   const Dxy = new Float64Array(N);
   const Dyy = new Float64Array(N);
@@ -396,7 +398,6 @@ function chainSolve(N, Jxx, Jxy, Jyy, hx, hy, e, X, cov, counted) {
     gy[a] = ry;
   }
   let ratio = 0;
-  let edges = 0;
   for (let a = N - 1; a >= 0; a--) {
     if (a + 1 === N) {
       cov[a] = [Dxx[a], Dxy[a], Dyy[a]];
@@ -417,11 +418,9 @@ function chainSolve(N, Jxx, Jxy, Jyy, hx, hy, e, X, cov, counted) {
     const dx = X[a + 1][0] - X[a][0];
     const dy = X[a + 1][1] - X[a][1];
     const step2 = dx * dx + dy * dy + cov[a][0] + cov[a][2] + S[0] + S[2] - 2 * w * (c00 + c11);
-    if (counted && !counted[a]) continue;
     ratio += (step2 * w) / 2;
-    edges++;
   }
-  return edges ? ratio / edges : 1;
+  return N > 1 ? ratio / (N - 1) : 1;
 }
 
 // Aplica ao mapa o fator que leva a razão de passos a 1 (limitado por iteração, para não oscilar).
@@ -441,6 +440,21 @@ function rescale(ratio, limit, X, cov, extra) {
       p.y *= s;
     }
   }
+}
+
+// "Não ouvi" como dado censurado. Se o campo previsto ali está abaixo do limiar de detecção, a falta
+// é o esperado e quase não informa; se está acima, ou foi um beacon perdido (não informa) ou o nó
+// está no lugar errado (informa muito). Devolve o valor esperado da leitura que faltou (média da
+// normal truncada no limiar, misturada com a hipótese de beacon perdido), o peso dessa
+// pseudo-leitura e a variância que ela carrega.
+function censoredReading(pred, sd, floorDbm, out) {
+  const z = (floorDbm - pred) / sd;
+  const below = normCdf(z);
+  const resp = below / (below + MISS_PROB * (1 - below));
+  const lambda = (0.3989422804014327 * Math.exp(-0.5 * z * z)) / Math.max(below, 1e-9);
+  out.v = pred - resp * sd * Math.min(lambda, 6);
+  out.w = Math.max(0.02, resp);
+  out.extra = sd * sd * Math.max(0, 1 - z * lambda - lambda * lambda);
 }
 
 // Ruído comum: puxa o ruído de cada rádio para a média geométrica de todos.
@@ -476,7 +490,8 @@ function emLinear(P, tune, alive) {
     const sum = new Float64Array(F);
     const cnt = new Float64Array(F);
     for (let a = 0; a < N; a++) {
-      const row = c[a][k] > 0 ? { a, v: y[a][k], w: c[a][k], imp: false } : { a, v: floorDbm - 2, w: 1, imp: true };
+      // w = peso relativo ao ruído do rádio; extra = variância própria de uma pseudo-leitura
+      const row = c[a][k] > 0 ? { a, v: y[a][k], w: c[a][k], imp: false, extra: 0 } : { a, v: floorDbm - 2, w: 0.3, imp: true, extra: 0 };
       list.push(row);
       sum[fIdx[a]] += row.v;
       cnt[fIdx[a]]++;
@@ -511,7 +526,7 @@ function emLinear(P, tune, alive) {
     X[a][1] *= 0.3;
   }
 
-  const motion = motionModel(P, tune);
+  const motion = motionModel(P);
   const g = Array.from({ length: K }, () => Array.from({ length: F }, () => [0, 0]));
   const b = Array.from({ length: K }, () => new Float64Array(F));
   const psi = new Float64Array(K).fill(16);
@@ -523,13 +538,12 @@ function emLinear(P, tune, alive) {
     const m = 2 + fs.length;
     const A = new Float64Array(m * m);
     const rhs = new Float64Array(m);
-    const wImp = psi[k] / (psi[k] + IMPUTE_VAR);
     const col = new Int32Array(F).fill(-1);
     fs.forEach((f, j) => (col[f] = 2 + j));
     for (const r of rows[k]) {
       const f = col[fIdx[r.a]];
       if (f < 0) continue;
-      const w = r.imp ? wImp : r.w;
+      const w = r.w;
       const x0 = X[r.a][0];
       const x1 = X[r.a][1];
       const S = cov[r.a];
@@ -558,10 +572,10 @@ function emLinear(P, tune, alive) {
     for (const r of rows[k]) {
       const f = col[fIdx[r.a]];
       if (f < 0) continue;
-      const w = r.imp ? wImp : r.w;
+      const w = r.w;
       const S = cov[r.a];
       const err = r.v - th[f] - th[0] * X[r.a][0] - th[1] * X[r.a][1];
-      res += w * (err * err + th[0] * th[0] * S[0] + 2 * th[0] * th[1] * S[1] + th[1] * th[1] * S[2]);
+      res += w * (err * err + r.extra + th[0] * th[0] * S[0] + 2 * th[0] * th[1] * S[1] + th[1] * th[1] * S[2]);
       sw += w;
     }
     fs.forEach((f, j) => {
@@ -596,11 +610,10 @@ function emLinear(P, tune, alive) {
     hx.fill(0);
     hy.fill(0);
     for (const k of use) {
-      const wImp = 1 / (psi[k] + IMPUTE_VAR);
       for (const r of rows[k]) {
         const f = fIdx[r.a];
         const gk = g[k][f];
-        const w = r.imp ? wImp : r.w / psi[k];
+        const w = r.w / psi[k];
         const res = r.v - b[k][f];
         Jxx[r.a] += w * gk[0] * gk[0];
         Jxy[r.a] += w * gk[0] * gk[1];
@@ -609,11 +622,27 @@ function emLinear(P, tune, alive) {
         hy[r.a] += w * gk[1] * res;
       }
     }
-    return chainSolve(N, Jxx, Jxy, Jyy, hx, hy, motion.e, X, cov, motion.counted);
+    return chainSolve(N, Jxx, Jxy, Jyy, hx, hy, motion.e, X, cov);
+  };
+  // Depois que os planos tomam forma, cada "não ouvi" passa a valer o que o plano prevê ali.
+  const tobit = { v: 0, w: 0, extra: 0 };
+  const censor = () => {
+    for (const k of use) {
+      const sd = Math.sqrt(psi[k]);
+      for (const r of rows[k]) {
+        if (!r.imp) continue;
+        const f = fIdx[r.a];
+        censoredReading(b[k][f] + g[k][f][0] * X[r.a][0] + g[k][f][1] * X[r.a][1], sd, floorDbm, tobit);
+        r.v = tobit.v;
+        r.w = tobit.w;
+        r.extra = tobit.extra;
+      }
+    }
   };
   for (let it = 0; it < tune.linIters && (it < 15 || alive()); it++) {
     mStep();
     rescale(eStep(), 1.25, X, cov);
+    if (tune.tobit && it >= 5) censor();
   }
   return { X, cov, g, b, psi, use, rows, floors, fIdx, meanLevel, motion };
 }
@@ -694,9 +723,8 @@ function emRadial(P, lin, tune, alive) {
       St.fill(0);
       let Stt = 0;
       let Sty = 0;
-      const wImp = psi[k] / (psi[k] + IMPUTE_VAR);
       for (const r of rows[k]) {
-        const w = r.imp ? wImp : r.w;
+        const w = r.w;
         const f = fIdx[r.a];
         const t = tBuf[r.a];
         Sw[f] += w;
@@ -717,11 +745,10 @@ function emRadial(P, lin, tune, alive) {
       let sse = 0;
       let sw = 0;
       for (const r of rows[k]) {
-        const w = r.imp ? wImp : r.w;
         const f = fIdx[r.a];
         const err = r.v - (Sy[f] + n * St[f]) / Sw[f] + n * tBuf[r.a];
-        sse += w * err * err;
-        sw += w;
+        sse += r.w * (err * err + r.extra);
+        sw += r.w;
       }
       cost += sse / psi[k];
       if (!commit) continue;
@@ -735,7 +762,7 @@ function emRadial(P, lin, tune, alive) {
         const dy = X[r.a][1] - ay;
         const q = gk / (dx * dx + dy * dy + dv.h2[r.a]);
         const S = cov[r.a];
-        extra += (r.imp ? wImp : r.w) * q * q * (dx * dx * S[0] + 2 * dx * dy * S[1] + dy * dy * S[2]);
+        extra += r.w * q * q * (dx * dx * S[0] + 2 * dx * dy * S[1] + dy * dy * S[2]);
       }
       psi[k] = Math.max(1, (sse + extra + 4 * 9) / (sw + 4));
     }
@@ -758,6 +785,7 @@ function emRadial(P, lin, tune, alive) {
       dv.y = fr.cy + (mag > 1e-6 ? (gy / mag) * dist : 0);
     }
   }
+  const tobit = { v: 0, w: 0, extra: 0 };
   const RING = [0, 0.4, 0.8, 1.2, 1.7, 2.5, 4, 7]; // raios da busca global, em raios do mapa
   const mStep = (global) => {
     const fr = frame();
@@ -813,7 +841,7 @@ function emRadial(P, lin, tune, alive) {
     for (const k of use) {
       const dv = devs[devOf[k]];
       const gk = (10 * slope[k]) / Math.LN10;
-      const wImp = 1 / (psi[k] + IMPUTE_VAR);
+      const sd = Math.sqrt(psi[k]);
       for (const r of rows[k]) {
         const a = r.a;
         const dx = X[a][0] - dv.x;
@@ -822,7 +850,13 @@ function emRadial(P, lin, tune, alive) {
         const f = level[k][fIdx[a]] - 5 * slope[k] * Math.log10(r2);
         const fx = (-gk * dx) / r2;
         const fy = (-gk * dy) / r2;
-        const w = r.imp ? wImp : r.w / psi[k];
+        if (r.imp && tune.tobit) {
+          censoredReading(f, sd, P.floorDbm, tobit);
+          r.v = tobit.v;
+          r.w = tobit.w;
+          r.extra = tobit.extra;
+        }
+        const w = r.w / psi[k];
         const res = r.v - f + fx * X[a][0] + fy * X[a][1];
         Jxx[a] += w * fx * fx;
         Jxy[a] += w * fx * fy;
@@ -831,7 +865,7 @@ function emRadial(P, lin, tune, alive) {
         hy[a] += w * fy * res;
       }
     }
-    return chainSolve(N, Jxx, Jxy, Jyy, hx, hy, motion.e, X, cov, motion.counted);
+    return chainSolve(N, Jxx, Jxy, Jyy, hx, hy, motion.e, X, cov);
   };
   let done = 0;
   for (let it = 0; it < tune.radIters && alive(); it++) {
@@ -1075,7 +1109,7 @@ function fieldStage(P, lin, tune, alive) {
       hx[a] = h0;
       hy[a] = h1;
     }
-    rescale(chainSolve(N, Jxx, Jxy, Jyy, hx, hy, motion.e, X, cov, motion.counted), 1.1, X, cov);
+    rescale(chainSolve(N, Jxx, Jxy, Jyy, hx, hy, motion.e, X, cov), 1.1, X, cov);
     done++;
   }
   return { X, cov, cvFirst, cvLast, complete: done === tune.fieldIters };
@@ -1084,6 +1118,36 @@ function fieldStage(P, lin, tune, alive) {
 // ---------------------------------------------------------------------------
 // Roteadores
 // ---------------------------------------------------------------------------
+
+// Melhor semelhança (rotação + escala + translação, sem espelho) que leva os pontos A nos pontos B.
+function similarity(A, B) {
+  const n = Math.min(A.length, B.length);
+  let ax = 0;
+  let ay = 0;
+  let bx = 0;
+  let by = 0;
+  for (let i = 0; i < n; i++) {
+    ax += A[i][0] / n;
+    ay += A[i][1] / n;
+    bx += B[i][0] / n;
+    by += B[i][1] / n;
+  }
+  let dot = 0;
+  let cross = 0;
+  let norm = 0;
+  for (let i = 0; i < n; i++) {
+    const px = A[i][0] - ax;
+    const py = A[i][1] - ay;
+    const qx = B[i][0] - bx;
+    const qy = B[i][1] - by;
+    dot += px * qx + py * qy;
+    cross += px * qy - py * qx;
+    norm += px * px + py * py;
+  }
+  const co = norm > 1e-12 ? dot / norm : 1;
+  const si = norm > 1e-12 ? cross / norm : 0;
+  return (x, y) => [bx + co * (x - ax) - si * (y - ay), by + si * (x - ax) + co * (y - ay)];
+}
 
 // Sem modelo radial (faltou tempo, ou rádio ouvido poucas vezes): centro dos pontos onde chegou mais forte.
 function apFromStrongest(P, k, pos) {
@@ -1101,7 +1165,10 @@ function apFromStrongest(P, k, pos) {
     x += wt * pos[t.i][0];
     yy += wt * pos[t.i][1];
   }
-  return { x: x / w, y: yy / w, z: floorNumber(P.scans[top[0].i]) * FLOOR_HEIGHT + 1, p0: Math.min(-20, top[0].r + 5), n: SLOPE_PRIOR, conf: seen.length >= 3 ? 0.1 : 0.03 };
+  // Confiança: alta só para quem foi ouvido muitas vezes e bem de perto.
+  const near = Math.max(0, Math.min(1, (top[0].r + 70) / 25));
+  const conf = seen.length >= 3 ? 0.1 + 0.6 * near * Math.min(1, seen.length / 20) : 0.03;
+  return { x: x / w, y: yy / w, z: floorNumber(P.scans[top[0].i]) * FLOOR_HEIGHT + 1, p0: Math.min(-20, top[0].r + 5), n: SLOPE_PRIOR, conf };
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,8 +1178,9 @@ function apFromStrongest(P, k, pos) {
 function solveInner(survey, options) {
   const t0 = now();
   const budget = Number.isFinite(options.budgetMs) && options.budgetMs > 0 ? options.budgetMs : 4000;
-  // Um quarto do orçamento: sobra folga para um celular lento e para o que vem depois (montar o mapa).
-  const alive = () => now() - t0 < 0.25 * budget;
+  // As etapas iterativas param aos 60% do orçamento: o que falta depois (montar a saída) é rápido,
+  // e quem estoura o tempo perde tudo. Sem tempo, fica o resultado da etapa anterior.
+  const alive = () => now() - t0 < 0.6 * budget;
   const tune = { ...TUNE, ...(options.tune || {}) };
   const progress = (fraction, label) => {
     if (typeof options.onProgress !== 'function') return;
@@ -1134,6 +1202,8 @@ function solveInner(survey, options) {
   let cov = lin.cov;
   const informative = lin.use.length > 0 && N > 1;
   progress(0.4, 'campos planos');
+  // Retrato da solução plana: o campo curvo parte dela (ver adiante).
+  const flat = { X: lin.X.map((p) => [p[0], p[1]]), cov: lin.cov.map((c0) => [c0[0], c0[1], c0[2]]) };
   let rad = null;
   if (informative && N >= 6 && tune.radIters > 0) {
     rad = emRadial(P, lin, tune, alive);
@@ -1142,7 +1212,7 @@ function solveInner(survey, options) {
   progress(0.6, 'roteadores');
   let fieldUsed = false;
   if (informative && N >= 12 && tune.fieldIters > 0 && alive()) {
-    const fs = fieldStage(P, lin, tune, alive);
+    const fs = fieldStage(P, tune.fieldFromFlat ? { ...lin, X: flat.X, cov: flat.cov } : lin, tune, alive);
     // Só fica se os campos curvos explicam as leituras bem melhor (é o caso de muitos roteadores perto).
     if (fs.complete && fs.cvLast < tune.fieldGate * fs.cvFirst) {
       X = fs.X;
@@ -1221,7 +1291,10 @@ function solveInner(survey, options) {
   // --- roteadores (no mesmo referencial das posições, antes da escala e da rotação finais) ---
   const apList = []; // {ids, x, y, z, p0, n, conf}
   const placed = new Set();
-  if (rad && tune.apMode !== 1) {
+  // O modelo radial vive no referencial de lin.X; se as posições finais vieram dos campos curvos,
+  // leva os roteadores para lá pela melhor semelhança (rotação + escala + translação) entre os dois.
+  const toFinal = X === lin.X ? (x, y) => [x, y] : similarity(lin.X, X);
+  if (rad) {
     // Raio do mapa, para a confiança: roteador longe do que foi percorrido é só uma direção.
     let cx = 0;
     let cy = 0;
@@ -1238,15 +1311,16 @@ function solveInner(survey, options) {
         let heard = 0;
         for (const r of lin.rows[k]) if (!r.imp) heard++;
         const c0 = Math.min(1, heard / Math.max(8, 0.5 * N)) / (1 + Math.max(0, away - 1.5));
-        if (tune.apMode === 2) {
-          let peak = -Infinity;
-          for (const r of lin.rows[k]) if (!r.imp && r.v > peak) peak = r.v;
-          if (peak >= (tune.apPeak ?? -50)) continue;
-        }
+        // Roteador por onde o usuário passou perto: o lugar onde ele chegou mais forte é melhor
+        // pista do que o ajuste radial (paredes enganam a curva); fica para o laço seguinte.
+        let peak = -Infinity;
+        for (const r of lin.rows[k]) if (!r.imp && r.v > peak) peak = r.v;
+        if (peak >= tune.apPeak) continue;
+        const [ax, ay] = toFinal(dv.x, dv.y);
         apList.push({
           ids: P.radios[k].bssids,
-          x: dv.x,
-          y: dv.y,
+          x: ax,
+          y: ay,
           z: lin.floors[dv.floor] * FLOOR_HEIGHT + 1,
           p0: rad.level[k][dv.floor],
           n: rad.slope[k],
@@ -1279,6 +1353,7 @@ function solveInner(survey, options) {
     sxy += dx * dy;
     syy += dy * dy;
   }
+  if ((sxx + syy) / n < 0.01 && !known.length) scaleConf = Math.min(scaleConf, 0.05); // mapa sem tamanho: nada foi medido
   const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
   const co = Math.cos(ang) * gain;
   const si = Math.sin(ang) * gain;

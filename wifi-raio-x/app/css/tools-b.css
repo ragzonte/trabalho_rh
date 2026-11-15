@@ -1,0 +1,443 @@
+/* WiFi Raio-X — ferramentas de rede: latência (ping), dispositivos na rede e teste de velocidade.
+ *
+ * Carregada sob demanda por app/js/ui/tools/ping.js, dispositivos.js e velocidade.js (um <link>
+ * só, com id "wrx-tools-b-css"). Usa apenas os tokens e as peças de css/app.css; tudo o que é
+ * daqui começa com "tb-".
+ *
+ *   1. Comum (notas, legendas, cabeçalho de medição, progresso)
+ *   2. Latência
+ *   3. Dispositivos
+ *   4. Velocidade
+ */
+
+/* ------------------------------------------------------------------------ */
+/* 1. Comum                                                                  */
+/* ------------------------------------------------------------------------ */
+
+.tb-note {
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.tb-note__addr {
+  display: block;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tb-note--warn {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  color: var(--warning);
+}
+
+.tb-note--warn > svg {
+  margin-top: 2px;
+}
+
+.tb-caption {
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+/* controle travado enquanto uma medição roda */
+.tb-locked {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* cabeçalho de uma medição: o que está sendo medido à esquerda, o estado à direita */
+.tb-run {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px var(--sp-3);
+  min-height: 24px;
+}
+
+/* em telas estreitas o estado desce para a linha de baixo em vez de cortar o nome do destino */
+.tb-run__title {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.tb-run__state {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.tb-run__state .spinner {
+  width: 16px;
+  height: 16px;
+}
+
+/* estado inicial dentro de um cartão: ícone + uma frase */
+.tb-idle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) 0;
+}
+
+.tb-idle__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.tb-idle__text {
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.tb-idle__text strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* linha marcada numa lista (o item que está na tela) */
+.tb .row[aria-current='true']::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+.tb .row:disabled {
+  opacity: 0.55;
+}
+
+.tb .chip:disabled {
+  opacity: 0.45;
+}
+
+
+/* ------------------------------------------------------------------------ */
+/* 2. Latência                                                               */
+/* ------------------------------------------------------------------------ */
+
+.tb-setup > * + * {
+  margin-top: var(--sp-3);
+}
+
+.tb-duration {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tb-chartwrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.tb-chart {
+  position: relative;
+  height: 172px;
+  /* o gráfico usa todo o miolo do cartão; arrastar na vertical continua rolando a tela */
+  touch-action: pan-y;
+}
+
+.tb-chart__canvas {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r-sm);
+  cursor: crosshair;
+}
+
+.tb-chart__canvas:focus-visible {
+  outline-offset: 4px;
+}
+
+.tb-readout {
+  min-height: 20px;
+  font-size: var(--fs-sm);
+  line-height: 20px;
+}
+
+.tb-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px var(--sp-4);
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.tb-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tb-legend__bar {
+  width: 6px;
+  height: 12px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+}
+
+.tb-legend__x {
+  font-style: normal;
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 12px;
+  color: var(--critical);
+}
+
+.tb-legend__line {
+  width: 14px;
+  height: 0;
+  border-top: 1.5px solid var(--muted);
+}
+
+/* ------------------------------------------------------------------------ */
+/* 3. Dispositivos                                                           */
+/* ------------------------------------------------------------------------ */
+
+.tb-sum > * + * {
+  margin-top: 6px;
+}
+
+.tb-sum__top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.tb-sum__count {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.tb-sum__num {
+  font-size: 44px;
+  font-weight: 600;
+  line-height: 44px;
+  letter-spacing: -0.02em;
+}
+
+.tb-sum__label {
+  font-size: var(--fs-md);
+  line-height: 22px;
+  /* o nome da rede corta com reticências sem empurrar o resto */
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  white-space: pre;
+  min-width: 0;
+}
+
+.tb-sum__label > .ssid {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.tb-sum__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: var(--sp-3);
+}
+
+.tb-dev__noname {
+  color: var(--muted);
+  font-style: italic;
+  font-weight: 400;
+}
+
+.tb-dev .row__trail {
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tb-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.tb-facts > * + * {
+  margin-top: 0;
+}
+
+.tb-fact {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.tb-fact strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tb-fact__icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------------ */
+/* 4. Velocidade                                                             */
+/* ------------------------------------------------------------------------ */
+
+.tb-intro > * + *,
+.tb-hero > * + * {
+  margin-top: var(--sp-4);
+}
+
+.tb-intro__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.tb-intro__head .card__text {
+  margin-top: 2px;
+}
+
+/* o mostrador (ui/charts/gauge.js) é montado aqui dentro; a altura mínima evita o pulo ao criar */
+.tb-gauge {
+  min-height: 150px;
+}
+
+.tb-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+
+/* dentro do cartão os números ficam um degrau acima da superfície, sem sombra */
+.tb-tile {
+  background: var(--surface-2);
+  box-shadow: none;
+  transition:
+    border-color var(--dur) var(--ease),
+    background-color var(--dur) var(--ease);
+}
+
+.tb-tile--active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+/* bolinha "medindo agora" no número da fase em andamento */
+.tb-tile__live {
+  width: 8px;
+  height: 8px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: tb-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes tb-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.tb-hero .stat__label > svg {
+  color: var(--accent-text);
+}
+
+.tb-estimate {
+  color: var(--muted);
+}
+
+.tb-foot {
+  padding: 0 4px;
+  font-size: var(--fs-xs);
+  line-height: 18px;
+  color: var(--muted);
+}
+
+.tb-link {
+  display: inline;
+  padding: 0;
+  color: var(--accent-text);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  /* alvo de toque maior que a linha de texto */
+  position: relative;
+}
+
+.tb-link::after {
+  content: '';
+  position: absolute;
+  inset: -14px -6px;
+}
+
+.tb-rec {
+  gap: var(--sp-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.tb-rec__v {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.tb-rec__v > svg {
+  color: var(--muted);
+}
+
+/* Segunda linha de uma lista feita de itens separados por "·", numa linha só: os itens ficam
+   inteiros e só o que vem de fora (nome de rede, fabricante) encolhe com reticências. */
+.tb-sub {
+  flex-wrap: nowrap;
+  gap: 0;
+  white-space: nowrap;
+}
+
+.tb-sub > * {
+  flex: none;
+}
+
+.tb-sub > * + *::before {
+  content: '·';
+  margin: 0 6px;
+  color: var(--faint);
+}
+
+.tb-sub > .ssid,
+.tb-sub > .tb-sub__flex {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

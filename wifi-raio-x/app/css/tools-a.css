@@ -1,0 +1,799 @@
+/* WiFi Raio-X — ferramentas: medidor de sinal (mtr-), detalhes da conexão (cnx-) e exportar (exp-).
+ *
+ * Carregada sob demanda por js/ui/tools/conexao.js (useToolsCss). Só usa os tokens de app.css;
+ * nenhuma cor solta. Os textos do mostrador semicircular vão junto com js/ui/charts/gauge.js.
+ */
+
+/* ------------------------------------------------------------------------ */
+/* Medidor de sinal                                                          */
+/* ------------------------------------------------------------------------ */
+
+.mtr-target__row {
+  min-height: 64px;
+}
+
+/* recado sob a linha da rede: como ela é lida (ao vivo ou a cada busca) */
+.mtr-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0 var(--sp-4) var(--sp-3);
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.mtr-note > svg {
+  flex: none;
+  color: var(--accent-text);
+}
+
+.mtr-note--warn > svg {
+  color: var(--warning);
+}
+
+.mtr-hunt > .mtr-note {
+  padding: 0;
+}
+
+.mtr-pickme {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: var(--sp-5) var(--sp-4);
+}
+
+.mtr-pickme__icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* o "instrumento": mostrador, qualidade/distância e os números da medição */
+.mtr-instrument {
+  padding-top: var(--sp-5);
+}
+
+.mtr-gauge {
+  min-height: 150px;
+}
+
+.mtr-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px var(--sp-6);
+  min-height: 42px;
+  text-align: center;
+}
+
+.mtr-meta__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  min-width: 96px;
+}
+
+.mtr-meta__label {
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.mtr-meta__item > strong {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 26px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mtr-meta__empty {
+  align-self: center;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.mtr-stats-host {
+  border-top: 1px solid var(--line);
+  padding-top: var(--sp-2);
+}
+
+.mtr-stats__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-height: 36px;
+}
+
+.mtr-stats__head .btn {
+  margin-right: -8px;
+}
+
+.mtr-stats__title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.mtr-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: var(--sp-1);
+}
+
+.mtr-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+  padding: 2px 4px;
+  text-align: center;
+}
+
+.mtr-stat + .mtr-stat {
+  border-left: 1px solid var(--line);
+}
+
+.mtr-stat__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+/* a mesma marca de pico desenhada no mostrador */
+.mtr-peakmark {
+  display: inline-block;
+  width: 3px;
+  height: 11px;
+  border-radius: 2px;
+  background: var(--text);
+}
+
+.mtr-stat__value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 28px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mtr-stat__unit {
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.mtr-stat__extra {
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+/* gráfico dos últimos segundos */
+.mtr-chartcard {
+  padding-bottom: var(--sp-3);
+}
+
+.mtr-chart__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.mtr-chart__title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.mtr-chart__window {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.mtr-chart {
+  min-height: 150px;
+  margin-inline: -4px;
+}
+
+.mtr-chart__canvas {
+  display: block;
+  width: 100%;
+}
+
+/* caça-roteador */
+.mtr-hunt {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-1) var(--sp-4) var(--sp-4);
+}
+
+.mtr-trend {
+  --trend: var(--muted);
+  --trend-soft: var(--surface-2);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.mtr-trend[data-trend='closer'] {
+  --trend: var(--good);
+  --trend-soft: var(--good-soft);
+  border-color: var(--good-line);
+}
+
+.mtr-trend[data-trend='farther'] {
+  --trend: var(--warning);
+  --trend-soft: var(--warning-soft);
+  border-color: var(--warning-line);
+}
+
+.mtr-trend__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--trend-soft);
+  color: var(--trend);
+}
+
+.mtr-trend[data-trend='steady'] .mtr-trend__icon,
+.mtr-trend[data-trend='unknown'] .mtr-trend__icon {
+  background: var(--surface-3);
+}
+
+.mtr-trend__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mtr-trend__title {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 26px;
+  color: var(--text);
+}
+
+.mtr-trend[data-trend='closer'] .mtr-trend__title,
+.mtr-trend[data-trend='farther'] .mtr-trend__title {
+  color: var(--trend);
+}
+
+.mtr-trend__text {
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+}
+
+/* "temperatura": cinco degraus entre frio e quente (a palavra embaixo diz o mesmo que a barra) */
+.mtr-heat__scale {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.mtr-heat__bar {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+
+.mtr-heat__bar > i {
+  height: 10px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.mtr-heat__bar > i.on {
+  background: var(--accent-fill);
+  box-shadow: none;
+}
+
+.mtr-heat__text {
+  margin-top: 6px;
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.mtr-heat__text > strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* distância por Wi-Fi RTT */
+.mtr-rtt__result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--sp-2);
+}
+
+.mtr-rtt__value {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  line-height: 34px;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.mtr-rtt__err {
+  font-size: var(--fs-md);
+  font-weight: 500;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.mtr-rtt__when {
+  flex-basis: 100%;
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.mtr-rtt__busy {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: var(--tap);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.mtr-rtt__busy > .btn {
+  margin-left: auto;
+}
+
+/* painel "qual rede medir?" */
+.mtr-pick {
+  position: relative;
+}
+
+.mtr-pick + .mtr-pick::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: var(--sp-4);
+  right: var(--sp-4);
+  border-top: 1px solid var(--line);
+}
+
+.mtr-pick--on {
+  background: var(--accent-soft);
+}
+
+.mtr-pick--on::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+.mtr-pick__hint {
+  padding: 0 4px;
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Detalhes da conexão                                                       */
+/* ------------------------------------------------------------------------ */
+
+.cnx-hero__top {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.cnx-hero__bars {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.cnx-hero__id {
+  flex: 1;
+  min-width: 0;
+}
+
+.cnx-hero__name {
+  display: flex;
+  min-width: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 26px;
+}
+
+.cnx-hero__sub {
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cnx-hero__signal {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.cnx-hero__dbm {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  flex: none;
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 44px;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.cnx-hero__unit {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+
+.cnx-hero__word {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  line-height: 22px;
+}
+
+.cnx-hero__hint {
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  line-height: 20px;
+  color: var(--muted);
+}
+
+/* pares "rótulo: valor"; os que podem ser copiados são botões da largura toda */
+.cnx-kv {
+  display: flex;
+  flex-direction: column;
+}
+
+.cnx-kv__row {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  width: 100%;
+  min-height: 48px;
+  padding: 10px var(--sp-4);
+  text-align: left;
+  color: inherit;
+  background: none;
+}
+
+.cnx-kv__row + .cnx-kv__row::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: var(--sp-4);
+  right: var(--sp-4);
+  border-top: 1px solid var(--line);
+}
+
+.cnx-kv__row--tap {
+  cursor: pointer;
+  transition: background-color 120ms var(--ease);
+}
+
+.cnx-kv__row--tap:active {
+  background: var(--surface-2);
+}
+
+.cnx-kv__row--tap:focus-visible {
+  outline-offset: -3px;
+  border-radius: var(--r-lg);
+}
+
+.cnx-kv__main {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.cnx-kv__label {
+  flex: none;
+  max-width: 52%;
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.cnx-kv__value {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 20px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* nome de rede: texto hostil, numa linha só e isolado do resto */
+.cnx-kv__value--ssid {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  unicode-bidi: isolate;
+}
+
+.cnx-kv__value.muted {
+  font-weight: 400;
+}
+
+.cnx-kv__copy {
+  flex: none;
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  color: var(--muted);
+}
+
+.cnx-kv__hint {
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+/* velocidade do enlace: agora x o máximo desta conexão */
+.cnx-speed__item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cnx-speed__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.cnx-speed__label {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+
+.cnx-speed__hint {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.cnx-speed__value {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 26px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cnx-speed__max {
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.cnx-speed__usable {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: 10px var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.cnx-speed__usable > svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--accent-text);
+}
+
+.cnx-speed__usable strong {
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.cnx-actions {
+  margin-top: var(--sp-1);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Exportar                                                                  */
+/* ------------------------------------------------------------------------ */
+
+.exp-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.exp-summary__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.exp-summary__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.exp-summary__title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  line-height: 22px;
+}
+
+.exp-summary__sub {
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.exp-summary__tag {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.exp-format__text {
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.exp-preview {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.exp-preview__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 44px;
+  padding: 0 0 0 var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.exp-preview__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.exp-preview__size {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.exp-preview__text {
+  margin: 0;
+  max-height: 264px;
+  padding: var(--sp-3);
+  overflow: auto;
+  overscroll-behavior: contain;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 18px;
+  color: var(--text);
+  white-space: pre;
+  tab-size: 2;
+  unicode-bidi: plaintext;
+}
+
+/* o relatório é texto corrido: letra comum e quebra de linha em vez de rolar para o lado */
+.exp-preview__text--wrap {
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* dentro do painel "ver tudo" quem rola é o painel */
+.exp-preview__text--full {
+  max-height: none;
+  padding: 0;
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+.exp-preview__more {
+  padding: 6px var(--sp-3) 8px;
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.exp-actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.exp-actions > .btn {
+  flex: 1;
+  min-width: 0;
+}
+
+.exp-options {
+  margin-top: 0;
+}

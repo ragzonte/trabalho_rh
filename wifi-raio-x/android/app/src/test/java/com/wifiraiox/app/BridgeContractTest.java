@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * O contrato de app/js/bridge.js, método por método, em cada versão do Android: toda chamada
@@ -34,7 +35,7 @@ public class BridgeContractTest extends AllSdks {
 
     private static final String[] SYNC = {"info", "status", "lastScan", "connection", "watchRssi", "unwatchRssi",
         "openSettings", "keepAwake", "vibrate", "setBars", "share", "saveFile", "cancel"};
-    private static final String[] ASYNC = {"requestPermission", "scan", "rtt", "ping", "lanScan"};
+    private static final String[] ASYNC = {"requestPermission", "scan", "rtt", "ping", "lanScan", "speedTest"};
 
     private Activity activity;
     private Fixtures.Page page;
@@ -72,7 +73,10 @@ public class BridgeContractTest extends AllSdks {
                 return new java.util.HashMap<>();
             }
         }, 32);
-        bridge = Fixtures.bridge(activity, page, pinger, lan);
+        SpeedTester speed = new SpeedTester("http://127.0.0.1:9", network -> url -> {
+            throw new java.net.UnknownHostException("sem internet nos testes");
+        }, null);
+        bridge = Fixtures.bridge(activity, page, pinger, lan, speed);
     }
 
     @After
@@ -279,6 +283,12 @@ public class BridgeContractTest extends AllSdks {
         JSONObject lan = page.awaitResolved(5, 10_000);
         assertEquals(new HashSet<>(Arrays.asList("devices")), Fixtures.keys(lan));
         assertEquals("fora do Wi-Fi não há o que varrer", 0, lan.getJSONArray("devices").length());
+
+        bridge.callAsync(6, "speedTest", "{\"mode\":\"light\"}");
+        JSONObject speed = page.awaitResolved(6, 10_000);
+        assertEquals(new HashSet<>(Arrays.asList("ok", "error", "bytesDown", "bytesUp")), Fixtures.keys(speed));
+        assertEquals(false, speed.get("ok"));
+        assertEquals("offline", speed.get("error"));
         assertEquals(0, bridge.pendingCalls());
     }
 
@@ -413,9 +423,13 @@ public class BridgeContractTest extends AllSdks {
 
     @Test
     public void aNewPageNeverReceivesAnswersMeantForTheOldOne() throws Exception {
-        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        // dois pings que ficam presos na resolução do nome até o teste soltar cada um
+        final java.util.concurrent.CountDownLatch releaseOld = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.CountDownLatch releaseNew = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.CountDownLatch bothWaiting = new java.util.concurrent.CountDownLatch(2);
         Pinger slow = new Pinger("/nao/existe", null, host -> {
-            if (host.startsWith("lento")) release.await();
+            bothWaiting.countDown();
+            (host.startsWith("antiga") ? releaseOld : releaseNew).await();
             return InetAddress.getByAddress(new byte[] {10, 0, 0, 1});
         }, new Pinger.Prober[] {(a, t) -> 5.0}, watchdog);
         Fixtures.Page p = new Fixtures.Page();
@@ -423,23 +437,45 @@ public class BridgeContractTest extends AllSdks {
         b.onResume();
         b.call("watchRssi", "{}");
 
-        b.callAsync(1, "ping", "{\"host\":\"lento.exemplo\",\"count\":1}"); // página antiga, id 1
+        b.callAsync(1, "ping", "{\"host\":\"antiga.exemplo\",\"count\":1}"); // página antiga, id 1
         assertEquals(1, b.pendingCalls());
-        b.onNewPage();                                                          // recarga
+        b.onNewPage();                                                           // recarga
         assertEquals(0, b.pendingCalls());
+        b.callAsync(1, "ping", "{\"host\":\"nova.exemplo\",\"count\":1}");   // a página nova reutiliza o id 1
+        assertTrue(bothWaiting.await(10, TimeUnit.SECONDS));
 
-        b.callAsync(1, "ping", "{\"host\":\"rapido.exemplo\",\"count\":1}"); // página nova reutiliza o id 1
-        JSONObject r = p.awaitResolved(1, 10_000);
-        assertEquals("rapido.exemplo", r.get("host"));
-        release.countDown();
-        Thread.sleep(200);
+        // o trabalho da página antiga termina primeiro, com a chamada nova ainda esperando
+        releaseOld.countDown();
+        Thread.sleep(300);
         Fixtures.idle();
-        assertEquals("a resposta antiga foi descartada (resolved() acusaria duas)", "rapido.exemplo", p.resolved(1).get("host"));
+        assertNull("a resposta antiga não pode cair na chamada nova", p.resolved(1));
+        assertEquals(1, b.pendingCalls());
+
+        releaseNew.countDown();
+        assertEquals("nova.exemplo", p.awaitResolved(1, 10_000).get("host"));
 
         // o relógio de sinal da página antiga também parou
         p.clear();
-        org.robolectric.shadows.ShadowLooper.idleMainLooper(5, java.util.concurrent.TimeUnit.SECONDS);
+        org.robolectric.shadows.ShadowLooper.idleMainLooper(5, TimeUnit.SECONDS);
         assertTrue(p.events("rssi").isEmpty());
+        b.onDestroy();
+    }
+
+    @Test
+    public void aReusedIdIsOnlyAnsweredByItsLatestCall() throws Exception {
+        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        Pinger stuck = new Pinger("/nao/existe", null, host -> {
+            release.await();
+            return InetAddress.getByAddress(new byte[] {10, 0, 0, 1});
+        }, new Pinger.Prober[] {(a, t) -> 5.0}, watchdog);
+        Fixtures.Page p = new Fixtures.Page();
+        Bridge b = Fixtures.bridge(Fixtures.activity(), p, stuck, null);
+        b.callAsync(7, "ping", "{\"host\":\"primeira.exemplo\",\"count\":1}");
+        b.callAsync(7, "scan", "{}"); // a página (por engano) repetiu o id
+        assertTrue(p.resolved(7).has("accepted"));
+        release.countDown();
+        Thread.sleep(300);
+        assertTrue("uma resposta só, a da chamada mais recente", p.resolved(7).has("accepted"));
         b.onDestroy();
     }
 

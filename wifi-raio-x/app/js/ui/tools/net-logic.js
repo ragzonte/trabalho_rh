@@ -7,7 +7,7 @@
 // Latência          pingStats(respostas) · pingVerdict(resumo, {target}) · whereIsTheDelay(roteador, internet)
 //                   niceAxis(máximo) (escala do gráfico)
 // Dispositivos      DEVICE_TYPES · guessDeviceType({host, vendor, self, gateway}) · deviceName(host)
-//                   ipToNumber · sortDevices · mergeDevice · summarizeDevices
+//                   DEVICE_SHORT · ipToNumber · sortDevices · mergeDevice · summarizeDevices
 // Velocidade        speedVerdict · wifiVsInternet (o gargalo é o Wi-Fi ou o plano?) · gaugeMax
 //                   estimateTestBytes · formatBytes · serverCity · sanitizeSpeedHistory · addSpeedResult
 //
@@ -258,7 +258,8 @@ export function pingVerdict(stats, { target = 'internet' } = {}) {
   const lim = local ? PING_LIMITS.gateway : PING_LIMITS.internet;
   const within = ([avgMax, jitterMax]) => s.avg < avgMax && jitter < jitterMax;
 
-  let level = within(lim.great) ? 'great' : within(lim.good) ? 'good' : within(lim.fair) ? 'fair' : 'poor';
+  const byTime = within(lim.great) ? 'great' : within(lim.good) ? 'good' : within(lim.fair) ? 'fair' : 'poor';
+  let level = byTime;
   // perda pesa mais que o tempo: uma chamada aguenta atraso, não aguenta buraco
   if (lost >= 2 && lossPct >= 10) level = 'poor';
   else if (lost >= 1 && lossPct >= 3 && (level === 'great' || level === 'good')) level = 'fair';
@@ -269,6 +270,10 @@ export function pingVerdict(stats, { target = 'internet' } = {}) {
   numbers.push(lost === 0 ? 'nenhuma perda' : `${lost === 1 ? '1 resposta perdida' : `${lost} respostas perdidas`} em ${sent} (${num(lossPct, lossPct < 10 && lossPct % 1 ? 1 : 0)}%)`);
   const facts = `${numbers.join(', ')}.`;
   const lossIsWorst = lost >= 2 && lossPct >= 10;
+  // o tempo estava bom e foi a perda que derrubou o degrau: o texto fala da perda, não do tempo
+  const byLoss = level !== byTime;
+  const lostWord = lost === 1 ? 'resposta' : 'respostas';
+  const isolated = lost === 1 ? 'Uma perda isolada pode ser acaso: meça de novo.' : 'Poucas perdas podem ser acaso: meça de novo.';
 
   if (local) {
     const who = target === 'gateway' ? 'O roteador' : 'O aparelho';
@@ -276,8 +281,21 @@ export function pingVerdict(stats, { target = 'internet' } = {}) {
       case 'great':
         return { level, tone: 'good', title: target === 'gateway' ? 'Wi-Fi respondendo rápido' : 'Aparelho respondendo rápido', text: `${facts} ${who} responde na hora: o caminho pelo Wi-Fi está ótimo.` };
       case 'good':
-        return { level, tone: 'good', title: 'Wi-Fi em boa forma', text: `${facts} ${who} responde bem; dá para usar sem preocupação.` };
+        return {
+          level,
+          tone: 'good',
+          title: 'Wi-Fi em boa forma',
+          text: byLoss ? `${facts} ${who} responde rápido; uma perda isolada em tantas medidas não preocupa.` : `${facts} ${who} responde bem; dá para usar sem preocupação.`,
+        };
       case 'fair':
+        if (byLoss) {
+          return {
+            level,
+            tone: 'warning',
+            title: `Wi-Fi rápido, mas perdeu ${lostWord}`,
+            text: `${facts} O tempo está bom. ${isolated} Se repetir, é sinal de interferência ou de sinal fraco.`,
+          };
+        }
         return {
           level,
           tone: 'warning',
@@ -289,7 +307,7 @@ export function pingVerdict(stats, { target = 'internet' } = {}) {
           level,
           tone: 'critical',
           title: lossIsWorst ? 'Wi-Fi perdendo pacotes' : 'Wi-Fi lento para responder',
-          text: `${facts} O atraso já acontece entre o celular e o roteador: chegue mais perto dele ou veja a aba Canais para fugir de interferência.`,
+          text: `${facts} O problema já aparece entre o celular e o roteador: chegue mais perto dele ou veja a aba Canais para fugir de interferência.`,
         };
     }
   }
@@ -297,8 +315,21 @@ export function pingVerdict(stats, { target = 'internet' } = {}) {
     case 'great':
       return { level, tone: 'good', title: 'Ótimo para chamadas e jogos', text: `${facts} Resposta rápida e estável.` };
     case 'good':
-      return { level, tone: 'good', title: 'Bom para chamadas e vídeos', text: `${facts} Jogos de reação rápida podem sentir um pouco o atraso.` };
+      return {
+        level,
+        tone: 'good',
+        title: 'Bom para chamadas e vídeos',
+        text: byLoss ? `${facts} Resposta rápida; uma perda isolada em tantas medidas não preocupa.` : `${facts} Jogos de reação rápida podem sentir um pouco o atraso.`,
+      };
     case 'fair':
+      if (byLoss) {
+        return {
+          level,
+          tone: 'warning',
+          title: `Resposta rápida, mas perdeu ${lostWord}`,
+          text: `${facts} ${isolated} Se repetir, chamadas de vídeo vão engasgar de vez em quando.`,
+        };
+      }
       return { level, tone: 'warning', title: 'Dá para navegar, mas chamadas podem falhar', text: `${facts} Sites e vídeos funcionam; chamadas de vídeo e jogos podem engasgar de vez em quando.` };
     default:
       return {
@@ -401,6 +432,23 @@ export const DEVICE_TYPES = Object.freeze({
   unknown: 'Aparelho',
 });
 
+/** Os mesmos tipos numa palavra ou duas, para a linha da lista (onde o espaço é curto). */
+export const DEVICE_SHORT = Object.freeze({
+  router: 'Roteador',
+  network: 'Ponto de rede',
+  phone: 'Celular',
+  tablet: 'Tablet',
+  computer: 'Computador',
+  tv: 'TV',
+  printer: 'Impressora',
+  speaker: 'Caixa de som',
+  console: 'Videogame',
+  camera: 'Câmera',
+  iot: 'Automação',
+  server: 'Servidor',
+  unknown: 'Aparelho',
+});
+
 // Sem acentos e em minúsculas, para as regras não dependerem de como o nome foi escrito.
 const fold = (text) =>
   String(text)
@@ -441,11 +489,12 @@ const VENDOR_RULES = [
  * Que tipo de aparelho é este? Um palpite pelo nome que ele informa e, quando o Android deixa
  * ver o MAC, pelo fabricante. `source` diz de onde saiu o palpite (null = não deu para saber).
  * @param {{host?:string|null, vendor?:string|null, self?:boolean, gateway?:boolean}} device
- * @returns {{type:keyof typeof DEVICE_TYPES, label:string, source:'flag'|'name'|'vendor'|null}}
+ * @returns {{type:keyof typeof DEVICE_TYPES, label:string, short:string, source:'flag'|'name'|'vendor'|null}}
+ *          label = nome por extenso ("TV ou streaming"); short = versão curta ("TV")
  */
 export function guessDeviceType(device) {
   const d = device || {};
-  const make = (type, source) => ({ type, label: DEVICE_TYPES[type], source });
+  const make = (type, source) => ({ type, label: DEVICE_TYPES[type], short: DEVICE_SHORT[type], source });
   if (d.gateway) return make('router', 'flag');
   if (d.self) return make('phone', 'flag');
   if (typeof d.host === 'string' && d.host.trim()) {

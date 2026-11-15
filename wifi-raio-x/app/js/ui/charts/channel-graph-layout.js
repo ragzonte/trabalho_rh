@@ -265,11 +265,13 @@ export function placeLabels(items, bounds, { gap = 3, lift = 4, levels = 3, max 
     if (placed.length >= max) break;
     const x = clamp(it.cx - it.w / 2, bounds.left, bounds.right - it.w);
     let spot = null;
-    for (let level = 0; level < levels && !spot; level++) {
-      const y = it.top - lift - it.h - level * (it.h + gap);
-      if (y < bounds.top) break;
+    let y = it.top - lift - it.h;
+    for (let level = 0; level < levels && !spot && y >= bounds.top; level++) {
       const box = { x, y, w: it.w, h: it.h };
-      if (!placed.some((p) => overlaps(box, p, gap))) spot = { ...box, level, inside: false };
+      const blockers = placed.filter((p) => overlaps(box, p, gap));
+      if (!blockers.length) spot = { ...box, level, inside: false };
+      // ocupado: sobe até encostar (com a folga) em cima de quem está no caminho
+      else y = Math.min(...blockers.map((p) => p.y)) - gap - it.h;
     }
     if (!spot) {
       // por dentro da forma, logo abaixo do pico (só faz sentido se ainda sobra altura até o chão)

@@ -12,7 +12,10 @@
 //   channelsText(canais)               -> "canal 6" · "canais 6 e 44" · "canais 1, 6, 11 +2"
 //   bandsText(faixas)                  -> "2,4 e 5 GHz"
 //   countText(linha)                   -> "2 sinais" · "3 sinais em 2 roteadores"
+//   seriesLabels(aps)                  -> Map BSSID -> rótulo curto sem ambiguidade (gráficos)
 //   foldText(texto)                    -> minúsculas e sem acentos (para comparar)
+//   cleanName(texto)                   -> nome de rede sem caracteres de controle
+//   apFacts(ap, extra) · apFeatures(ap) · apDetailsText(ap, extra)   os detalhes de um BSSID (painel e "copiar tudo")
 //
 // Uma "linha" (Row) é o que a lista desenha: uma rede (nome), um roteador (aparelho físico)
 // ou um sinal (BSSID), sempre com os Ap do store por baixo.
@@ -20,6 +23,7 @@
 import { freqToChannel, bandOf } from '../core/channels.js';
 import { indoorDistance } from '../core/signal.js';
 import { standardInfo } from '../core/phy.js';
+import { fmtDbm, fmtMbps, fmtMeters, fmtPct, fmtFreq, fmtWidth, fmtBand, fmtAgo, fmtClock, NO_VALUE, THIN } from './dom.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 const isObj = (x) => x !== null && typeof x === 'object';
@@ -74,6 +78,13 @@ export function hasFilters(controls) {
 // Texto
 // ---------------------------------------------------------------------------
 
+const CONTROL_CHARS = new RegExp(`[\\u0000-\\u001f\\u007f-\\u009f${String.fromCharCode(0x2028, 0x2029)}]`, 'g');
+
+/** Nome de rede para mostrar: caracteres de controle e quebras de linha viram "·". */
+export function cleanName(text) {
+  return typeof text === 'string' ? text.replace(CONTROL_CHARS, '·') : '';
+}
+
 /** Minúsculas, sem acentos e sem espaços nas pontas: "Ação " -> "acao". */
 export function foldText(text) {
   if (typeof text !== 'string') return '';
@@ -93,7 +104,7 @@ export function bandsText(bands) {
   const list = (Array.isArray(bands) ? bands : []).filter((b) => BAND_SHORT[b]).map((b) => BAND_SHORT[b]);
   if (!list.length) return '';
   const head = list.length > 1 ? `${list.slice(0, -1).join(', ')} e ${list[list.length - 1]}` : list[0];
-  return `${head} GHz`;
+  return `${head}${THIN}GHz`;
 }
 
 /** Canais por extenso: [6] -> "canal 6"; [6, 44] -> "canais 6 e 44"; mais de três -> "canais 1, 6, 11 +2". */
@@ -103,6 +114,41 @@ export function channelsText(channels) {
   if (list.length === 1) return `canal ${list[0]}`;
   if (list.length <= 3) return `canais ${list.slice(0, -1).join(', ')} e ${list[list.length - 1]}`;
   return `canais ${list.slice(0, 3).join(', ')} +${list.length - 3}`;
+}
+
+/**
+ * Rótulo curto de cada BSSID para gráficos e listas: o nome; quando o mesmo nome aparece mais
+ * de uma vez (duas faixas, mesh), o nome com a faixa; se ainda empatar, com o canal; e, no
+ * último caso (dois nós mesh no mesmo canal), com o fim do endereço.
+ * @param {object[]} aps  Ap do store
+ * @returns {Map<string, string>}  BSSID -> rótulo
+ */
+export function seriesLabels(aps) {
+  const list = (Array.isArray(aps) ? aps : []).filter(isObj);
+  const nameOf = (ap) => (ap.hidden ? '(rede oculta)' : cleanName(ap.ssid));
+  const withBand = (ap) => `${nameOf(ap)} · ${BAND_SHORT[ap.band] ? `${BAND_SHORT[ap.band]}${THIN}GHz` : 'faixa ?'}`;
+  const withChannel = (ap) => `${withBand(ap)} · canal ${ap.channel ?? '?'}`;
+  const count = (fn) => {
+    const seen = new Map();
+    for (const ap of list) seen.set(fn(ap), (seen.get(fn(ap)) || 0) + 1);
+    return seen;
+  };
+  const byName = count(nameOf);
+  const byBand = count(withBand);
+  const byChannel = count(withChannel);
+  const out = new Map();
+  for (const ap of list) {
+    let label = nameOf(ap);
+    if (byName.get(label) > 1) {
+      label = withBand(ap);
+      if (byBand.get(label) > 1) {
+        label = withChannel(ap);
+        if (byChannel.get(label) > 1) label = `${label} · ${String(ap.bssid).slice(-5)}`;
+      }
+    }
+    out.set(ap.bssid, label);
+  }
+  return out;
 }
 
 /** Quantos sinais uma linha agrupa: "2 sinais", "3 sinais em 2 roteadores"; '' para um sinal só. */
@@ -116,8 +162,11 @@ export function countText(row) {
 // Linhas
 // ---------------------------------------------------------------------------
 
-const strength = (ap) => (isNum(ap.rssiSmooth) ? ap.rssiSmooth : isNum(ap.rssi) ? ap.rssi : -Infinity);
-const byStrength = (a, b) => strength(b) - strength(a) || (a.bssid < b.bssid ? -1 : a.bssid > b.bssid ? 1 : 0);
+// A ordem segue o número que a linha mostra (a última leitura); o sinal suavizado só desempata,
+// para duas redes com o mesmo valor não ficarem trocando de lugar a cada busca.
+const strength = (ap) => (isNum(ap.rssi) ? ap.rssi : -Infinity);
+const smooth = (ap) => (isNum(ap.rssiSmooth) ? ap.rssiSmooth : strength(ap));
+const byStrength = (a, b) => strength(b) - strength(a) || smooth(b) - smooth(a) || (a.bssid < b.bssid ? -1 : a.bssid > b.bssid ? 1 : 0);
 
 function isOpen(security) {
   return isObj(security) && security.known !== false && security.open === true;
@@ -161,6 +210,7 @@ function makeRow(kind, key, aps, extra = {}) {
     names,
     rssi: isNum(best.rssi) ? best.rssi : null,
     strength: strength(best),
+    smooth: smooth(best),
     bands,
     channels,
     channel: isNum(best.channel) ? best.channel : null,
@@ -263,11 +313,11 @@ function compareNames(a, b) {
 }
 
 const byKey = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
-const bySignal = (a, b) => b.strength - a.strength || byKey(a, b);
+const bySignal = (a, b) => b.strength - a.strength || b.smooth - a.smooth || byKey(a, b);
 
 /**
  * Cópia ordenada das linhas.
- *   'signal'   do sinal mais forte para o mais fraco (pelo sinal suavizado: a ordem não fica pulando)
+ *   'signal'   do sinal mais forte para o mais fraco (o número mostrado; empate: o sinal suavizado)
  *   'name'     ordem alfabética; redes ocultas por último
  *   'channel'  2,4 GHz antes de 5 e 6 GHz; dentro da faixa, pelo número do canal
  * @param {object[]} rows
@@ -406,9 +456,8 @@ export function connectionView(state, now = Date.now()) {
 // Detalhes de um ponto de acesso (painel de detalhes e "copiar tudo")
 // ---------------------------------------------------------------------------
 
-import { fmtDbm, fmtMbps, fmtMeters, fmtPct, fmtFreq, fmtWidth, fmtBand, fmtAgo, fmtClock, NO_VALUE } from './dom.js';
 
-const SECURITY_WORD = ['Sem proteção', 'Quebrada: qualquer um entra', 'Fraca', 'Boa', 'Forte'];
+const SECURITY_WORD = ['Sem proteção', 'Proteção quebrada', 'Proteção fraca', 'Proteção boa', 'Proteção forte'];
 
 /** Uma frase curta para o nível de segurança (0..4 de core/security.js). */
 export function securityWord(security) {
@@ -421,7 +470,7 @@ export function securityWord(security) {
 export function rangeText(occ) {
   const segments = isObj(occ) && Array.isArray(occ.segments) ? occ.segments : [];
   const parts = segments.filter((s) => isObj(s) && isNum(s.lo) && isNum(s.hi)).map((s) => `${Math.round(s.lo)}–${Math.round(s.hi)}`);
-  return parts.length ? `${parts.join(' + ')} MHz` : '';
+  return parts.length ? `${parts.join(' + ')}${THIN}MHz` : '';
 }
 
 /** Canais de 20 MHz cobertos: [36,40,44,48] -> "canais 36 a 48"; um só -> ''. */
@@ -440,7 +489,8 @@ export function antennasText(nss) {
  * Recursos anunciados pelo roteador, em palavras de gente. Só existe quando o celular entrega
  * os elementos do beacon (Android 11+); sem eles devolve [].
  * @param {object} ap
- * @returns {{id:string, label:string, on:boolean, value?:string, hint:string}[]}
+ * @returns {{id:string, label:string, on:boolean, value?:string, hint:string, tone?:'warning'|'neutral'}[]}
+ *          tone: sem ele, "ligado" é bom; 'warning'/'neutral' = ligado mas não é para comemorar
  */
 export function apFeatures(ap) {
   const ie = isObj(ap) && isObj(ap.ie) ? ap.ie : null;
@@ -465,11 +515,13 @@ export function apFeatures(ap) {
   if (ap.rttResponder) out.push({ id: 'rtt', label: 'Wi-Fi RTT (802.11mc)', on: true, hint: 'Permite medir a distância real até o roteador' });
   if (ie.passpoint) out.push({ id: 'passpoint', label: 'Passpoint', on: true, hint: 'Rede de operadora com login automático' });
   const wps = isObj(ie.wps) ? ie.wps : null;
+  // o WPS é o único "recurso" que é melhor NÃO ter: ligado, vira um ponto de atenção
   out.push({
     id: 'wps',
     label: 'WPS',
     on: !!(wps && wps.enabled),
-    value: wps && wps.enabled ? (wps.locked ? 'ligado, PIN travado' : 'ligado') : 'desligado',
+    tone: wps && wps.enabled ? (wps.locked ? 'neutral' : 'warning') : undefined,
+    value: wps && wps.enabled ? (wps.locked ? 'ligado (PIN travado)' : 'ligado') : 'desligado',
     hint: 'Pareamento por botão, sem senha. Se ninguém usa, é mais seguro desligar',
   });
   return out;
@@ -495,7 +547,7 @@ export function apFacts(ap, extra = {}) {
   };
 
   add('name', 'Rede', ap.hidden ? '(rede oculta)' : ap.ssid);
-  add('bssid', 'BSSID', ap.bssid, 'O endereço deste rádio; cada faixa do roteador tem o seu');
+  add('bssid', 'BSSID', ap.bssid, 'o endereço deste rádio');
   add('vendor', 'Fabricante', ap.vendor ? (ap.vendorGuess ? `${ap.vendor} (provável)` : ap.vendor) : null);
   if (ie && ie.apName) add('ap-name', 'Nome do ponto de acesso', ie.apName);
   if (ie && isObj(ie.wps) && (ie.wps.deviceName || ie.wps.model)) add('model', 'Modelo', ie.wps.deviceName || ie.wps.model);
@@ -508,14 +560,14 @@ export function apFacts(ap, extra = {}) {
   add('standard', 'Padrão', ap.standardLabel || ap.standard);
   add('security', 'Segurança', isObj(ap.security) ? ap.security.label : null, securityWord(ap.security));
   if (isNum(extra.estMbps) && extra.estMbps > 0) add('speed', 'Velocidade estimada aqui', fmtMbps(extra.estMbps, { approx: true }), 'Estimativa pelo sinal e pela disputa do canal');
-  if (isNum(extra.maxMbps) && extra.maxMbps > 0) add('max', 'Máximo teórico do enlace', fmtMbps(extra.maxMbps));
-  add('distance', 'Distância estimada', isNum(ap.distanceM) ? fmtMeters(ap.distanceM, { approx: true }) : null, 'Estimativa pelo sinal; paredes fazem parecer mais longe');
-  add('antennas', 'Antenas', antennasText(ap.nss), 'Fluxos de dados simultâneos');
-  add('stations', 'Dispositivos conectados', isNum(ap.stations) ? String(ap.stations) : null, 'Informado pelo roteador');
-  add('utilization', 'Ocupação do canal', isNum(ap.utilization) ? fmtPct(ap.utilization * 100) : null, 'Do tempo em que o canal está em uso, medido pelo roteador');
+  if (isNum(extra.maxMbps) && extra.maxMbps > 0) add('max', 'Máximo teórico', fmtMbps(extra.maxMbps));
+  add('distance', 'Distância estimada', isNum(ap.distanceM) ? fmtMeters(ap.distanceM, { approx: true }) : null, 'estimativa pelo sinal; paredes fazem parecer mais longe');
+  add('antennas', 'Antenas', antennasText(ap.nss), 'fluxos de dados simultâneos');
+  add('stations', 'Dispositivos conectados', isNum(ap.stations) ? String(ap.stations) : null, 'informado pelo roteador');
+  add('utilization', 'Ocupação do canal', isNum(ap.utilization) ? fmtPct(ap.utilization * 100) : null, 'do tempo com alguém transmitindo, medido pelo roteador');
   if (ie) {
     add('country', 'País', ie.country);
-    add('power', 'Potência anunciada', isNum(ie.txPowerDbm) ? `${ie.txPowerDbm} dBm` : null);
+    add('power', 'Potência anunciada', isNum(ie.txPowerDbm) ? `${ie.txPowerDbm}${THIN}dBm` : null);
     add('chipset', 'Chip do rádio (provável)', ie.chipsetHint);
   }
   add('first-seen', 'Visto pela primeira vez', isNum(ap.firstSeen) ? `${fmtClock(ap.firstSeen)} (${fmtAgo(now - ap.firstSeen)})` : null);

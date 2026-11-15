@@ -145,7 +145,7 @@ public class SpeedTest extends AllSdks {
         final JSONObject[] result = new JSONObject[1];
         final CountDownLatch downloading = new CountDownLatch(1);
         Thread runner = new Thread(() -> result[0] = t.run("full", wifi, e -> {
-            if ("download".equals(e.optString("phase"))) downloading.countDown();
+            if ("download".equals(e.optString("phase")) && e.optLong("bytes") > 0) downloading.countDown();
         }));
         runner.start();
         assertTrue(downloading.await(20, TimeUnit.SECONDS));

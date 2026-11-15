@@ -26,6 +26,8 @@ export const SPARK_DEFAULTS = Object.freeze({
   spanDb: 24,
   /** margem para o traço e o ponto final não serem cortados */
   pad: 2.5,
+  /** com menos histórico que a janela, o traço ocupa a largura toda (a janela encolhe até windowMs / 6) */
+  fit: true,
 });
 
 const r1 = (x) => Math.round(x * 10) / 10;
@@ -33,7 +35,7 @@ const r1 = (x) => Math.round(x * 10) / 10;
 /**
  * A conta do minigráfico.
  * @param {{t:number, rssi:number}[]} points  leituras em ordem de tempo (ms desde 1970)
- * @param {{now:number, width?:number, height?:number, windowMs?:number, gapMs?:number, spanDb?:number, pad?:number}} options
+ * @param {{now:number, width?:number, height?:number, windowMs?:number, gapMs?:number, spanDb?:number, pad?:number, fit?:boolean}} options
  *        now = o instante da borda direita (em geral o da última varredura)
  * @returns {{d:string, dot:{x:number, y:number}|null, count:number}}
  *          d = atributo do <path> ('' sem leituras na janela); dot = ponto final, quando a
@@ -42,7 +44,7 @@ const r1 = (x) => Math.round(x * 10) / 10;
 export function sparklineGeometry(points, options) {
   const o = { ...SPARK_DEFAULTS, ...(options || {}) };
   const now = isNum(o.now) ? o.now : Date.now();
-  const from = now - o.windowMs;
+  let from = now - o.windowMs;
   const list = [];
   let before = null; // a última leitura antes da janela: o traço entra pela borda esquerda
   for (const p of Array.isArray(points) ? points : []) {
@@ -51,6 +53,12 @@ export function sparklineGeometry(points, options) {
     else list.push(p);
   }
   if (!list.length) return { d: '', dot: null, count: 0 };
+  let windowMs = o.windowMs;
+  if (o.fit && !before) {
+    // o app acabou de abrir: em vez de um borrão espremido à direita, a janela encolhe
+    windowMs = Math.min(o.windowMs, Math.max(o.windowMs / 6, now - list[0].t));
+    from = now - windowMs;
+  }
 
   let lo = Infinity;
   let hi = -Infinity;
@@ -63,7 +71,7 @@ export function sparklineGeometry(points, options) {
   const top = mid + span / 2;
   const innerW = o.width - 2 * o.pad;
   const innerH = o.height - 2 * o.pad;
-  const xOf = (t) => o.pad + Math.min(1, Math.max(0, (t - from) / o.windowMs)) * innerW;
+  const xOf = (t) => o.pad + Math.min(1, Math.max(0, (t - from) / windowMs)) * innerW;
   const yOf = (v) => o.pad + Math.min(1, Math.max(0, (top - v) / span)) * innerH;
 
   let d = '';

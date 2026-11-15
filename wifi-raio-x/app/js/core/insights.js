@@ -65,6 +65,8 @@ const MODEST_WIDTH_MHZ = 40;
 const WIFI4_MIN_DBM = -60;
 /** WifiInfo.getRssi() quando não há medida. */
 const INVALID_RSSI = -127;
+/** Build.VERSION.SDK_INT do Android 10, o primeiro com a opção "Limitar busca por Wi-Fi". */
+const THROTTLE_SWITCH_SDK = 29;
 // WifiInfo.SECURITY_TYPE_OPEN e SECURITY_TYPE_WEP (Android 12+)
 const SECURITY_TYPE_OPEN = 0;
 const SECURITY_TYPE_WEP = 1;
@@ -351,7 +353,7 @@ function wideChannel24(f) {
     severity: 'warning',
     title: 'Canal de 40 MHz em 2,4 GHz',
     text:
-      `Seu roteador usa 40 MHz em 2,4 GHz (${channels}), mais da metade da faixa. Com ${plural(neighbours, 'rede vizinha', 'redes vizinhas')} por perto, ` +
+      `Seu roteador usa 40 MHz em 2,4 GHz (${channels}), cerca de metade da faixa inteira. Com ${plural(neighbours, 'rede vizinha', 'redes vizinhas')} por perto, ` +
       'isso aumenta a interferência para todo mundo e costuma deixar a conexão mais lenta, não mais rápida. Mude a largura do canal para 20 MHz nas configurações do roteador.',
     action: ACTION.channels,
   };
@@ -441,7 +443,7 @@ function slowLink(f) {
     title: 'Conexão mais lenta do que o sinal permite',
     text:
       `O celular e o roteador estão conversando a ${Math.round(actual)} Mb/s, mas com este sinal (${formatDbm(f.rssi)}) o normal seria perto de ${formatSpeed(expected)}. ` +
-      'Quando a taxa fica tão abaixo do que o sinal permite, quase sempre é interferência de outras redes no canal. Veja se há um canal mais livre.',
+      'Quando a taxa fica tão abaixo do que o sinal permite, a causa mais comum é interferência de outras redes no canal. Veja se há um canal mais livre.',
     action: ACTION.channels,
   };
 }
@@ -604,15 +606,15 @@ function phoneBands(f) {
 /** O Android está limitando as varreduras. */
 function scanThrottled(f) {
   if (!f.status || f.status.throttled !== true) return null;
-  return {
-    id: 'scan-throttled',
-    severity: 'info',
-    title: 'O Android está limitando as buscas',
-    text:
-      'O Android só deixa cada app procurar redes 4 vezes a cada 2 minutos; por isso a lista e o mapa demoram a atualizar. Para liberar: ' +
-      'Configurações > Sistema > Opções do desenvolvedor > Redes > desligue "Limitar busca por Wi-Fi". ' +
-      'Se as Opções do desenvolvedor não aparecem, vá em Configurações > "Sobre o dispositivo" (ou "Sobre o telefone") e toque 7 vezes em "Número da versão".',
-  };
+  const why = 'O Android só deixa cada app procurar redes 4 vezes a cada 2 minutos; por isso a lista e o mapa demoram a atualizar.';
+  // A chave que desliga o limite só existe do Android 10 (API 29) em diante
+  const sdk = f.device && isNum(f.device.sdk) ? f.device.sdk : 0;
+  const how =
+    sdk > 0 && sdk < THROTTLE_SWITCH_SDK
+      ? 'Nesta versão do Android não há como desligar esse limite (a opção só existe a partir do Android 10).'
+      : 'Para liberar: Configurações > Sistema > Opções do desenvolvedor > Redes > desligue "Limitar busca por Wi-Fi" (o caminho muda um pouco conforme a marca do celular). ' +
+        'Se as Opções do desenvolvedor não aparecem, vá em Configurações > "Sobre o dispositivo" (ou "Sobre o telefone") e toque 7 vezes em "Número da versão".';
+  return { id: 'scan-throttled', severity: 'info', title: 'O Android está limitando as buscas', text: `${why} ${how}` };
 }
 
 /** Sem conexão não há o que diagnosticar: aponta para a tela que escolhe a rede. */

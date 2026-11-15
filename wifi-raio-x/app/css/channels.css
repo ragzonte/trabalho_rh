@@ -1,0 +1,885 @@
+/* Tela Canais (js/ui/screens/channels.js). Só o que é próprio dela: as cores e as peças-base
+ * vêm de app.css. Carregada pelo módulo da tela, uma vez.
+ *
+ *   1. Estrutura e estados      4. Largura do canal
+ *   2. Faixa e gráfico          5. Ranking
+ *   3. Melhor canal             6. Painéis
+ */
+
+/* ------------------------------------------------------------------------ */
+/* 1. Estrutura e estados                                                    */
+/* ------------------------------------------------------------------------ */
+
+.ch-main,
+.ch-slot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.ch-slot:empty {
+  display: none;
+}
+
+.ch-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 4px 4px 0;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.ch-skel-bands {
+  height: 60px;
+  border-radius: var(--r-md);
+}
+
+.ch-skel-chart {
+  height: 372px;
+  border-radius: var(--r-lg);
+}
+
+/* degraus da nota: 1 = livre ... 5 = congestionado (mesma escala de cores do sinal) */
+.ch-lvl-1 {
+  --lvl: var(--sig-1);
+}
+
+.ch-lvl-2 {
+  --lvl: var(--sig-2);
+}
+
+.ch-lvl-3 {
+  --lvl: var(--sig-3);
+}
+
+.ch-lvl-4 {
+  --lvl: var(--sig-4);
+}
+
+.ch-lvl-5 {
+  --lvl: var(--sig-5);
+}
+
+/* barra da nota (sem transição: a nota muda a cada busca e não deve "dançar") */
+.ch-bar {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  height: 8px;
+  border-radius: var(--r-full);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+  overflow: hidden;
+}
+
+.ch-bar > i {
+  display: block;
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: var(--lvl, var(--accent));
+}
+
+.ch-bar--thick {
+  flex: none;
+  height: 12px;
+}
+
+/* ------------------------------------------------------------------------ */
+/* 2. Faixa e gráfico                                                        */
+/* ------------------------------------------------------------------------ */
+
+.ch-band.seg__opt {
+  flex-direction: column;
+  gap: 0;
+  min-height: 52px;
+  padding: 6px 4px;
+}
+
+.ch-band__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  line-height: 20px;
+}
+
+.ch-band__sub {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  line-height: 16px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-band[data-band='2.4'] .dot {
+  color: var(--band-24);
+}
+
+.ch-band[data-band='5'] .dot {
+  color: var(--band-5);
+}
+
+.ch-band[data-band='6'] .dot {
+  color: var(--band-6);
+}
+
+.ch-band[aria-disabled='true'] .ch-band__name {
+  opacity: 0.55;
+}
+
+.ch-band[aria-disabled='true'] .dot {
+  background: none;
+  box-shadow: inset 0 0 0 1.5px currentColor;
+}
+
+.card.ch-chart {
+  padding: 0;
+  overflow: hidden;
+}
+
+.card.ch-chart > * + * {
+  margin-top: 0;
+}
+
+.ch-chart__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 10px 4px 2px var(--sp-4);
+}
+
+.ch-chart__titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.ch-chart__title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  line-height: 22px;
+}
+
+.ch-chart__sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 10px;
+  font-size: var(--fs-xs);
+  line-height: 18px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-chart__age {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--warning);
+}
+
+.ch-chart__tools {
+  flex: none;
+  display: flex;
+}
+
+.chgraph {
+  position: relative;
+  height: 272px;
+}
+
+.chgraph__canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.chgraph__canvas:focus-visible {
+  outline-offset: -3px;
+  border-radius: var(--r-sm);
+}
+
+/* altura reservada: escolher uma rede no gráfico não empurra o resto da tela */
+.ch-chart__foot {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 76px;
+  padding: 0 var(--sp-3) var(--sp-3);
+}
+
+.ch-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  padding: 0 4px;
+  font-size: var(--fs-xs);
+  line-height: 18px;
+  color: var(--muted);
+}
+
+.ch-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.ch-legend__hint {
+  flex: 1 1 100%;
+}
+
+/* miniatura de uma "montanha" */
+.ch-swatch {
+  display: inline-block;
+  flex: none;
+  width: 18px;
+  height: 10px;
+  border: 1.5px solid var(--muted);
+  border-bottom: 0;
+  border-radius: 3px 3px 0 0;
+  background: var(--surface-2);
+}
+
+.ch-swatch--own {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.ch-sel {
+  display: flex;
+  align-items: center;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.ch-sel > .row {
+  flex: 1;
+  min-width: 0;
+  min-height: 60px;
+  gap: 10px;
+  padding: 8px 0 8px var(--sp-3);
+  border-radius: var(--r-md);
+}
+
+.ch-sel > .row:active {
+  background: var(--surface-3);
+}
+
+.ch-sel__more {
+  flex: none;
+  color: var(--faint);
+}
+
+.ch-sel > .icon-btn {
+  margin-left: -8px;
+}
+
+/* ------------------------------------------------------------------------ */
+/* 3. Melhor canal                                                           */
+/* ------------------------------------------------------------------------ */
+
+.ch-rec__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.ch-rec__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.ch-rec__icon--good {
+  background: var(--good-soft);
+  color: var(--good);
+}
+
+.ch-rec__icon--accent {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.ch-rec__eyebrow {
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.ch-rec__title {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 26px;
+  letter-spacing: -0.01em;
+}
+
+.ch-rec__text {
+  font-size: var(--fs-sm);
+  line-height: 21px;
+}
+
+.ch-rec__note,
+.ch-advice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.ch-rec__note > svg,
+.ch-advice > svg {
+  margin-top: 2px;
+}
+
+.ch-advice {
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.ch-advice > svg {
+  color: var(--accent-text);
+}
+
+.ch-rec__caveat {
+  font-size: var(--fs-xs);
+  line-height: 17px;
+  color: var(--muted);
+}
+
+/* nota atual x nota recomendada */
+.ch-tiles {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: var(--sp-2);
+}
+
+.ch-tiles--one {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ch-tiles--pair {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-3);
+}
+
+.ch-tiles__arrow {
+  align-self: center;
+  color: var(--muted);
+}
+
+.ch-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.ch-tile--accent {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.ch-tile .ch-bar {
+  flex: none;
+  background: var(--surface);
+}
+
+.ch-tile__label {
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.ch-tile__ch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+}
+
+.ch-tile__num {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  line-height: 32px;
+  letter-spacing: -0.02em;
+}
+
+.ch-tile__range {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.ch-tile__ch > .badge {
+  align-self: center;
+}
+
+.ch-tile__note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 10px;
+  font-size: var(--fs-xs);
+  line-height: 17px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-tile__note > strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* a palavra da nota, com a bolinha na cor do degrau */
+.ch-level {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.ch-level::before {
+  content: '';
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lvl);
+}
+
+/* o roteador analisado */
+.ch-own {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
+}
+
+.ch-own__icon {
+  flex: none;
+  color: var(--muted);
+}
+
+.ch-own__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ch-own__label {
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.ch-own__name {
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.ch-own > .btn {
+  flex: none;
+  margin-right: -8px;
+}
+
+/* chamada "qual é a sua rede?" */
+.ch-ask {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: 12px 14px 14px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+}
+
+.ch-ask__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-sm);
+  line-height: 20px;
+}
+
+.ch-ask__text > strong {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  line-height: 22px;
+}
+
+/* ------------------------------------------------------------------------ */
+/* 4. Largura do canal                                                       */
+/* ------------------------------------------------------------------------ */
+
+.ch-widthopt.seg__opt {
+  flex-direction: column;
+  gap: 0;
+  min-height: 52px;
+  padding: 6px 2px;
+}
+
+.ch-widthopt__w {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font-size: var(--fs-md);
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-widthopt__unit {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+}
+
+.ch-widthopt__score {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  line-height: 16px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-widthopt[aria-disabled='true'] .ch-widthopt__w {
+  opacity: 0.5;
+}
+
+.ch-width__now {
+  font-size: var(--fs-xs);
+  line-height: 17px;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------------ */
+/* 5. Ranking                                                                */
+/* ------------------------------------------------------------------------ */
+
+.ch-rank__head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: var(--sp-2);
+  padding: 0 4px;
+}
+
+.ch-rank__head > .ch-rank__intro {
+  padding: 0;
+}
+
+.ch-rank__intro {
+  padding: 0 4px;
+  font-size: var(--fs-xs);
+  line-height: 17px;
+  color: var(--muted);
+}
+
+.ch-rank__intro > strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ch-rank__row.row {
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 12px 8px 12px var(--sp-4);
+}
+
+.ch-rank__ch {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  min-height: 52px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+/* blocos largos: a legenda é o intervalo de canais ("100–112") */
+.ch-rank--wide .ch-rank__ch {
+  width: 64px;
+}
+
+.ch-rank__num {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 24px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-rank__cap {
+  font-size: var(--fs-xs);
+  line-height: 14px;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-rank__row .row__body {
+  gap: 4px;
+}
+
+.ch-rank__top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ch-rank__score {
+  flex: none;
+  min-width: 26px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  line-height: 20px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-rank__facts {
+  font-size: var(--fs-sm);
+  line-height: 19px;
+  color: var(--muted);
+}
+
+.ch-rank__facts > strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ch-rank__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ch-rank__chev {
+  flex: none;
+  color: var(--faint);
+}
+
+.ch-rank--others .ch-rank__num {
+  color: var(--muted);
+}
+
+.ch-glossary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 4px;
+}
+
+.ch-glossary > p {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  font-size: var(--fs-xs);
+  line-height: 17px;
+  color: var(--muted);
+}
+
+.ch-glossary .badge {
+  margin-top: -2px;
+}
+
+.ch-others {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.ch-more {
+  display: flex;
+  justify-content: center;
+}
+
+/* ------------------------------------------------------------------------ */
+/* 6. Painéis                                                                */
+/* ------------------------------------------------------------------------ */
+
+.ch-sheet__score {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ch-sheet__big {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.ch-sheet__num {
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 44px;
+  letter-spacing: -0.02em;
+}
+
+.ch-sheet__of {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.ch-sheet__level {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.ch-sheet__level::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--lvl);
+}
+
+.ch-sheet__meaning {
+  font-size: var(--fs-sm);
+  line-height: 20px;
+  color: var(--muted);
+}
+
+.ch-sheet__h.section-h {
+  margin-top: 0;
+  padding: 0;
+}
+
+.ch-note {
+  font-size: var(--fs-xs);
+  line-height: 17px;
+  color: var(--muted);
+}
+
+.ch-sheet__signal {
+  padding: 4px 0;
+}
+
+/* lista dentro de um painel: linhas encostadas nas bordas do painel */
+.ch-who {
+  display: flex;
+  flex-direction: column;
+  margin: 0 calc(var(--sp-5) * -1);
+}
+
+.ch-who > .row {
+  padding-inline: var(--sp-5);
+}
+
+.ch-who > .row + .row::before {
+  left: var(--sp-5);
+  right: var(--sp-5);
+}
+
+.ch-who .row__sub {
+  font-size: var(--fs-xs);
+  line-height: 17px;
+}
+
+.ch-star {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  color: var(--muted);
+}
+
+.ch-star--on {
+  color: var(--accent-text);
+}
+
+.ch-radio {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--line-strong);
+  border-radius: 50%;
+}
+
+[aria-checked='true'] > .ch-radio {
+  border-color: var(--accent);
+  background: radial-gradient(circle, var(--accent) 0 5px, transparent 6px);
+}
+
+/* ilustração de "Como ler este gráfico" */
+.ch-art {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+  height: auto;
+  margin: 0 auto;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ch-art__grid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+}
+
+.ch-art__axis {
+  stroke: var(--chart-axis);
+  stroke-width: 1;
+}
+
+.ch-art__mark {
+  stroke: var(--muted);
+  stroke-width: 1;
+}
+
+.ch-art__own {
+  stroke: var(--accent);
+  stroke-width: 2;
+  fill: var(--accent-soft);
+}
+
+.ch-art__other {
+  stroke: var(--muted);
+  stroke-width: 1.5;
+  fill: var(--surface-2);
+}
+
+/* celular deitado: o gráfico cede altura */
+@media (orientation: landscape) and (max-height: 520px) {
+  .chgraph {
+    height: 208px;
+  }
+}
+
+@media (min-width: 600px) {
+  .chgraph {
+    height: 320px;
+  }
+}

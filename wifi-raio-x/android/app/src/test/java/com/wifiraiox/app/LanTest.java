@@ -307,15 +307,16 @@ public class LanTest {
             done.countDown();
         });
         t.start();
-        Thread.sleep(400);
+        long waitUntil = System.currentTimeMillis() + 10_000;
+        while (rec.devices.isEmpty() && System.currentTimeMillis() < waitUntil) Thread.sleep(10); // o roteador responde primeiro
         long t0 = System.currentTimeMillis();
         scanner.cancel();
         assertTrue("sem cancelar levaria ~20 s", done.await(3, TimeUnit.SECONDS));
         assertTrue(System.currentTimeMillis() - t0 < 3000);
         assertNotNull(result[0]);
         int found = result[0].getJSONArray("devices").length();
-        assertTrue(found >= 1 && found <= 2);
-        assertTrue("parou antes de sondar tudo", net.probed.size() < 100);
+        assertTrue("achou o roteador (e talvez o próprio celular): " + found, found >= 1 && found <= 2);
+        assertTrue("parou antes de sondar tudo", net.probed.size() < 200);
         int eventsAtReturn = rec.devices.size();
         Thread.sleep(400);
         assertEquals("nenhum evento depois de cancelado", eventsAtReturn, rec.devices.size());

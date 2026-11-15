@@ -242,13 +242,13 @@ public class MainActivityTest extends AllSdks {
         MainActivity activity = launch();
         WebView web = activity.webView();
         WebViewClient client = shadowOf(web).getWebViewClient();
+        int reloads = 0;
         for (int i = 0; i < 10; i++) {
-            shadowOf(web).pushEntryToHistory("https://evil.example/" + i);
+            web.loadUrl("about:blank#marca" + i); // só para o teste enxergar se houve recarga depois
             client.onPageStarted(web, "https://evil.example/" + i, null);
+            if (WebClient.START_URL.equals(shadowOf(web).getLastLoadedUrl())) reloads++;
         }
-        // só as primeiras tentativas recarregam o app; depois ele para de insistir
-        assertEquals("https://evil.example/9", web.getUrl());
-        Fixtures.idle();
+        assertEquals("recarrega o app algumas vezes e depois para de insistir", 3, reloads);
     }
 
     // ------------------------------------------------------------ ciclo de vida

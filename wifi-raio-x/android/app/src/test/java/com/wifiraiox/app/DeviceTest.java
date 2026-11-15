@@ -8,7 +8,6 @@ import static org.junit.Assert.assertTrue;
 import static org.robolectric.Shadows.shadowOf;
 
 import android.app.Activity;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
@@ -256,6 +255,6 @@ public class DeviceTest extends AllSdks {
         assertEquals(before, activity.getWindow().getStatusBarColor());
         // "dark" ausente ou torto: vale false, sem erro
         assertEquals(true, call("setBars", "{\"color\":\"#ffffff\",\"dark\":\"x\"}").get("ok"));
-        assertNotNull(new ComponentName(activity, MainActivity.class));
+        assertEquals(0xFFFFFFFF, activity.getWindow().getStatusBarColor());
     }
 }

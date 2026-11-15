@@ -8,8 +8,8 @@
 //   extras: chart.setPaused(bool) · chart.setGap(ms) · chart.el (o <canvas>)
 //
 // O que ele desenha
-//   - eixo vertical em dBm, com linhas a cada 10 dB e as faixas de qualidade do app (excelente,
-//     bom, regular, fraco) como uma régua colorida à esquerda e um fundo bem leve;
+//   - eixo vertical em dBm, com linhas a cada 10 dB e as faixas de qualidade do app (ótimo, bom,
+//     regular, fraco) como uma régua colorida com as palavras ao lado e um fundo bem leve;
 //   - eixo do tempo relativo: "agora", "−30 s", "−1 min"... O gráfico anda sozinho (1 vez por
 //     segundo) mesmo sem leitura nova, para nunca fingir que um dado velho é de agora;
 //   - uma linha por série, interrompida onde a rede ficou sem ser ouvida por mais de `gapMs`;
@@ -29,6 +29,8 @@
 import { cssVar, fmtClock, MINUS, THIN } from '../dom.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
+// caracteres de controle e separadores de linha (um nome de rede pode trazer qualquer coisa)
+const CONTROL_CHARS = new RegExp(`[\\u0000-\\u001f\\u007f-\\u009f${String.fromCharCode(0x2028, 0x2029)}]`, 'g');
 
 // ---------------------------------------------------------------------------
 // Contas (sem DOM)
@@ -197,7 +199,7 @@ export function spreadLabels(items, { top, bottom, gap }) {
  * @param {(text:string) => number} measure
  */
 export function ellipsize(text, maxWidth, measure) {
-  const clean = String(text ?? '').replace(/[\u0000-\u001f\u007f-\u009f  ]/g, '·');
+  const clean = String(text ?? '').replace(CONTROL_CHARS, '·');
   if (measure(clean) <= maxWidth) return clean;
   const chars = Array.from(clean);
   let lo = 0;
@@ -214,7 +216,7 @@ export function ellipsize(text, maxWidth, measure) {
 // O gráfico
 // ---------------------------------------------------------------------------
 
-const PAD = { top: 20, bottom: 24, left: 34, right: 14 };
+const PAD = { top: 24, bottom: 24, left: 34, right: 14 };
 const LABEL_GAP = 15; // distância mínima entre os centros de dois rótulos
 const LABEL_MAX_FRACTION = 0.34; // quanto da largura os rótulos podem tomar
 
@@ -236,7 +238,8 @@ const LABEL_MAX_FRACTION = 0.34; // quanto da largura os rótulos podem tomar
  * @param {number} [options.height=180]       altura em px CSS
  * @param {number} [options.gapMs=25000]      sem leitura por mais que isto: a linha é interrompida
  * @param {boolean} [options.labels=true]     rótulos na ponta das linhas (desligue com uma série só)
- * @param {boolean} [options.zoneWords=true]  palavras das faixas de qualidade junto à régua
+ * @param {boolean} [options.zoneWords=true]  sem rótulos de série, a margem direita mostra as palavras das faixas
+ *                                            de qualidade (ótimo, bom, regular...) ao lado da régua colorida
  * @param {boolean} [options.live=true]       o eixo do tempo anda sozinho
  * @param {boolean} [options.interactive=true] régua de leitura ao tocar
  * @param {() => number} [options.now]        relógio (padrão Date.now)
@@ -334,14 +337,20 @@ export function createTimeChart(container, options = {}) {
   function layout() {
     let right = PAD.right;
     let labelWidth = 0;
+    let wordWidth = 0;
     if (opt.labels && series.some((s) => s.label)) {
       ctx.font = font(12, 600);
       const cap = Math.min(132, Math.max(56, width * LABEL_MAX_FRACTION));
       for (const s of series) if (s.label) labelWidth = Math.max(labelWidth, Math.min(cap, ctx.measureText(String(s.label)).width + 1));
       right = Math.ceil(labelWidth) + 18;
+    } else if (opt.zoneWords) {
+      // sem rótulos de série, a margem direita vira a régua de qualidade, com as palavras
+      ctx.font = font(12, 500);
+      for (const zone of QUALITY_ZONES) wordWidth = Math.max(wordWidth, ctx.measureText(zone.word).width);
+      right = Math.ceil(wordWidth) + 18;
     }
     const plot = { x: PAD.left, y: PAD.top, w: Math.max(10, width - PAD.left - right), h: Math.max(10, opt.height - PAD.top - PAD.bottom) };
-    return { plot, labelWidth };
+    return { plot, labelWidth, wordWidth };
   }
 
   function draw() {
@@ -349,7 +358,7 @@ export function createTimeChart(container, options = {}) {
     if (!colors) readTheme();
     const to = clock();
     const from = to - opt.windowMs;
-    const { plot, labelWidth } = layout();
+    const { plot, labelWidth, wordWidth } = layout();
     const xOf = (t) => plot.x + ((t - from) / opt.windowMs) * plot.w;
     const yOf = (v) => plot.y + ((range.max - v) / (range.max - range.min)) * plot.h;
     const bottom = plot.y + plot.h;
@@ -361,28 +370,41 @@ export function createTimeChart(container, options = {}) {
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
 
-    // faixas de qualidade: fundo bem leve + régua colorida na borda esquerda
+    // faixas de qualidade: fundo bem leve + régua colorida (à direita com as palavras, quando a
+    // margem é dela; senão à esquerda, só a cor)
+    const zones = [];
     let zoneTop = range.max;
     QUALITY_ZONES.forEach((zone, i) => {
       const lo = Math.max(range.min, zone.min);
       if (lo < zoneTop) {
-        const y0 = yOf(zoneTop);
-        const y1 = yOf(lo);
-        ctx.fillStyle = colors.zones[i];
-        ctx.globalAlpha = 0.055;
-        ctx.fillRect(plot.x, y0, plot.w, y1 - y0);
-        ctx.globalAlpha = 0.9;
-        ctx.fillRect(plot.x, y0 + 0.5, 3, Math.max(0, y1 - y0 - 1));
-        if (opt.zoneWords && y1 - y0 >= 15) {
-          ctx.globalAlpha = 0.8;
-          ctx.font = font(12, 500);
-          ctx.textAlign = 'left';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(zone.word, plot.x + 9, (y0 + y1) / 2 + 0.5);
-        }
+        zones.push({ zone, color: colors.zones[i], y0: yOf(zoneTop), y1: yOf(lo) });
         zoneTop = lo;
       }
     });
+    const stripX = wordWidth ? rightEdge + 3 : plot.x;
+    for (const z of zones) {
+      ctx.fillStyle = z.color;
+      ctx.globalAlpha = 0.055;
+      ctx.fillRect(plot.x, z.y0, plot.w, z.y1 - z.y0);
+      ctx.globalAlpha = 0.9;
+      ctx.fillRect(stripX, z.y0 + 0.5, 3, Math.max(0, z.y1 - z.y0 - 1));
+    }
+    if (wordWidth) {
+      // uma palavra por faixa visível, na altura dela; faixas estreitas empurram as vizinhas
+      const named = zones.filter((z) => z.y1 - z.y0 >= 5);
+      const ys = spreadLabels(
+        named.map((z) => ({ y: (z.y0 + z.y1) / 2 })),
+        { top: plot.y + 6, bottom: bottom - 6, gap: 13 },
+      );
+      ctx.font = font(12, 500);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.globalAlpha = 1;
+      named.forEach((z, i) => {
+        ctx.fillStyle = z.color;
+        ctx.fillText(z.zone.word, rightEdge + 11, ys[i] + 0.5);
+      });
+    }
     ctx.globalAlpha = 1;
 
     // linhas horizontais a cada 10 dB, com o valor
@@ -403,7 +425,7 @@ export function createTimeChart(container, options = {}) {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
     ctx.fillStyle = colors.label;
-    ctx.fillText('dBm', 2, 12);
+    ctx.fillText('dBm', 2, 11);
 
     // eixo do tempo
     ctx.strokeStyle = colors.axis;

@@ -22,7 +22,12 @@
 //      - sinal fraco põe um teto na nota (a conta de velocidade é otimista perto do limite, e
 //        uma conexão que cai não serve, por mais rápida que seja no papel);
 //      - rede aberta ou WEP perde metade da nota; só WPA/TKIP perde um quinto;
-//      - WPA3 ganha um pequeno bônus.
+//      - WPA3 ganha um pequeno bônus (que não passa do teto do sinal).
+//
+// Simplificações assumidas: o tempo ocupado é pessimista como na nota dos canais (vale o maior
+// entre modelo e medição); os outros nós do mesmo mesh no mesmo canal não entram como
+// concorrentes (channel-rating os trata como parte da rede); a estimativa do enlace usa o piso
+// de ruído térmico, por isso é otimista com sinal fraco (o teto do item 4 compensa).
 //
 // Nada aqui lança exceção: dado torto vindo do celular vira nota 0 / null.
 
@@ -54,13 +59,14 @@ export const SIGNAL_FREE_DBM = -70;
 export const WEAK_SIGNAL_DBM = -80;
 /** Nota máxima de uma rede que chega com WEAK_SIGNAL_DBM. */
 export const WEAK_SIGNAL_CAP = 35;
-/** No limite do que um celular consegue ouvir. */
+/** No limite do que um celular consegue ouvir... */
 const DEAD_SIGNAL_DBM = -90;
+/** ...a nota não passa disto. */
 const DEAD_SIGNAL_CAP = 5;
 
 // --- segurança
-/** Rede aberta (sem criptografia) ou WEP: metade da nota. Com isto, qualquer rede protegida de
- *  10 Mb/s ou mais ganha da melhor rede aberta possível. */
+/** Rede aberta (sem criptografia) ou WEP: metade da nota. Com isto, uma rede protegida de
+ *  10 Mb/s com sinal decente já ganha da melhor rede aberta possível. */
 export const INSECURE_FACTOR = 0.5;
 /** Só WPA/TKIP: fraca, mas não escancarada. */
 export const WEAK_SECURITY_FACTOR = 0.8;
@@ -93,13 +99,20 @@ const CLIENT_WIDTH_5 = 80;
 const CLIENT_WIDTH_WIDE = 160;
 const CLIENT_WIDTH_BE_6 = 320;
 
-// --- textos
+// --- textos (a partir de quando cada frase aparece nos prós e contras)
+/** "Muito rápida": acima do que qualquer uso doméstico pede. */
 const FAST_MBPS = 100;
+/** "Lenta": abaixo disto vídeo em alta definição já engasga. */
 const SLOW_MBPS = 5;
+/** "Canal livre": sobra pelo menos esta fração do tempo de ar. */
 const FREE_SHARE = 0.85;
+/** Abaixo desta fração o canal entra nos contras, com a causa principal. */
 const BUSY_SHARE = 0.6;
+/** Ocupação medida a partir da qual a frase cita a porcentagem. */
 const BUSY_UTILIZATION = 0.4;
+/** Aparelhos no mesmo rádio que já merecem menção. */
 const MANY_STATIONS = 15;
+/** Leitura mais velha que isto ganha o aviso de "pode estar desatualizada". */
 const OLD_READING_MS = 30_000;
 
 // --- conselho
@@ -219,10 +232,18 @@ const CONTEXT = Symbol('scoringContext');
  * @returns {object}  opaco: só serve para passar a scoreAp
  */
 export function scoringContext(aps, options) {
-  const o = isObj(options) ? options : {};
+  return makeContext(toList(aps), isObj(options) ? options : {});
+}
+
+/** Lista normalizada, sem o que não tem BSSID válido (lixo não vira rede nem vizinho). */
+function toList(aps) {
   const list = [];
-  for (const item of Array.isArray(aps) ? aps : []) if (isObj(item)) list.push(asAp(item));
-  return makeContext(list, o);
+  for (const item of Array.isArray(aps) ? aps : []) {
+    if (!isObj(item)) continue;
+    const ap = asAp(item);
+    if (ap.id !== '') list.push(ap);
+  }
+  return list;
 }
 
 function makeContext(list, o) {
@@ -253,10 +274,9 @@ function makeContext(list, o) {
 
 function contextFor(ap, o) {
   if (isObj(o.context) && o.context[CONTEXT] === true) return o.context;
-  const list = [];
-  for (const item of Array.isArray(o.aps) ? o.aps : []) if (isObj(item)) list.push(asAp(item));
+  const list = toList(o.aps);
   // O AP avaliado entra na conta mesmo que a lista não o traga
-  if (!list.some((x) => x === ap || (ap.id !== '' && x.id === ap.id))) list.push(ap);
+  if (!list.some((x) => x.id === ap.id)) list.push(ap);
   return makeContext(list, o);
 }
 
@@ -513,7 +533,8 @@ export function scoreAp(ap, options) {
   let score = 0;
   if (supported && estMbps !== null && estMbps > 0) {
     score = Math.min(speedScore(estMbps), cap) * securityFactor;
-    if (sec.wpa3 && !sec.insecure) score += WPA3_BONUS;
+    // o bônus não fura o teto do sinal: WPA3 não salva uma rede que não chega
+    if (sec.wpa3 && !sec.insecure) score = Math.min(score + WPA3_BONUS, cap);
     score = round1(clamp(score, 0, 100));
   }
 
@@ -860,7 +881,7 @@ export function advise(ranking, options) {
   const sameBox = (e) => current.deviceId != null && e.deviceId === current.deviceId;
   const currentScore = isNum(current.score) ? current.score : 0;
 
-  const options_ = [];
+  const candidates = [];
   for (const row of rows) {
     const sameNetwork = row === currentRow;
     if (!sameNetwork && (row.hidden === true || row.p2p === true || isP2p(row.best))) continue;
@@ -868,7 +889,7 @@ export function advise(ranking, options) {
     for (const entry of entriesOf(row)) {
       if (entry.ap.id === connectedId || !usable(entry)) continue;
       const twin = sameBox(entry) && stem !== null && ssidStem(row.ssid) === stem;
-      options_.push({
+      candidates.push({
         row,
         entry,
         sameNetwork,
@@ -880,9 +901,9 @@ export function advise(ranking, options) {
       });
     }
   }
-  options_.sort((a, b) => b.rank - a.rank || b.entry.score - a.entry.score);
+  candidates.sort((a, b) => b.rank - a.rank || b.entry.score - a.entry.score);
 
-  for (const option of options_) {
+  for (const option of candidates) {
     if (!option.mine) continue;
     const { row, entry } = option;
     if (entry.score - currentScore < SWITCH_MIN_POINTS) continue;
@@ -950,7 +971,7 @@ export function advise(ranking, options) {
   if (rssiOf(current.ap) < WEAK_SIGNAL_DBM) text += ' Mesmo assim o sinal está no limite: chegue mais perto do roteador.';
 
   let alternative = null;
-  const stranger = options_
+  const stranger = candidates
     .filter((x) => !x.mine && !isInsecure(x.row.security))
     .sort((a, b) => b.entry.score - a.entry.score)[0];
   if (stranger && currentScore < HINT_BELOW_SCORE && stranger.entry.score - currentScore >= HINT_MIN_POINTS) {

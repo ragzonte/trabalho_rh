@@ -19,7 +19,6 @@ import org.robolectric.util.ReflectionHelpers.ClassParameter;
 
 import java.util.Arrays;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -165,7 +164,10 @@ public class RssiWatcherTest extends AllSdks {
         assertTrue(w.ticking());
         w.setResumed(false);
         assertFalse(w.ticking());
-        List<Integer> none = Arrays.asList();
-        assertTrue(none.isEmpty());
+        advance(2000);
+        assertEquals(3, count[0]);
+        w.setResumed(true);
+        w.unwatch();
+        assertFalse(w.ticking());
     }
 }

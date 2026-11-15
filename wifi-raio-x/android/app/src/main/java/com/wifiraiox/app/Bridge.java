@@ -16,7 +16,6 @@ import org.json.JSONObject;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -65,8 +64,8 @@ public final class Bridge implements Emitter {
     private final SpeedTester speed;
     private final Haptics haptics;
 
-    /** ids de callAsync ainda sem resposta. Cada um é respondido exatamente uma vez. */
-    private final Set<Integer> pending = ConcurrentHashMap.newKeySet();
+    /** Chamadas de callAsync ainda sem resposta, pelo id que a página escolheu. */
+    private final ConcurrentHashMap<Integer, Reply> pending = new ConcurrentHashMap<>();
     private volatile boolean trustedPage;
     private volatile boolean destroyed;
     private String lastStatus;
@@ -124,20 +123,40 @@ public final class Bridge implements Emitter {
     @JavascriptInterface
     public void callAsync(final int id, String method, String argsJson) {
         if (!trustedPage || destroyed) return; // página estranha: nem resposta recebe
-        pending.add(id);
+        final Reply reply = new Reply(id);
+        pending.put(id, reply);
         try {
             if (method == null) {
-                finish(id, Json.error(ERR_UNKNOWN + "null"));
+                reply.send(Json.error(ERR_UNKNOWN + "null"));
                 return;
             }
             JSONObject args = parseArgs(argsJson);
             if (args == null) {
-                finish(id, Json.error(ERR_ARGS));
+                reply.send(Json.error(ERR_ARGS));
                 return;
             }
-            dispatchAsync(id, method, args);
+            dispatchAsync(reply, method, args);
         } catch (Throwable t) {
-            finish(id, Json.error(describe(t)));
+            reply.send(Json.error(describe(t)));
+        }
+    }
+
+    /**
+     * A resposta de UMA chamada. Só a primeira tentativa de responder passa (resultado x prazo
+     * esgotado x tela encerrada), e só enquanto esta ainda for a chamada registrada para o id:
+     * depois de uma recarga a página nova recomeça os ids do 1, e o trabalho que sobrou da página
+     * antiga não pode responder no lugar de uma chamada nova.
+     */
+    private final class Reply {
+        final int id;
+
+        Reply(int id) {
+            this.id = id;
+        }
+
+        void send(JSONObject result) {
+            if (!pending.remove(id, this)) return;
+            sink.eval(Js.resolve(id, String.valueOf(result)));
         }
     }
 
@@ -194,33 +213,33 @@ public final class Bridge implements Emitter {
         }
     }
 
-    private void dispatchAsync(final int id, String method, JSONObject args) throws Exception {
+    private void dispatchAsync(final Reply reply, String method, JSONObject args) throws Exception {
         switch (method) {
             case "requestPermission":
-                onMain(id, () -> permissions.requestLocation(() -> {
-                    finish(id, status.read());
+                onMain(reply, () -> permissions.requestLocation(() -> {
+                    reply.send(status.read());
                     emitStatus(true);
                 }));
                 return;
             case "scan":
-                finish(id, scanner.request());
+                reply.send(scanner.request());
                 return;
             case "rtt":
-                startRtt(id, args);
+                startRtt(reply, args);
                 return;
             case "ping":
-                startPing(id, args);
+                startPing(reply, args);
                 return;
             case "lanScan":
-                startLanScan(id);
+                startLanScan(reply);
                 return;
             case "speedTest":
-                startSpeedTest(id, args);
+                startSpeedTest(reply, args);
                 return;
             default:
                 // Método de resposta imediata chamado pelo caminho assíncrono: atende do mesmo jeito.
                 JSONObject out = dispatch(method, args);
-                finish(id, out != null ? out : Json.error(ERR_UNKNOWN + method));
+                reply.send(out != null ? out : Json.error(ERR_UNKNOWN + method));
         }
     }
 
@@ -324,10 +343,10 @@ public final class Bridge implements Emitter {
 
     // ------------------------------------------------------------------ métodos de resposta posterior
 
-    private void startRtt(final int id, JSONObject args) {
+    private void startRtt(final Reply reply, JSONObject args) {
         JSONArray array = args.optJSONArray("bssids");
         if (array == null) {
-            finish(id, Json.error(ERR_ARGS + ": bssids"));
+            reply.send(Json.error(ERR_ARGS + ": bssids"));
             return;
         }
         final List<String> bssids = new ArrayList<>();
@@ -335,22 +354,22 @@ public final class Bridge implements Emitter {
             Object v = array.opt(i);
             if (v instanceof String) bssids.add((String) v);
         }
-        onMain(id, () -> rtt.range(bssids, result -> finish(id, result)));
+        onMain(reply, () -> rtt.range(bssids, reply::send));
     }
 
-    private void startPing(final int id, JSONObject args) {
+    private void startPing(final Reply reply, JSONObject args) {
         final String host = Json.string(args, "host");
         if (!PingHost.isValid(host)) {
-            finish(id, Json.error(Pinger.ERR_INVALID_HOST));
+            reply.send(Json.error(Pinger.ERR_INVALID_HOST));
             return;
         }
         final int count = Json.clamp(Json.number(args, "count", 10), Pinger.MIN_COUNT, Pinger.MAX_COUNT);
         final int timeoutMs = Json.clamp(Json.number(args, "timeoutMs", 1000), Pinger.MIN_TIMEOUT_MS, Pinger.MAX_TIMEOUT_MS);
-        background(id, () -> finish(id, pinger.run(host, count, timeoutMs, reply -> emit("ping", reply))));
+        background(reply, () -> reply.send(pinger.run(host, count, timeoutMs, r -> emit("ping", r))));
     }
 
-    private void startLanScan(final int id) {
-        background(id, () -> finish(id, lan.run(connection.lanTarget(), new LanScanner.Events() {
+    private void startLanScan(final Reply reply) {
+        background(reply, () -> reply.send(lan.run(connection.lanTarget(), new LanScanner.Events() {
             @Override
             public void onDevice(JSONObject device) {
                 emit("lan", device);
@@ -366,48 +385,42 @@ public final class Bridge implements Emitter {
         })));
     }
 
-    private void startSpeedTest(final int id, JSONObject args) {
+    private void startSpeedTest(final Reply reply, JSONObject args) {
         final String mode = args.has("mode") ? Json.string(args, "mode") : SpeedTester.MODE_FULL;
         if (!SpeedTester.validMode(mode)) {
-            finish(id, Json.error(ERR_ARGS + ": mode"));
+            reply.send(Json.error(ERR_ARGS + ": mode"));
             return;
         }
-        background(id, () -> finish(id, speed.run(mode, connection.wifiNetwork(), progress -> emit("speed", progress))));
+        background(reply, () -> reply.send(speed.run(mode, connection.wifiNetwork(), p -> emit("speed", p))));
     }
 
     /** Roda na thread da interface; qualquer falha vira a resposta de erro da chamada. */
-    private void onMain(final int id, final Runnable task) {
+    private void onMain(final Reply reply, final Runnable task) {
         Sys.runOnMain(main, () -> {
             try {
                 task.run();
             } catch (Throwable t) {
-                finish(id, Json.error(describe(t)));
+                reply.send(Json.error(describe(t)));
             }
         });
     }
 
     /** Roda numa thread de trabalho (rede, processos); qualquer falha vira a resposta de erro da chamada. */
-    private void background(final int id, final Runnable task) {
+    private void background(final Reply reply, final Runnable task) {
         try {
             io.execute(() -> {
                 try {
                     task.run();
                 } catch (Throwable t) {
-                    finish(id, Json.error(describe(t)));
+                    reply.send(Json.error(describe(t)));
                 }
             });
         } catch (RejectedExecutionException e) {
-            finish(id, Json.error(ERR_CLOSED));
+            reply.send(Json.error(ERR_CLOSED));
         }
     }
 
     // ------------------------------------------------------------------ indo para a página
-
-    /** Responde um callAsync. Só a primeira resposta de cada id passa (ex.: resultado x tempo esgotado). */
-    private void finish(int id, JSONObject result) {
-        if (!pending.remove(id)) return;
-        sink.eval(Js.resolve(id, String.valueOf(result)));
-    }
 
     @Override
     public void emit(String event, JSONObject data) {
@@ -491,7 +504,7 @@ public final class Bridge implements Emitter {
         speed.cancel();
         permissions.flush();  // quem pediu permissão recebe o Status atual
         rtt.cancelAll();      // medições pendentes saem com ok:false
-        for (Integer id : new ArrayList<>(pending)) finish(id, Json.error(ERR_CLOSED));
+        for (Reply reply : new ArrayList<>(pending.values())) reply.send(Json.error(ERR_CLOSED));
         destroyed = true;
         rssi.unwatch();
         onStop();

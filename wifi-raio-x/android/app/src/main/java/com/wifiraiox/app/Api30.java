@@ -11,7 +11,6 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.nio.ByteBuffer;
-import java.util.List;
 
 /** Tudo o que só existe do Android 11 (API 30) em diante. Só é carregada em aparelhos que têm essas APIs. */
 @RequiresApi(30)

@@ -24,10 +24,12 @@
 
 import { createFreqAxis, createDbmAxis, pickTickLabels, placeLabels, truncateText, hitTest, nextInCycle, zoomAt, maxZoomFor } from './channel-graph-layout.js';
 
-const MINUS = '−';
+const MINUS = String.fromCharCode(0x2212); // sinal de menos tipográfico
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
-const clean = (text) => String(text ?? '').replace(/[\u0000-\u001f\u007f-\u009f  ]/g, '·');
+// caracteres de controle e separadores de linha (0x2028/0x2029) viram um ponto
+const CONTROL = new RegExp(`[\\u0000-\\u001f\\u007f-\\u009f${String.fromCharCode(0x2028, 0x2029)}]`, 'g');
+const clean = (text) => String(text ?? '').replace(CONTROL, String.fromCharCode(0xb7));
 
 const PAD = { left: 38, right: 10, top: 22, bottom: 26 };
 const DFS_STRIP = 16; // altura extra embaixo quando a faixa tem canais DFS (5 GHz)
@@ -71,6 +73,25 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
+}
+
+/**
+ * Índices [de, até] dos pontos que formam o "corpo" de uma forma: o topo plano e os dois
+ * ombros logo abaixo dele. O que fica fora disso são as saias da máscara.
+ */
+function bodyRange(points) {
+  let peak = -Infinity;
+  for (const pt of points) if (pt[1] > peak) peak = pt[1];
+  let first = -1;
+  let last = -1;
+  for (let i = 0; i < points.length; i++) {
+    if (points[i][1] >= peak - 0.05) {
+      if (first < 0) first = i;
+      last = i;
+    }
+  }
+  if (first < 0) return [0, points.length - 1];
+  return [Math.max(0, first - 1), Math.min(points.length - 1, last + 1)];
 }
 
 const EMPTY_DATA = Object.freeze({ band: null, minFreq: 0, maxFreq: 0, minDbm: -100, maxDbm: -30, sections: [], ticks: [], shapes: [] });
@@ -142,6 +163,16 @@ export function createChannelGraph(container, options = {}) {
     return { zoom, max, canZoomIn: data.sections.length > 0 && zoom < max - 1e-6, canZoomOut: zoom > 1 + 1e-6 };
   }
 
+  let zoomSig = '';
+  /** Avisa quem escuta 'zoom', mas só quando algo mudou (o zoom ou o que os botões podem fazer). */
+  function announceZoom() {
+    const info = zoomInfo();
+    const sig = `${info.zoom.toFixed(3)}|${info.max}|${info.canZoomIn}|${info.canZoomOut}`;
+    if (sig === zoomSig) return;
+    zoomSig = sig;
+    emit('zoom', info);
+  }
+
   function setZoom(next, anchorX) {
     const plot = plotRect();
     const target = clamp(next, 1, maxZoom());
@@ -150,7 +181,7 @@ export function createChannelGraph(container, options = {}) {
     zoom = result.zoom;
     scroll = result.scroll;
     schedule();
-    emit('zoom', zoomInfo());
+    announceZoom();
   }
 
   // --- desenho -----------------------------------------------------------------------------
@@ -196,7 +227,7 @@ export function createChannelGraph(container, options = {}) {
     const plot = plotRect();
     const axis = createFreqAxis(view(plot));
     scroll = axis.scroll;
-    const yAxis = createDbmAxis({ minDbm: data.minDbm, maxDbm: data.maxDbm, top: plot.top, bottom: plot.bottom, minLabelGap: 30 });
+    const yAxis = createDbmAxis({ minDbm: data.minDbm, maxDbm: data.maxDbm, top: plot.top, bottom: plot.bottom, minLabelGap: 40 });
     const yOf = (dbm) => plot.bottom - (plot.bottom - yAxis.y(dbm)) * progress;
 
     ctx.setTransform(size.dpr, 0, 0, size.dpr, 0, 0);
@@ -243,6 +274,8 @@ export function createChannelGraph(container, options = {}) {
 
     // montanhas: vizinhos (do mais fraco ao mais forte), depois as redes do usuário, depois o destaque
     const rankOf = (s) => (s.bssid === highlight ? 2 : own.has(s.bssid) ? 1 : 0);
+    // com dezenas de redes os preenchimentos se somam: cada um fica mais leve para o fundo não virar um bloco
+    const density = clamp(Math.sqrt(16 / Math.max(16, data.shapes.length)), 0.5, 1);
     const order = data.shapes.map((shape, i) => ({ shape, i })).sort((a, b) => rankOf(a.shape) - rankOf(b.shape) || a.i - b.i);
     for (const p of panels) {
       ctx.save();
@@ -253,25 +286,26 @@ export function createChannelGraph(container, options = {}) {
         const pts = shape.points;
         if (!pts || pts.length < 2) continue;
         if (pts[pts.length - 1][0] < p.seg.minFreq - 1 || pts[0][0] > p.seg.maxFreq + 1) continue;
-        ctx.beginPath();
-        for (let i = 0; i < pts.length; i++) {
-          const x = plot.left + axis.xIn(p.seg, pts[i][0]);
-          const y = yOf(pts[i][1]);
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
+        const px = pts.map((pt) => [plot.left + axis.xIn(p.seg, pt[0]), yOf(pt[1])]);
+        const trace = (from, to) => {
+          ctx.beginPath();
+          for (let i = from; i <= to; i++) {
+            if (i === from) ctx.moveTo(px[i][0], px[i][1]);
+            else ctx.lineTo(px[i][0], px[i][1]);
+          }
+        };
         const isOwn = own.has(shape.bssid);
         const isHl = shape.bssid === highlight;
         const strength = clamp((shape.rssi + 95) / 50, 0, 1);
         const dim = highlight && !isHl ? 0.7 : 1;
         let stroke = colors.muted;
-        let strokeAlpha = (0.38 + 0.42 * strength) * dim;
-        let fillAlpha = (0.05 + 0.08 * strength) * dim;
+        let strokeAlpha = (0.42 + 0.4 * strength) * dim;
+        let fillAlpha = (0.05 + 0.08 * strength) * dim * density;
         let width = 1.25;
         if (isOwn) {
           stroke = colors.accent;
           strokeAlpha = 1;
-          fillAlpha = isHl ? 0.32 : 0.2;
+          fillAlpha = isHl ? 0.3 : 0.18;
           width = isHl ? 2.5 : 2;
         } else if (isHl) {
           stroke = colors.text;
@@ -279,13 +313,30 @@ export function createChannelGraph(container, options = {}) {
           fillAlpha = 0.14;
           width = 2;
         }
+        trace(0, px.length - 1);
         ctx.globalAlpha = fillAlpha;
         ctx.fillStyle = stroke;
         ctx.fill();
-        ctx.globalAlpha = strokeAlpha;
         ctx.strokeStyle = stroke;
-        ctx.lineWidth = width;
         ctx.setLineDash(stale.has(shape.bssid) ? [4, 4] : []);
+        // o "corpo" do canal (o topo e os ombros da máscara) leva o traço forte; as saias, que
+        // são o que vaza para os canais vizinhos, ficam finas para não riscar o gráfico inteiro
+        const [a, b] = bodyRange(pts);
+        if (b > a) {
+          ctx.globalAlpha = strokeAlpha * 0.45;
+          ctx.lineWidth = 1;
+          if (a > 0) {
+            trace(0, a);
+            ctx.stroke();
+          }
+          if (b < px.length - 1) {
+            trace(b, px.length - 1);
+            ctx.stroke();
+          }
+          trace(a, b);
+        }
+        ctx.globalAlpha = strokeAlpha;
+        ctx.lineWidth = width;
         ctx.stroke();
       }
       ctx.restore();
@@ -330,7 +381,9 @@ export function createChannelGraph(container, options = {}) {
       x: tickX,
       measure: measureWith(font(600)),
       priority: tickPriority(used),
-      minGap: 5,
+      // em 2,4 GHz os números são seguidos (1 a 13) e podem ficar juntinhos; nas outras faixas
+      // pulam, e "1 9" colado viraria "19"
+      minGap: data.band === '2.4' ? 3 : 7,
       left: plot.left - 4,
       right: size.w - 1,
     });
@@ -428,19 +481,36 @@ export function createChannelGraph(container, options = {}) {
     }
     const byId = new Map(unique.map((c) => [c.id, c]));
     const maxLabels = Math.max(4, Math.round(plot.width / 42));
-    const placed = placeLabels(unique, { left: plot.left + 2, right: size.w - 2, top: 2, bottom: plot.bottom - 2 }, { gap: 3, lift: 5, levels: 3, max: maxLabels });
+    const placed = placeLabels(unique, { left: plot.left + 2, right: size.w - 2, top: 2, bottom: plot.bottom - 2 }, { gap: 3, lift: 5, levels: 2, max: maxLabels });
     const labelRects = [];
+    // primeiro os fios que ligam um nome "de cima" ao seu pico, depois as caixas por cima deles
+    ctx.strokeStyle = colors.label;
+    ctx.globalAlpha = 0.6;
+    ctx.lineWidth = 1;
+    for (const box of placed) {
+      if (box.level === 0) continue;
+      const c = byId.get(box.id);
+      // o fio desce da caixa até o pico, pulando as outras caixas que estiverem no caminho
+      const covers = placed.filter((o) => o !== box && c.cx >= o.x && c.cx <= o.x + o.w).sort((a, b) => a.y - b.y);
+      let y = box.y + box.h;
+      const end = c.top - 2;
+      ctx.beginPath();
+      for (const o of covers) {
+        if (o.y + o.h <= y || o.y >= end) continue;
+        if (o.y - 1 > y) {
+          ctx.moveTo(c.cx, y);
+          ctx.lineTo(c.cx, o.y - 1);
+        }
+        y = Math.max(y, o.y + o.h + 1);
+      }
+      if (end > y) {
+        ctx.moveTo(c.cx, y);
+        ctx.lineTo(c.cx, end);
+      }
+      ctx.stroke();
+    }
     for (const box of placed) {
       const c = byId.get(box.id);
-      if (box.level > 0) {
-        ctx.strokeStyle = colors.label;
-        ctx.globalAlpha = 0.6;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(c.cx, box.y + box.h);
-        ctx.lineTo(c.cx, c.top - 2);
-        ctx.stroke();
-      }
       ctx.globalAlpha = c.isHl ? 0.96 : 0.82;
       ctx.fillStyle = colors.surface;
       roundRect(ctx, box.x, box.y, box.w, box.h, 6);
@@ -528,7 +598,7 @@ export function createChannelGraph(container, options = {}) {
       frame = 0;
     }
     draw();
-    emit('zoom', zoomInfo());
+    announceZoom();
   }
 
   const resizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(() => resize()) : null;
@@ -732,6 +802,7 @@ export function createChannelGraph(container, options = {}) {
     }
     canvas.setAttribute('aria-label', describe());
     schedule();
+    announceZoom();
   }
 
   function setBand(nextBand) {
@@ -744,7 +815,7 @@ export function createChannelGraph(container, options = {}) {
     animateNext = true;
     anim = null;
     schedule();
-    emit('zoom', zoomInfo());
+    announceZoom();
   }
 
   function locate(bssid) {
