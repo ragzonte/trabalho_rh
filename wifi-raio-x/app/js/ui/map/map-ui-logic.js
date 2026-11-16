@@ -369,15 +369,20 @@ export function rttTargets(aps = [], limit = 8) {
  *   escritório 0,56;
  *   leitura no cômodo certo: 81% (96% na kitnet, 78% no apartamento, 77% no escritório, 64% no sobrado);
  *   ambiente com nome: com todos os cômodos batizados, 78% da área dele é mesmo do cômodo com aquele
- *   nome (69% com um lugar marcado por cômodo); com metade dos cômodos batizados, 60 a 65%.
+ *   nome (70% com um lugar marcado só por cômodo); com metade dos cômodos batizados, cerca de 65%
+ *   (antes de o nome valer só perto de onde foi dado: 52 a 61%, com os nomes cobrindo quase a casa toda).
  */
 export const ACCURACY = Object.freeze({
   /** erro mediano de posição: [casa pequena, casa grande / dois andares], em metros */
   homeErrorM: [1, 2],
   /** num lugar grande (escritório de ~300 m²) */
   largeErrorM: 2.4,
-  /** quanto o desenho costuma sair menor que a casa (linear) */
-  shrinkPct: 10,
+  /**
+   * quanto o desenho costuma sair menor que a casa (linear): 11% na bancada; com o app inteiro
+   * conduzido no simulador (map-quality.e2e.mjs), de 12 a 38% conforme o lugar (a pessoa virtual de
+   * lá anda mais depressa, e a escala vem do passo de quem anda)
+   */
+  shrinkPct: 15,
   /** folga do tamanho: confiança de escala normal (>= 0,5) e baixa */
   scalePct: 25,
   scaleLowPct: 40,
@@ -388,7 +393,7 @@ export const ACCURACY = Object.freeze({
   smallAreaOverPct: 30,
   /** da área de um ambiente com nome, quanto é mesmo do cômodo daquele nome: [todos os cômodos batizados], só alguns */
   namedAreaPct: [70, 80],
-  namedAreaPartialPct: 60,
+  namedAreaPartialPct: 65,
 });
 
 /**
@@ -454,7 +459,7 @@ export function roomsInvite(model) {
       text: `${plain.length > 1 ? 'Nestes andares' : 'Neste andar'} menos de dois lugares têm nomes diferentes. Volte lá com “Continuar mapeando”, pare em cada cômodo e marque o lugar com o nome.`,
     };
   }
-  const why = 'o app não inventa divisões: só com o sinal elas sairiam quase ao acaso';
+  const why = 'o app não inventa divisões, porque só com o sinal elas sairiam quase ao acaso';
   let text;
   if (named === 0) text = `Este mapa mostra a área por onde você andou, sem dividir em ambientes: ${why}. Toque em “Continuar mapeando”, pare em pelo menos dois cômodos e marque cada lugar com o nome.`;
   else if (named === 1) text = `Só um lugar tem nome, e ${why}. Toque em “Continuar mapeando”, pare em mais um cômodo (ou em todos) e marque o lugar com o nome.`;

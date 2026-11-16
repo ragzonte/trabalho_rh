@@ -571,6 +571,8 @@ export async function mountResult(root, env, { id }) {
       null,
       h('p', null, `Só com o Wi-Fi, as distâncias do mapa costumam sair um pouco menores que as da casa (uns ${ACCURACY.shrinkPct}%, em média) e podem errar ${ACCURACY.scalePct}% ou mais. Se você informar a `, h('strong', null, 'distância real'), ' entre dois lugares marcados, o mapa inteiro é reajustado por ela.'),
       h('p', null, 'Escolha dois lugares bem distantes um do outro e meça com uma trena, ou conte passos largos (um passo largo ≈ 1 m).'),
+      // (medido na bancada: uma distância só não conserta o tamanho de uma casa pequena; ajuda onde o mapa saiu bem menor e a base é longa)
+      h('p', null, 'O ajuste ajuda mais quando o mapa saiu bem menor que o lugar e a distância medida é grande (10 m ou mais). Com uma distância curta, numa casa pequena, o tamanho muda pouco e pode não ficar mais certo.'),
     );
     if (spots.length < 2) {
       const panel = sheet({
@@ -848,9 +850,11 @@ export async function mountResult(root, env, { id }) {
 
   function legend() {
     if (V.show === 'rooms') {
+      // trecho sem nome ("Ambiente N"): o que sobrou longe de todo lugar com nome; fica sem cor
+      const unnamed = S.model.floors.some((f) => f.rooms.some((r) => r.auto));
       return hasRooms(S.model)
-        ? h('p.mrs-legend.mrs-legend--text', { key: 'legend' }, 'Cada cor é um ambiente estimado. Toque num ambiente, roteador ou lugar marcado para ver os detalhes.')
-        : h('p.mrs-legend.mrs-legend--text', { key: 'legend' }, 'A área por onde você andou, sem divisão em ambientes (nenhum lugar, ou só um, tem nome). Escolha uma rede acima para ver o sinal.');
+        ? h('p.mrs-legend.mrs-legend--text', { key: 'legend' }, `Cada cor é um ambiente estimado${unnamed ? '; a parte sem cor ainda não tem nome' : ''}. Toque num ambiente, roteador ou lugar marcado para ver os detalhes.`)
+        : h('p.mrs-legend.mrs-legend--text', { key: 'legend' }, 'A área por onde você andou, sem divisão em ambientes (faltam dois lugares com nomes diferentes). Escolha uma rede acima para ver o sinal.');
     }
     const theme = store.get().theme;
     const scale = signalScale(theme);
@@ -929,7 +933,7 @@ export async function mountResult(root, env, { id }) {
           'p',
           null,
           h('strong', null, 'O tamanho. '),
-          `As distâncias em metros são a parte mais fraca: saem em média uns ${ACCURACY.shrinkPct}% menores que as reais e podem errar ${ACCURACY.scalePct}% ou mais, sobretudo em lugares grandes. A área do desenho compensa esse efeito na média, não em cada mapa: numa casa pequena costuma sair uns ${ACCURACY.smallAreaOverPct}% maior que a real, e num lugar grande, bem menor. Para acertar as distâncias, meça uma de verdade em “Ajustar a escala”.`,
+          `As distâncias em metros são a parte mais fraca: saem em média uns ${ACCURACY.shrinkPct}% menores que as reais e podem errar ${ACCURACY.scalePct}% ou mais, sobretudo em lugares grandes. A área do desenho compensa esse efeito na média, não em cada mapa: numa casa pequena costuma sair uns ${ACCURACY.smallAreaOverPct}% maior que a real, e num lugar grande, bem menor. Medir uma distância de verdade em “Ajustar a escala” ajuda, sobretudo em lugares grandes.`,
         ),
         h('p', null, h('strong', null, 'Por que pode sair girado ou espelhado. '), 'O Wi-Fi não sabe onde fica o norte nem o que é esquerda ou direita. Gire o mapa com o dedo até reconhecer a casa. Os andares são os que você marcou.'),
         h(

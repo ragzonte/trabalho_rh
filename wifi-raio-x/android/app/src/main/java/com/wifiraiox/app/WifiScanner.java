@@ -30,8 +30,12 @@ final class WifiScanner {
         void onScan(JSONObject scanEvent);
     }
 
-    /** Um aviso que chega até este tempo depois de um pedido nosso é atribuído ao pedido. */
-    static final long REQUEST_WINDOW_MS = 10_000;
+    /**
+     * Um aviso que chega até este tempo depois de um pedido nosso é atribuído ao pedido. Uma varredura
+     * completa leva de 2 a 5 s num celular comum, mas passa de 10 s em aparelhos lentos (12,5 s medidos
+     * num Android 11 emulado): com uma janela curta a lista pedida pelo app saía rotulada como "do sistema".
+     */
+    static final long REQUEST_WINDOW_MS = 30_000;
 
     private final Context context;
     private final Permissions permissions;

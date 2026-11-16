@@ -68,12 +68,13 @@ function fakeBridge(clock, { throttle = false, scanMs = 2500 } = {}) {
       let answer;
       if (bridge.refuse) answer = { accepted: false, reason: bridge.refuse };
       else {
-        while (accepted.length && accepted[0] <= t - 120_000) accepted.shift();
+        // como no Android: a busca mais antiga só sai da conta quando tem MAIS de 2 minutos
+        while (accepted.length && accepted[0] < t - 120_000) accepted.shift();
         if (bridge.throttle && accepted.length >= 4) {
           clock.setTimer(() => bridge.emit('scan', { ts: clock.now(), fresh: false, source: 'cache', aps: [] }), 50);
           answer = { accepted: false, reason: 'throttled' };
         } else {
-          accepted.push(t);
+          if (bridge.throttle) accepted.push(t); // o Android só conta as buscas enquanto o limite está ligado
           if (!bridge.silent) {
             const fresh = !bridge.staleAnswer;
             clock.setTimer(() => bridge.emit('scan', { ts: clock.now(), fresh, source: 'request', aps: [] }), bridge.scanMs);
@@ -206,11 +207,38 @@ test('o estado mostra "buscando" entre o pedido e a chegada da lista', async () 
 test('celular que avisa do limite (Status.throttled): 30 s desde a primeira busca, sem recusas', async () => {
   const { clock, bridge, loop } = setup({ status: { throttled: true }, bridge: { throttle: true } });
   loop.start();
-  await clock.advance(240_500);
-  assert.deepEqual(bridge.requests, [0, 30, 60, 90, 120, 150, 180, 210, 240]);
-  assert.ok(bridge.answers.every((a) => a === 'ok'), 'no ritmo de 30 s o Android nunca recusa');
+  await clock.advance(243_000);
+  // Visto num Android 11 de verdade: a 5ª busca aos 120 s cravados era recusada (a 1ª ainda não tinha
+  // MAIS de 2 minutos, e uns milissegundos de adiantamento bastam). A cada 4 buscas, 1 s de folga.
+  assert.deepEqual(bridge.requests, [0, 30, 60, 90, 121, 151, 181, 211, 242]);
+  assert.ok(bridge.answers.every((a) => a === 'ok'), 'nesse ritmo o Android nunca recusa');
   assert.equal(loop.getState().throttled, true);
   assert.equal(loop.getState().intervalMs, SCAN_DEFAULTS.throttledMs);
+});
+
+test('com o limite ligado, pedido nenhum sai antes de a janela de 2 minutos do Android abrir (com folga)', async () => {
+  const { clock, bridge, loop } = setup({ status: { throttled: true }, bridge: { throttle: true } });
+  loop.start();
+  await clock.advance(20 * 60_000);
+  assert.ok(bridge.requests.length >= 38, `continua buscando (${bridge.requests.length} pedidos em 20 min)`);
+  assert.deepEqual(bridge.answers.filter((a) => a !== 'ok'), [], 'nenhuma recusa em 20 minutos');
+  for (let i = 4; i < bridge.requests.length; i++) {
+    const span = bridge.requests[i] - bridge.requests[i - 4];
+    assert.ok(span >= 121, `pedido ${i} saiu ${span} s depois do 4º anterior`);
+  }
+});
+
+test('limite desligado e religado: a cota recomeça do zero, sem espera à toa', async () => {
+  const { clock, bridge, store, loop } = setup({ status: { throttled: false } });
+  loop.start();
+  await clock.advance(45_000);
+  assert.deepEqual(bridge.requests, [0, 10, 20, 30, 40]);
+  // o Android só conta as buscas com o limite ligado: as cinco de antes não entram na cota
+  bridge.throttle = true;
+  store.setStatus({ throttled: true });
+  await clock.advance(95_000);
+  assert.deepEqual(bridge.requests.slice(5), [70, 100, 130]);
+  assert.ok(bridge.answers.every((a) => a === 'ok'));
 });
 
 test('limite que o celular não informa: recua ao ser recusado e só arrisca de novo de vez em quando', async () => {
@@ -226,10 +254,16 @@ test('limite que o celular não informa: recua ao ser recusado e só arrisca de 
 
   await clock.advance(10 * 60_000);
   const after = bridge.requests.filter((t) => t > 40);
+  // depois da recusa espera as quatro buscas aceitas saírem da janela do Android (2 min + folga)
+  // em vez de insistir e ser recusado de novo
+  assert.equal(after[0], 121);
   const fast = gaps(after).filter((g) => g < 30);
-  assert.ok(gaps(after).every((g) => g === 30 || g === 10), `intervalos inesperados: ${gaps(after)}`);
+  assert.ok(gaps(after).every((g) => g === 30 || g === 31 || g === 10), `intervalos inesperados: ${gaps(after)}`);
   // as sondas (10 s) existem, mas são raras: no máximo 2 em 10 minutos
   assert.ok(fast.length >= 1 && fast.length <= 2, `sondas: ${fast.length}`);
+  // fora as sondas (que existem para ser recusadas enquanto o limite durar), nenhuma recusa
+  const refusedAt = bridge.requests.filter((t, i) => bridge.answers[i] !== 'ok');
+  assert.equal(refusedAt.length, 1 + fast.length, `recusas: ${refusedAt}`);
   assert.equal(loop.getState().throttled, true, 'com o limite ligado continua no ritmo lento');
 });
 
@@ -377,8 +411,13 @@ test('scanNow recusado pelo limite devolve o motivo e põe o laço no ritmo lent
   const res = await loop.scanNow();
   assert.deepEqual(res, { accepted: false, reason: 'throttled' });
   assert.equal(loop.getState().throttled, true);
+  // as quatro buscas aceitas ainda estão na janela do Android: pedir aos 65 s seria outra recusa.
+  // O próximo pedido espera a primeira delas sair da janela (2 min + folga).
   await clock.advance(31_000);
-  assert.deepEqual(bridge.requests, [0, 10, 20, 30, 35, 65]);
+  assert.deepEqual(bridge.requests, [0, 10, 20, 30, 35]);
+  await clock.advance(56_000);
+  assert.deepEqual(bridge.requests, [0, 10, 20, 30, 35, 121]);
+  assert.deepEqual(bridge.answers.slice(-2), ['throttled', 'ok']);
 });
 
 test("modo 'mapping': tão rápido quanto o celular deixa (3 s), ou 30 s com limite", async () => {

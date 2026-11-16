@@ -16,9 +16,10 @@
 //   manual (botões), sobrado      152         1,1 m        0,74       0,61       0,56       0,60
 //
 // "escala" = tamanho da nuvem de pontos / real; "nome certo" = da área de cada ambiente com nome,
-// quanto é mesmo do cômodo com aquele nome. Na bancada (tests/mapping), levantamentos parecidos dão
-// erro mediano de 0,8 m (kitnet), 1,2 m (apartamento), 1,7 m (sobrado) e 2,2 m (escritório) com
-// escala de 0,87, 0,92, 0,86 e 0,72: nas posições o app não fica atrás; no sobrado e no escritório
+// quanto é mesmo do cômodo com aquele nome. Na bancada (tests/mapping; dev + val + conf, 184
+// levantamentos), levantamentos parecidos dão erro mediano de 0,9 m (kitnet), 1,2 m (apartamento),
+// 1,6 m (sobrado) e 2,4 m (escritório) com escala de 0,89, 0,92, 0,89 e 0,73: nas posições o app não
+// fica atrás; no sobrado e no escritório
 // o mapa do app sai uns 10 a 15% mais encolhido, porque a pessoa virtual da demonstração anda mais
 // depressa (0,5 a 0,65 m/s entre leituras, contra 0,45 a 0,55 na bancada) e a escala do
 // solucionador vem do passo de quem anda. O sobrado manual só sai assim quando o "usuário" avisa a
@@ -81,8 +82,10 @@ test('demonstração automática no apartamento: tempo, andar, nomes e rede da c
   between(m.scale, 0.55, 1.4, 'tamanho da nuvem de pontos / real');
   between(m.areaRatio, 0.55, 1.45, 'área do mapa / área da casa');
   assert.ok(m.iou >= 0.45, `sobreposição com a planta (IoU): ${m.iou}`);
-  // (um cômodo pequeno — o corredor de 4 m² — às vezes não ganha área própria: 5 ou 6 ambientes)
-  assert.ok(m.rooms >= 5 && m.rooms <= 6, `ambientes desenhados: ${m.rooms} (só os que têm nome)`);
+  // (um cômodo pequeno — o corredor de 4 m² — às vezes não ganha área própria: 5 ou 6 ambientes com
+  // nome; um canto longe de todo lugar marcado pode sobrar como trecho sem nome, nunca a maior parte)
+  assert.ok(m.roomsNamed >= 5 && m.roomsNamed <= 6, `ambientes com nome desenhados: ${m.roomsNamed}`);
+  assert.ok(m.rooms - m.roomsNamed <= 1 && m.unnamedShare <= 0.3, `trecho sem nome: ${m.rooms - m.roomsNamed} (${Math.round(m.unnamedShare * 100)}% da área)`);
   assert.ok(m.nameAcc >= 0.55, `área de cada ambiente que é mesmo do cômodo com aquele nome: ${m.nameAcc}`);
   assert.ok(m.roomOfScan >= 0.6, `leituras no cômodo certo: ${m.roomOfScan}`);
   between(m.routerErr, 0, 4, 'erro do roteador da casa (m)');

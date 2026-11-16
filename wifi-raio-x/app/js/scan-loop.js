@@ -4,7 +4,8 @@
 // "Limitação da busca por Wi-Fi" nas opções do desenvolvedor). O laço se adapta:
 //   - sem limite:  uma busca a cada ~10 s (ou o intervalo escolhido nos ajustes);
 //   - com limite:  uma a cada 30 s — o ritmo que o Android aceita sempre, em vez de 4 buscas
-//                  seguidas e depois um minuto e meio no escuro;
+//                  seguidas e depois um minuto e meio no escuro (a cada 4 buscas, 1 s a mais de
+//                  espera: a janela de 2 minutos do Android não perdoa um pedido adiantado);
 //   - mapeando:    tão rápido quanto o celular permitir (3 s sem limite; 30 s com limite);
 //   - parado:      enquanto a página está escondida, enquanto há um bloqueio na tela
 //                  (Status.canScan === false) ou no modo 'paused'.
@@ -59,6 +60,12 @@ export const SCAN_DEFAULTS = Object.freeze({
   /** a regra do Android: no máximo `throttleMax` buscas a cada `throttleWindowMs` */
   throttleWindowMs: 120_000,
   throttleMax: 4,
+  /**
+   * Folga sobre a janela do Android. Ele só libera a 5ª busca quando a 1ª das últimas 4 tem MAIS de
+   * 2 minutos, e conta o tempo do lado dele: no ritmo exato de 30 s, um pedido que chega alguns
+   * milissegundos adiantado é recusado (medido num Android 11: uma recusa a cada 2 min e meio).
+   */
+  throttleSlackMs: 1_000,
 });
 
 export const SCAN_MODES = Object.freeze(['normal', 'mapping', 'paused']);
@@ -90,6 +97,9 @@ export function createScanLoop({ bridge, store, now = Date.now, setTimer = (fn, 
   let probeAfter = cfg.probeAfter;
   let probing = false;
   let acceptedAt = []; // horários dos últimos pedidos aceitos (para saber se o limite teria barrado)
+  // horários dos pedidos aceitos que o Android contou na cota dele: ele só conta com o limite ligado,
+  // então ficam de fora os aceitos enquanto o celular garantia que não havia limite
+  let countedAt = [];
 
   let anchorAt = null; // de onde se conta o intervalo: o último pedido ou a última lista nova do sistema
   let lastRequestAt = null;
@@ -198,10 +208,14 @@ export function createScanLoop({ bridge, store, now = Date.now, setTimer = (fn, 
     const t = now();
     const due = anchorAt === null ? t : anchorAt + wait;
     const floor = immediateIfDue || anchorAt === null ? t : t + cfg.minIdleMs;
-    schedule(Math.max(due, floor) - t);
+    // com o limite valendo, espera a mais antiga das últimas buscas aceitas sair da janela do Android
+    // (a sonda é a exceção: ela existe justamente para testar se o limite ainda está lá)
+    const quota = !probing && isThrottled() && countedAt.length >= cfg.throttleMax ? countedAt[countedAt.length - cfg.throttleMax] + cfg.throttleWindowMs + cfg.throttleSlackMs : 0;
+    schedule(Math.max(due, floor, quota) - t);
   }
 
   function clearBackoff() {
+    countedAt = []; // sem limite o Android não conta nada: a cota recomeça do zero se ele voltar
     backoff = false;
     probing = false;
     okStreak = 0;
@@ -228,6 +242,7 @@ export function createScanLoop({ bridge, store, now = Date.now, setTimer = (fn, 
     }
     recent.push(t);
     acceptedAt = recent.slice(-cfg.throttleMax);
+    if (status()?.throttled !== false) countedAt = [...countedAt, t].slice(-cfg.throttleMax);
     probing = false;
   }
 

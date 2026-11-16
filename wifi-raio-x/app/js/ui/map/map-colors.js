@@ -445,9 +445,11 @@ export function paintFloorCells(model, floorIndex, options = {}) {
     if (heat) {
       if (Number.isNaN(heat.dbm[i])) copy(c.neutral, tmp);
       else signalRgb(heat.dbm[i], theme, tmp);
-    } else if (rooms && floor.room[i] >= 0) {
+    } else if (rooms && floor.room[i] >= 0 && !(floor.rooms[floor.room[i]] && floor.rooms[floor.room[i]].auto)) {
       copy(palette[slots[floor.room[i]] % palette.length], tmp);
     } else {
+      // sem ambiente, ou trecho sem nome ("Ambiente N": o que sobrou longe de todo lugar com nome):
+      // cor neutra, a mesma do andar sem divisão. Só o ambiente com nome dado pelo usuário ganha cor.
       copy(c.neutral, tmp);
     }
     if (bake) {

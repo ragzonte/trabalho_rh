@@ -289,6 +289,9 @@ export function evaluateSession({ probe, record, world: given }) {
     roomPurity: map.metrics.roomPurity,
     nameAcc: map.metrics.nameAcc,
     rooms: map.metrics.rooms,
+    // ambientes com nome dado pelo usuário, e quanto da área com ambientes é só "trecho sem nome" (Ambiente N)
+    roomsNamed: model.floors.reduce((n, f) => n + f.rooms.filter((r) => !r.auto).length, 0),
+    unnamedShare: 1 - (map.metrics.namedShare ?? 0),
     roomsTrue: map.metrics.roomsTrue,
     routerErr: map.metrics.routerErr,
     heatRmse: map.metrics.heatRmse,

@@ -490,6 +490,17 @@ describe('pintura das células de um andar', () => {
     const data = paintFloorCells(model, 0, { theme: 'light', bleed: 0 });
     assert.deepEqual(px(data, 0), [...hexToRgb(mapTheme('light').neutral), 255]);
   });
+
+  test('trecho sem nome ("Ambiente N", auto) fica na cor neutra: só o ambiente com nome dado ganha cor', () => {
+    for (const name of THEMES) {
+      const model = tinyModel(1);
+      model.floors[0].rooms[1] = { id: 1, label: 'Ambiente 1', auto: true };
+      const data = paintFloorCells(model, 0, { theme: name, bleed: 0 });
+      const palette = roomPalette(name).map(hexToRgb);
+      assert.deepEqual(px(data, 0), [...palette[0], 255], 'o ambiente com nome continua com o tom dele');
+      assert.deepEqual(px(data, 2), [...hexToRgb(mapTheme(name).neutral), 255], 'a sobra sem nome não parece um cômodo');
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

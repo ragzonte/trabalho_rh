@@ -379,6 +379,8 @@ test('uma busca que chega atualiza no lugar: rolagem, foco, texto da busca e os 
     // marca os nós das linhas e do cartão para ver que não foram recriados
     await page.evaluate(() => {
       for (const el of document.querySelectorAll('.net-row')) el.__mark = true;
+      // quais redes já estavam na lista (a pessoa virtual está andando: redes novas vão aparecer)
+      window.__rowsBefore = [...document.querySelectorAll('.net-row')].map((el) => `${el.dataset.kind}:${el.dataset.bssid}`);
       document.querySelector('.net-conn').__mark = 'conn';
       document.querySelector('.net-controls .seg').__mark = 'seg';
     });
@@ -404,11 +406,16 @@ test('uma busca que chega atualiza no lugar: rolagem, foco, texto da busca e os 
     const marks = await page.evaluate(() => ({
       rows: [...document.querySelectorAll('.net-row')].filter((el) => el.__mark === true).length,
       total: document.querySelectorAll('.net-row').length,
+      // linha sem a marca cuja rede JÁ estava na lista = nó refeito. (Rede ouvida pela primeira vez
+      // depois da marca não conta: a contagem delas depende de quanto a pessoa virtual andou, e a
+      // tolerância fixa de antes, "no máximo 2 linhas novas", falhava de vez em quando.)
+      recreated: [...document.querySelectorAll('.net-row')].filter((el) => el.__mark !== true && window.__rowsBefore.includes(`${el.dataset.kind}:${el.dataset.bssid}`)).length,
       conn: document.querySelector('.net-conn').__mark,
       seg: document.querySelector('.net-controls .seg').__mark,
     }));
     assert.ok(marks.total > 0);
-    assert.ok(marks.rows >= marks.total - 2, `as linhas são as mesmas (${marks.rows} de ${marks.total})`);
+    assert.ok(marks.rows > 0, 'linhas de antes continuam na lista');
+    assert.equal(marks.recreated, 0, `nenhuma linha que já existia foi refeita (${marks.rows} de ${marks.total} são os mesmos nós)`);
     assert.equal(marks.conn, 'conn');
     assert.equal(marks.seg, 'seg');
     // nenhuma linha anima ao ser atualizada

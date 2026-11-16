@@ -49,7 +49,7 @@ const TUNE = {
   roomEdgeHi: 6, // acima do número típico de ambientes: só fronteira mais forte que isto (x a diferença de dentro) separa
   roomEdgeLo: 1.8, // abaixo dele: só fronteira mais fraca que isto junta
   roomSeedK: 0.5, // peso da distância às marcas quando ambientes com nome disputam um pedaço
-  roomNameReachM: 2.8, // um ambiente com nome não passa disto (m) das marcas dele: o raio de um cômodo grande (roomM2Hi = π r²)
+  roomNameReachM: 2.1, // um ambiente com nome não passa disto (m) das marcas dele: o raio de um cômodo típico (roomUnitM2 = π r²); o mapa sai encolhido, então na casa de verdade isso dá uns 2,5 a 3 m
   roomM2Lo: 8, // no máximo um ambiente a cada 8 m²...
   roomM2Hi: 24, // ...e no mínimo um a cada 24 m²
   roomKnn: 5,
@@ -1000,9 +1000,12 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
   //  1. cada ambiente com nome cresce sobre os pedaços sem nome que encostam nele (como uma bacia a
   //     partir de cada marca) — mas só até `roomNameReachM` das marcas dele. Quem deu nome a um
   //     lugar disse onde está AQUELE lugar, não o resto da casa: sem esse limite, um apartamento de
-  //     seis cômodos com dois nomes saía inteiro pintado de "Sala" e "Cozinha" (na conferência, com
-  //     um terço dos cômodos batizados, só 50% da área com nome era mesmo do cômodo daquele nome, e
-  //     os nomes cobriam 84% da casa);
+  //     seis cômodos com dois nomes saía inteiro pintado de "Sala" e "Cozinha" (na bancada, com um
+  //     terço dos cômodos batizados, só 50% da área com nome era mesmo do cômodo daquele nome, e os
+  //     nomes cobriam 85% da casa; com o limite, 60% e 67%, e a parte dos cômodos SEM nome que saía
+  //     com o nome de um vizinho caiu de 74% para 42%. Com todos os cômodos batizados nada muda:
+  //     78%). O limite é o raio de um cômodo típico; com o de um cômodo grande (2,8 m) sobra menos
+  //     retalho sem nome, mas o nome invade mais o vizinho;
   //  2. o que sobrou sem nome (longe de toda marca, ou atrás de uma fronteira forte) NÃO é repartido
   //     pelo sinal — é a mesma decisão de buildFloor: sem nomes, as divisões sairiam quase ao acaso —;
   //     os pedaços vizinhos viram um trecho só, que aparece como "Ambiente N" (nome automático);
@@ -2039,11 +2042,11 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
   //    motores ali (conf = 1 / (1 + (e / 1,5)²)), e dela sai o erro do levantamento pela calibração
   //    do solucionador. Sozinha ela subestima os lugares grandes, que todos os motores encolhem
   //    juntos sem discordar.
-  // A média das duas erra 0,31 m em média (viés +0,05 m): 0,28 m nos 88 levantamentos em que as
+  // A média das duas erra 0,31 m em média (viés +0,05 m): 0,27 m nos 88 levantamentos em que as
   // constantes foram ajustadas e 0,34 m nos 96 de conferência; o que a solução declara, sozinho,
   // 0,30 m. Os dois multiplicadores já foram 1,45 e 1,35 (tirados só dos primeiros 88): nos de
   // conferência exageravam o erro em 0,3 m nas varreduras lentas e nos sobrados, e foram reduzidos
-  // ao que os 184 sustentam. O escritório continua subestimado (2,2 m declarados, 2,4 m reais; nos
+  // ao que os 184 sustentam. O escritório continua subestimado (2,1 m declarados, 2,4 m reais; nos
   // piores casos 2,0 contra 3,5 m).
   // Solução sem confiança própria (todas iguais: posições dadas de fora) fica só com o tamanho.
   const perFloor = Math.max(8, areaM2 / Math.max(1, floors.length));
@@ -2091,7 +2094,12 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     // Tamanho. Na bancada (184 levantamentos) a nuvem de pontos sai em média 11% menor que a casa;
     // com confiança de escala de 0,5 ou mais, metade dos mapas erra o tamanho em mais de 10% e um em
     // cada cinco em mais de 21%; abaixo de 0,5, em mais de 19% e de 29%. O pior caso visto: 40%.
-    if (usable && scaleConf < 0.5) notes.push('O tamanho é incerto: as distâncias em metros podem errar 40%. Para acertar, informe uma distância real em “Ajustar a escala”.');
+    // "Ajustar a escala" (uma distância medida pelo usuário) NÃO é remédio garantido: na bancada (48
+    // levantamentos de conferência, uma distância real informada) o erro de tamanho ficou igual na
+    // média (15% antes, 13 a 17% depois, conforme o par escolhido); só ajudou onde o mapa tinha saído
+    // bem menor que o lugar e a distância medida era grande (escritório: 32% -> 17 a 28%). Por isso
+    // as notas dizem "ajuda quando", não "para acertar".
+    if (usable && scaleConf < 0.5) notes.push('O tamanho é incerto: as distâncias em metros podem errar 40%. Medir uma distância real, a maior que puder, em “Ajustar a escala” ajuda quando o mapa saiu bem menor que a casa.');
     else if (usable && scaleConf < 0.7) notes.push('O tamanho é aproximado: as distâncias costumam sair um pouco menores que as reais e podem errar uns 25%.');
     // Sem pelo menos dois lugares com nome num andar, ele sai como uma área só (ver buildFloor).
     const plain = floors.filter((f) => !f.rooms.length).length;
@@ -2104,7 +2112,7 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     } else if (plain > 0) notes.push('Num dos andares há menos de dois lugares com nomes diferentes: ali o mapa não separa os ambientes.');
     // Andar com nomes e uma parte sem nome ("Ambiente N"): o nome só vale perto de onde foi dado, e
     // com poucos nomes um ambiente ainda invade o vizinho (na bancada, com metade dos cômodos
-    // batizados, 60 a 65% da área com nome é mesmo do cômodo daquele nome; com todos, 78%).
+    // batizados, cerca de 65% da área com nome é mesmo do cômodo daquele nome; com todos, 78%).
     if (floors.some((f) => f.rooms.some((r) => r.auto) && f.rooms.some((r) => !r.auto))) {
       notes.push('Parte do mapa está sem nome (“Ambiente”): pare nesses cômodos e marque cada um com o nome. Quanto mais cômodos com nome, mais certas ficam as divisões.');
     }
@@ -2112,7 +2120,7 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     if (usable && floors.length > 1) notes.push('Mais de um andar é o caso mais difícil só com o Wi-Fi: espere mais lugares fora do cômodo certo do que numa casa térrea.');
     if (usable && wide) {
       notes.push(
-        `Lugar grande (a sua rede sai de ${ownCount} pontos de acesso): em ambientes amplos o mapa costuma sair bem menor que o real — em simulação, um escritório de 280 m² sai com 60 a 75% do tamanho e pouco mais da metade da área. Vale medir uma distância em “Ajustar a escala”.`,
+        `Lugar grande (a sua rede sai de ${ownCount} pontos de acesso): em ambientes amplos o mapa costuma sair bem menor que o real — em simulação, um escritório de 280 m² sai com 60 a 75% do tamanho e pouco mais da metade da área. Vale medir uma distância grande (10 m ou mais) em “Ajustar a escala”.`,
       );
     }
   }
@@ -2834,20 +2842,29 @@ export function describeMap(model) {
     return out;
   }
   const single = floors.length === 1;
+  // "Ambiente N" (auto) não é um cômodo achado pelo app: é a parte do andar longe de todo lugar com nome.
+  const namedCount = floors.reduce((s, f) => s + f.rooms.filter((r) => !r.auto).length, 0);
+  const unnamedM2 = floors.reduce((s, f) => s + f.rooms.filter((r) => r.auto).reduce((a, r) => a + r.areaM2, 0), 0);
+  const roomsText = !roomCount
+    ? 'sem divisão em ambientes'
+    : !namedCount // (só a bancada: agrupamento automático forçado, sem nomes)
+      ? `com ${roomCount} ${roomCount === 1 ? 'ambiente automático' : 'ambientes automáticos'}`
+      : `com ${namedCount} ${namedCount === 1 ? 'ambiente' : 'ambientes'}${unnamedM2 > 0 ? ` com nome e cerca de ${brNum(unnamedM2)} m² ainda sem nome` : ''}`;
   out.push(
     `Mapa aproximado, feito só com o sinal do Wi-Fi: área de cerca de ${brNum(q.areaM2)} m² em ${single ? '1 andar' : `${floors.length} andares`}, ` +
-      `${roomCount ? `com ${roomCount} ${roomCount === 1 ? 'ambiente' : 'ambientes'}` : 'sem divisão em ambientes'}, a partir de ${q.scans} varreduras.`,
+      `${roomsText}, a partir de ${q.scans} varreduras.`,
   );
   out.push(
     `Precisão ${q.level === 'boa' ? 'boa' : q.level === 'razoavel' ? 'razoável' : 'fraca'}: cada posição tem erro típico de uns ${brNum(q.expectedErrorM, 1)} m. Não é uma planta${roomCount ? ': as divisões entre ambientes são estimativas' : ''}.`,
   );
   for (const f of floors) {
-    if (!f.rooms.length) continue;
     const list = f.rooms
-      .slice()
+      .filter((r) => !r.auto)
       .sort((a, b) => b.areaM2 - a.areaM2)
       .map((r) => `${r.label} (cerca de ${brNum(r.areaM2)} m²)`);
-    out.push(`Ambientes${single ? '' : ` ${floorName(f.floor, false)}`}: ${list.join(', ')}.`);
+    if (!list.length) continue;
+    const rest = f.rooms.filter((r) => r.auto).reduce((a, r) => a + r.areaM2, 0);
+    out.push(`Ambientes${single ? '' : ` ${floorName(f.floor, false)}`}: ${list.join(', ')}${rest > 0 ? `; sem nome: cerca de ${brNum(rest)} m²` : ''}.`);
   }
   const own = model.aps.filter((a) => a.own);
   const grid = { nx: model.nx, ny: model.ny, cell: model.cell, minX: model.bounds.minX, minY: model.bounds.minY };

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Bancada do construtor do mapa (app/js/mapping/mapmodel.js).
 //
-//   node tests/mapping/map-eval.mjs [--truth | --solver <módulo>] [--export nome] [--set dev|val] [--only <trecho>]
+//   node tests/mapping/map-eval.mjs [--truth | --solver <módulo>] [--export nome] [--set dev|val|conf] [--only <trecho>]
 //        [--json] [--svg <pasta>] [--jobs N] [--budget-ms N] [--cache <pasta>] [--noise <m>]
 //        [--no-labels] [--auto-rooms] [--own track|all] [--describe] [--param chave=valor ...]
 //
@@ -35,8 +35,10 @@
 //                com divisão estimada a até 0,75 m;
 //   errE / errR  erro de posição esperado (quality.expectedErrorM) x erro mediano real dos pontos.
 //
-// Conjuntos: dev (padrão) e val (--set val: outras sementes e casas sorteadas, daqui mesmo). O
-// holdout de harness.mjs é para julgar solucionadores, não para ajustar o mapa: não entra aqui.
+// Conjuntos: dev (padrão), val (--set val: outras sementes e casas sorteadas, daqui mesmo) e conf
+// (--set conf: 96 levantamentos de CONFERÊNCIA, com outras sementes ainda; é com eles que se confere
+// se uma constante ajustada em dev + val se sustenta — não ajuste nada olhando para eles). O holdout
+// de harness.mjs é para julgar solucionadores, não para ajustar o mapa: não entra aqui.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -69,19 +71,90 @@ export function defaultSolver() {
 const VAL_SEEDS = [5, 6];
 const VAL_SIZES = ['pequena', 'media', 'grande'];
 
+const CONF_SALT = 'verif-adversarial-q7';
+
+// Propagação variada de um cenário de conferência (±20%; `wide`: ±30%).
+function confRf(name, wide) {
+  const rng = createRng('verif-rf', CONF_SALT, name);
+  const span = wide ? 0.3 : 0.2;
+  const vary = (v) => Math.round(v * rng.float(1 - span, 1 + span) * 1000) / 1000;
+  return {
+    n: Math.round(2.1 * rng.float(0.88, 1.25) * 1000) / 1000,
+    wallScale: vary(1),
+    shadowSigmaDb: vary(3),
+    fadeSigmaDb: vary(1.4),
+    noiseSigmaDb: vary(1.4),
+    bodyLossDb: [vary(5), vary(6), vary(6)],
+    staleCarry: rng.chance(0.5),
+  };
+}
+
+/**
+ * Os 96 levantamentos de conferência: os quatro mundos prontos com três sementes novas por modo
+ * (a primeira com a física padrão, as outras com a propagação variada; no sobrado, uma começa pelo
+ * andar de cima) e 48 casas sorteadas (4 por modo e por tamanho; a primeira de cada com a física
+ * padrão, a última com a propagação variando ±30%). Foram montados por quem conferiu o trabalho de
+ * qualidade do mapa, DEPOIS de as constantes do construtor estarem ajustadas em dev + val: os
+ * números "de conferência" citados em mapmodel.js e em map-ui-logic.js saem daqui.
+ */
+function confScenarios(dev) {
+  const modes = [...new Set(dev.map((d) => d.mode))];
+  const out = [];
+  for (const base of dev.filter((d) => d.name.endsWith('-s1'))) {
+    for (const rep of [1, 2, 3]) {
+      const name = base.name.replace(/-s1$/, `-q${rep}`);
+      const seed = (what) => hashSeed('wrx-verif', CONF_SALT, name, what);
+      const extra = base.group === 'sobrado' && rep === 2 ? { floorOrder: [1, 0] } : {};
+      out.push({
+        ...base,
+        name,
+        set: 'conf',
+        world: { ...base.world, seed: seed('world') },
+        rf: rep === 1 ? {} : confRf(name, false),
+        walk: { ...base.walk, seed: seed('walk'), ...extra },
+        survey: { ...base.survey, seed: seed('survey') },
+      });
+    }
+  }
+  const kinds = Object.fromEntries(dev.map((d) => [d.mode, d]));
+  for (const size of VAL_SIZES) {
+    for (const mode of modes) {
+      for (let rep = 1; rep <= 4; rep++) {
+        const name = `casaq-${size}-${mode}-${rep}`;
+        const seed = (what) => hashSeed('wrx-verif', CONF_SALT, name, what);
+        out.push({
+          name,
+          set: 'conf',
+          group: `casa-${size}`,
+          mode,
+          world: { type: 'random', seed: seed('world'), size },
+          rf: rep === 1 ? {} : confRf(name, rep === 4),
+          walk: { kind: kinds[mode].walk.kind, seed: seed('walk'), auto: true },
+          survey: { scanIntervalS: kinds[mode].survey.scanIntervalS, stillScans: kinds[mode].survey.stillScans, seed: seed('survey') },
+        });
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * Cenários desta bancada.
- *   dev  os 32 de desenvolvimento de harness.mjs (onde as constantes do construtor foram ajustadas);
- *   val  conferência de que um ajuste não é decoreba do dev: os mesmos quatro mundos com outras
- *        sementes (outra vizinhança, outro usuário, outra caminhada) e 24 casas sorteadas com a
- *        propagação variando ±20%. As sementes são daqui (prefixo próprio): nada a ver com o
- *        holdout de harness.mjs, que continua reservado para julgar solucionadores.
- * @param {'dev'|'val'} set
+ *   dev   os 32 de desenvolvimento de harness.mjs (onde as constantes do construtor foram ajustadas);
+ *   val   conferência de que um ajuste não é decoreba do dev: os mesmos quatro mundos com outras
+ *         sementes (outra vizinhança, outro usuário, outra caminhada) e 24 casas sorteadas com a
+ *         propagação variando ±20%. As sementes são daqui (prefixo próprio): nada a ver com o
+ *         holdout de harness.mjs, que continua reservado para julgar solucionadores. (O erro
+ *         esperado e os níveis de qualidade foram calibrados em dev + val: para eles, val não é
+ *         mais uma conferência independente.)
+ *   conf  os 96 de conferência (ver confScenarios): só para conferir, nunca para ajustar.
+ * @param {'dev'|'val'|'conf'} set
  */
 export function listMapScenarios(set = 'dev') {
   const dev = listScenarios('dev');
   if (set === 'dev') return dev;
-  if (set !== 'val') throw new Error(`conjunto desconhecido: ${set} (use dev ou val)`);
+  if (set === 'conf') return confScenarios(dev);
+  if (set !== 'val') throw new Error(`conjunto desconhecido: ${set} (use dev, val ou conf)`);
   const out = [];
   const modes = [...new Set(dev.map((d) => d.mode))];
   for (const base of dev.filter((d) => d.name.endsWith('-s1'))) {
@@ -891,7 +964,7 @@ function parseArgs(argv) {
   if (!Number.isFinite(args.budgetMs) || args.budgetMs <= 0) throw new Error('--budget-ms precisa ser um número positivo');
   if (args.noise !== undefined && !(args.noise >= 0)) throw new Error('--noise precisa ser um número de metros');
   if (!['track', 'all'].includes(args.own)) throw new Error('--own aceita track ou all');
-  if (args.set !== undefined && !['dev', 'val'].includes(args.set)) throw new Error('--set aceita dev ou val (o holdout é só para julgar solucionadores)');
+  if (args.set !== undefined && !['dev', 'val', 'conf'].includes(args.set)) throw new Error('--set aceita dev, val ou conf (o holdout é só para julgar solucionadores)');
   return args;
 }
 
@@ -914,8 +987,9 @@ const HELP = `Bancada do construtor do mapa (mapmodel.js)
   --noise <m>          com --truth: soma um erro suave de <m> metros às posições reais
   --solver <caminho>   módulo que exporta solve(survey, options) (padrão: solver.js ou candidates/geo.js)
   --export <nome>      nome da função exportada (padrão: solve)
-  --set dev|val        dev (padrão): os 32 cenários de desenvolvimento; val: outras sementes e casas
-                       sorteadas, para conferir que um ajuste do construtor não é decoreba do dev
+  --set dev|val|conf   dev (padrão): os 32 cenários de desenvolvimento; val: outras sementes e casas
+                       sorteadas, para conferir que um ajuste do construtor não é decoreba do dev;
+                       conf: 96 levantamentos de conferência (só para conferir, nunca para ajustar)
   --only <trecho>      só os cenários cujo nome contém o trecho
   --jobs <n>           solucionadores em paralelo (padrão: 2; a máquina é compartilhada)
   --budget-ms <n>      tempo máximo do solucionador por cenário (padrão: ${DEFAULT_BUDGET_MS})

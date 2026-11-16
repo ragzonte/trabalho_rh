@@ -161,6 +161,24 @@ public class ScanRequestTest extends AllSdks {
         assertEquals("system", page.events("scan").get(1).get("source"));
     }
 
+    /** Num aparelho lento a varredura passou de 12 s: a lista continua sendo a que o app pediu. */
+    @Test
+    public void aSlowScanIsStillCreditedToOurRequest() throws Exception {
+        bridge.onStart();
+        Fixtures.wifi().setStartScanSucceeds(true);
+        scan(1);
+        Fixtures.wifi().setScanResults(twoNetworks());
+        ShadowSystemClock.advanceBy(12_500, TimeUnit.MILLISECONDS);
+        systemAnnouncesResults(true);
+        JSONObject event = page.lastEvent("scan");
+        assertEquals("request", event.get("source"));
+        assertEquals(true, event.get("fresh"));
+
+        // e cada pedido leva o crédito de um aviso só
+        systemAnnouncesResults(true);
+        assertEquals("system", page.lastEvent("scan").get("source"));
+    }
+
     @Test
     public void throttledRequestStillLabelsTheStaleBroadcast() throws Exception {
         bridge.onStart();
@@ -178,7 +196,7 @@ public class ScanRequestTest extends AllSdks {
         systemAnnouncesResults(true);
         assertEquals("system", page.lastEvent("scan").get("source"));
 
-        // Pedido antigo (mais de 10 s) não leva o crédito.
+        // Pedido antigo (fora da janela) não leva o crédito.
         page.clear();
         Fixtures.wifi().setStartScanSucceeds(true);
         scan(1);

@@ -710,8 +710,12 @@ test('o nome vale perto de onde foi dado: o resto do andar fica sem nome, sem se
   const roomAt = (x, y) => floor.room[Math.floor((y - model.bounds.minY) / model.cell) * model.nx + Math.floor((x - model.bounds.minX) / model.cell)];
   for (const x of [10, 12, 14, 15]) assert.ok(floor.rooms[roomAt(x, 1.5)].auto, `x = ${x} m ficou com o nome "${floor.rooms[roomAt(x, 1.5)].label}"`);
   assert.ok(!floor.rooms[roomAt(1, 1.5)].auto && !floor.rooms[roomAt(4.2, 1.5)].auto);
-  // A nota convida a dar nome ao resto.
+  // A nota convida a dar nome ao resto, e o resumo em texto não chama a sobra de ambiente.
   assert.match(model.quality.notes.join(' | '), /Parte do mapa está sem nome/);
+  const words = describeMap(model).join('\n');
+  assert.match(words, /com 2 ambientes com nome e cerca de \d+ m² ainda sem nome/);
+  assert.match(words, /Ambientes: .*; sem nome: cerca de \d+ m²\./);
+  assert.doesNotMatch(words, /Ambiente 1 \(cerca de/);
 
   // Com todos os trechos batizados não sobra retalho sem nome nem a nota.
   const full = structuredClone(survey);
@@ -1271,4 +1275,32 @@ test('buildMap: o custo cresce em linha com o número de BSSIDs diferentes, não
   // cada aparelho ficou onde foi ouvido (um ponto só): a conta invertida dá o mesmo resultado
   const first = big.model.aps.find((a) => a.id === '02:00:00:00:00:00');
   assert.ok(first && Math.abs(first.x) < 1e-9 && Math.abs(first.y) < 1e-9);
+});
+
+test('bancada do mapa: os conjuntos dev, val e conf não se misturam', async () => {
+  const { listMapScenarios } = await import('./mapping/map-eval.mjs');
+  const dev = listMapScenarios('dev');
+  const val = listMapScenarios('val');
+  const conf = listMapScenarios('conf');
+  assert.equal(dev.length, 32);
+  assert.equal(val.length, 56);
+  assert.equal(conf.length, 96);
+  // conferência: 12 por mundo pronto, 16 por tamanho de casa sorteada, os quatro modos por igual
+  const count = (list, key) => list.reduce((acc, d) => ((acc[d[key]] = (acc[d[key]] || 0) + 1), acc), {});
+  assert.deepEqual(count(conf, 'group'), { apartamento: 12, sobrado: 12, escritorio: 12, kitnet: 12, 'casa-pequena': 16, 'casa-media': 16, 'casa-grande': 16 });
+  assert.deepEqual(Object.values(count(conf, 'mode')), [24, 24, 24, 24]);
+  // nenhum mundo (planta + semente) nem nome se repete entre os conjuntos
+  const key = (d) => `${d.world.type}:${d.world.id || d.world.size}:${d.world.seed}`;
+  // (o holdout de harness.mjs fica de fora até daqui: as sementes dele saem de outro sal)
+  const all = [...dev, ...val, ...conf];
+  assert.equal(new Set(all.map((d) => d.name)).size, all.length, 'nomes repetidos');
+  const seen = new Map();
+  for (const d of all) {
+    const other = seen.get(key(d));
+    assert.ok(!other || other === d.set, `o mundo ${key(d)} aparece em ${other} e em ${d.set}`);
+    seen.set(key(d), d.set);
+  }
+  // repetível: a mesma lista, com as mesmas sementes, a cada chamada
+  assert.deepEqual(listMapScenarios('conf'), conf);
+  assert.throws(() => listMapScenarios('holdout'), /conjunto desconhecido/);
 });

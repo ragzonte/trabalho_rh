@@ -41,16 +41,48 @@ não guarda nem envia a sua localização.
 ## O que esperar do mapa 3D (com honestidade)
 
 Só o sinal do Wi-Fi permite dizer **em que cômodo** você estava e mais ou menos onde dentro
-dele — nos testes com casas simuladas que o app nunca tinha visto, o erro típico de posição
-foi de **cerca de 1,5 m numa casa** e 2 a 3 m num escritório grande, com o cômodo certo em
-cerca de 80% dos pontos. O tamanho total sai com uns ±25%, e a orientação (onde é o
-"norte") é arbitrária.
+dele. Os números abaixo são de **casas simuladas**: 184 levantamentos, dos quais 96 em
+plantas, vizinhanças e caminhadas que não serviram para ajustar nada no app (os dois grupos
+dão quase o mesmo). Num celular de verdade o mapa ainda não foi medido, e o mundo real é mais
+bagunçado que o simulador.
+
+| Lugar (simulado)                 | Erro típico de posição | Leituras no cômodo certo | Tamanho do desenho / real | Área desenhada / real |
+| -------------------------------- | ---------------------- | ------------------------ | ------------------------- | --------------------- |
+| Kitnet, 30 m²                    | 0,9 m                  | 96%                      | 0,89                      | 1,33                  |
+| Casa térrea pequena, 30 a 45 m²  | 1,0 m                  | 89%                      | 1,01                      | 1,35                  |
+| Apartamento, 63 m²               | 1,2 m                  | 78%                      | 0,92                      | 1,03                  |
+| Casa térrea média, 55 a 80 m²    | 1,3 m                  | 81%                      | 0,92                      | 1,02                  |
+| Casa térrea grande, 90 a 140 m²  | 1,4 m                  | 86%                      | 0,91                      | 0,92                  |
+| Sobrado, 2 andares de 80 m²      | 1,6 m                  | 64%                      | 0,89                      | 0,88                  |
+| Escritório, 280 m²               | 2,4 m                  | 77%                      | 0,73                      | 0,56                  |
+
+- **Posição**: o "erro típico" é o mediano, depois do melhor encaixe do desenho na planta; 9 em
+  cada 10 posições erram menos que o dobro dele. Andando com as varreduras livres o erro fica
+  em 1,2 a 1,5 m; com o limite do Android (uma varredura a cada 30 s), em 1,6 m.
+- **Tamanho**: as distâncias em metros são a parte mais fraca. Saem em média 11% menores que
+  as reais (com o app inteiro conduzido no simulador, de 12 a 38% menores, conforme o lugar)
+  e, num mapa só, podem errar 25% ou mais (o pior caso visto na bancada: 40%). Informar uma
+  distância medida ("Ajustar a escala") ajuda onde o mapa saiu bem menor que o lugar e a
+  distância é grande; numa casa pequena, uma medida só não deixa o tamanho mais certo.
+- **Área**: o app alarga a área desenhada para compensar o encolhimento. Na média dá certo
+  (1,01), mas não mapa a mapa: de cada dez, um sai com menos de 0,6 e um com mais de 1,5 da
+  área real. Casa pequena costuma sair uns 30% maior; lugar grande, pela metade.
+- **Ambientes**: o mapa só é dividido em ambientes com os **nomes que você der** (pelo menos
+  dois lugares com nomes diferentes no andar). Sem nomes, as divisões tiradas só do sinal
+  ficam perto de um corte ao acaso, e o app não as desenha. Cada nome vale perto de onde foi
+  dado: com todos os cômodos marcados, cerca de 3/4 da área de cada ambiente é mesmo do
+  cômodo daquele nome (cerca de 65% com só metade dos cômodos marcados); a parte da casa sem
+  nome por perto aparece como "Ambiente", sem divisões.
+- **Sinal**: os valores são medidos; o lugar onde cada um cai no desenho é estimado. O mapa
+  de sinal erra cerca de 5 dB (3 dB se as posições fossem perfeitas).
+- **Roteador**: a posição do roteador da casa erra 1,7 m, em média.
+- A orientação (onde é o "norte") e o espelhamento são arbitrários.
 
 Por isso o mapa mostra uma **área aproximada** por onde você andou, os **ambientes** com os
-nomes que você deu, o **sinal medido** em cada lugar (essa parte é medida, não estimada) e a
-**posição provável** dos roteadores. Não é uma planta com paredes exatas — isso o Wi-Fi
-sozinho não consegue entregar — e o app não finge que é. Para um mapa melhor: ande devagar
-por todos os cômodos, pare e marque cada um com o nome, e desligue o limite de varreduras.
+nomes que você deu, o **sinal medido** nos lugares estimados e a **posição provável** dos
+roteadores. Não é uma planta com paredes exatas — isso o Wi-Fi sozinho não consegue entregar
+— e o app não finge que é. Para um mapa melhor: ande devagar por todos os cômodos, pare e
+marque cada um com o nome, e desligue o limite de varreduras.
 
 ---
 
