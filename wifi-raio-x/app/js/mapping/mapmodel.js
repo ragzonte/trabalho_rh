@@ -2094,12 +2094,13 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     // Tamanho. Na bancada (184 levantamentos) a nuvem de pontos sai em média 11% menor que a casa;
     // com confiança de escala de 0,5 ou mais, metade dos mapas erra o tamanho em mais de 10% e um em
     // cada cinco em mais de 21%; abaixo de 0,5, em mais de 19% e de 29%. O pior caso visto: 40%.
-    // "Ajustar a escala" (uma distância medida pelo usuário) NÃO é remédio garantido: na bancada (48
-    // levantamentos de conferência, uma distância real informada) o erro de tamanho ficou igual na
-    // média (15% antes, 13 a 17% depois, conforme o par escolhido); só ajudou onde o mapa tinha saído
-    // bem menor que o lugar e a distância medida era grande (escritório: 32% -> 17 a 28%). Por isso
-    // as notas dizem "ajuda quando", não "para acertar".
-    if (usable && scaleConf < 0.5) notes.push('O tamanho é incerto: as distâncias em metros podem errar 40%. Medir uma distância real, a maior que puder, em “Ajustar a escala” ajuda quando o mapa saiu bem menor que a casa.');
+    // "Ajustar a escala" (uma distância medida pelo usuário) só faz o mapa CRESCER, e só quando a
+    // distância medida não cabe nele de ponta a ponta (a conta e as medidas estão em solver-scale.js).
+    // Na bancada (140 levantamentos com lugares marcados, uma distância exata) o erro médio de tamanho
+    // cai de 17% para 13% com o par que a tela propõe e para 6% com os dois lugares mais distantes de
+    // verdade; nos mapas mais de 20% pequenos, de 29% para 20% e para 4%; com uma distância curta não
+    // muda. Por isso as notas pedem a MAIOR distância e dizem "se ele saiu pequeno", não "para acertar".
+    if (usable && scaleConf < 0.5) notes.push('O tamanho é incerto: as distâncias em metros podem errar 40%. Medir a maior distância que puder entre dois lugares marcados, em “Ajustar a escala”, faz o mapa crescer se ele saiu pequeno.');
     else if (usable && scaleConf < 0.7) notes.push('O tamanho é aproximado: as distâncias costumam sair um pouco menores que as reais e podem errar uns 25%.');
     // Sem pelo menos dois lugares com nome num andar, ele sai como uma área só (ver buildFloor).
     const plain = floors.filter((f) => !f.rooms.length).length;
@@ -2120,7 +2121,7 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     if (usable && floors.length > 1) notes.push('Mais de um andar é o caso mais difícil só com o Wi-Fi: espere mais lugares fora do cômodo certo do que numa casa térrea.');
     if (usable && wide) {
       notes.push(
-        `Lugar grande (a sua rede sai de ${ownCount} pontos de acesso): em ambientes amplos o mapa costuma sair bem menor que o real — em simulação, um escritório de 280 m² sai com 60 a 75% do tamanho e pouco mais da metade da área. Vale medir uma distância grande (10 m ou mais) em “Ajustar a escala”.`,
+        `Lugar grande (a sua rede sai de ${ownCount} pontos de acesso): em ambientes amplos o mapa costuma sair bem menor que o real — em simulação, um escritório de 280 m² sai com 60 a 75% do tamanho e pouco mais da metade da área. Vale medir a maior distância que puder, de uma ponta à outra do lugar, em “Ajustar a escala”.`,
       );
     }
   }

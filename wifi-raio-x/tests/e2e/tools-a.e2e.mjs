@@ -752,7 +752,8 @@ test('conexão: todos os campos, agrupados, batem com o que o celular informa', 
 
     assert.equal(await field('ssid'), conn.ssid);
     assert.equal(await field('bssid'), conn.bssid);
-    assert.equal(await field('security'), 'WPA/WPA2 Pessoal', 'o tipo de segurança do Android vira rótulo');
+    // o mesmo rótulo da lista de redes (o tipo genérico que o Android informa, "WPA/WPA2 Pessoal", só vale sem a rede na lista)
+    assert.equal(await field('security'), ap.security, 'a segurança tem o rótulo da rede na lista');
     assert.match(await field('standard'), /^Wi-Fi \d.* \(802\.11/);
     assert.equal(await field('validated'), 'Funcionando');
     assert.equal(await field('metered'), 'Sem limite');
@@ -775,7 +776,7 @@ test('conexão: todos os campos, agrupados, batem com o que o celular informa', 
     assert.match(speed, /Receber/);
     assert.match(speed, /Enviar/);
     assert.match(speed, /\d+% do máximo desta conexão \(/);
-    assert.match(speed, /Na prática, este Wi-Fi entrega cerca de ≈/);
+    assert.match(speed, /Na prática, pela velocidade negociada agora, este Wi-Fi entrega ≈/);
     assert.match(speed, /estimativa/);
     assert.equal(await page.locator('.cnx-speed .meter').count(), 2);
 

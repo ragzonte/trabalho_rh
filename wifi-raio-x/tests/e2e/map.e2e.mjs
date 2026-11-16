@@ -311,23 +311,47 @@ test('fluxo completo: demonstração automática -> prévia -> resultado -> salv
     assert.match(await page.getAttribute('.mlib-map__thumb img', 'src'), /^data:image\/(webp|jpeg);base64,/);
     await shot(page, 'mapa-biblioteca-com-mapa');
 
-    // abrir de novo e ajustar a escala: a distância "medida" é 30% maior do que o mapa estimava
+    // abrir de novo e ajustar a escala. A regra (app/js/mapping/solver-scale.js): a distância medida é
+    // comparada com o mapa INTEIRO, de ponta a ponta — a que não cabe nele faz o mapa crescer até
+    // caber; a que cabe não muda o tamanho. A tela diz isso antes (texto e prévia) e depois (aviso).
     await page.click(`[data-map-id="${id}"]`);
     await resultReady(page);
     await openPanel(page);
     await panelButton(page, 'Ajustar a escala').click();
     await page.waitForSelector('.mrs-scale');
-    assert.match(await text(page, '.mrs-scale'), /costumam sair um pouco menores .* podem errar 25% ou mais/);
+    const scaleText = await text(page, '.mrs-scale');
+    assert.match(scaleText, /o mapa costuma sair menor que a casa \(uns 15%, em média; em lugares grandes, bem mais\)/);
+    assert.match(scaleText, /mostra o tamanho mínimo que a casa tem: se ela não couber no mapa, o mapa inteiro cresce até caber/);
+    assert.match(scaleText, /Escolha dois lugares distantes, de preferência os dois mais afastados da casa e com uma linha reta entre eles, e meça com uma trena ou conte passos largos \(um passo largo ≈ 0,8.m\)/);
+    assert.match(scaleText, /O ajuste só aumenta o mapa, nunca diminui/);
+    assert.equal(await page.locator('.mrs-scale input').count(), 1, 'a segunda medida só aparece se a pessoa pedir');
     const estimate = await text(page, '.mrs-scale__now');
     const meters = Number(estimate.match(/≈\s*([\d,]+)/)[1].replace(',', '.'));
     assert.ok(meters >= 1, `distância estimada: ${estimate}`);
     await page.fill('.mrs-scale input', 'abc');
     await page.click('.sheet__footer .btn--primary');
     assert.match(await text(page, '.mrs-scale .field__error'), /metros/);
-    const real = Math.round(meters * 13) / 10;
-    await page.fill('.mrs-scale input', String(real).replace('.', ','));
+    // uma distância que cabe no mapa: a prévia avisa que o tamanho não mudaria
+    const hint = page.locator('.mrs-scale .field__hint');
+    await page.fill('.mrs-scale input', String(Math.max(0.5, Math.round(meters * 5) / 10)).replace('.', ','));
+    assert.equal(await hint.getAttribute('data-kind'), 'fits');
+    assert.match(await hint.textContent(), /cabe no mapa de hoje \(≈.[\d,]+.m de ponta a ponta\): o tamanho não mudaria/);
+    // uma distância que não cabe: a prévia diz quanto o mapa vai crescer (o comprimento do mapa
+    // inteiro fica entre 1 e ~2 vezes a distância do par proposto; procura a primeira que não cabe)
+    let real = 0;
+    let promised = 0;
+    for (const times of [1.3, 1.6, 1.9]) {
+      real = Math.round(meters * times * 10) / 10;
+      await page.fill('.mrs-scale input', String(real).replace('.', ','));
+      if ((await hint.getAttribute('data-kind')) !== 'grow') continue;
+      promised = Number((await hint.textContent()).match(/cresce uns (\d+)%/)[1]);
+      break;
+    }
+    assert.ok(promised >= 1, `a prévia promete crescimento: ${await hint.textContent()}`);
     await page.click('.sheet__footer .btn--primary');
-    await toastWith(page, /Escala ajustada/, 60_000);
+    await toastWith(page, /O mapa cresceu \d+%: a distância medida não cabia nele/, 60_000);
+    const grew = Number((await page.$$eval('.toast__text', (els) => els.map((el) => el.textContent).join(' | '))).match(/O mapa cresceu (\d+)%/)[1]);
+    assert.ok(Math.abs(grew - promised) <= 1, `o mapa cresceu ${grew}% (a prévia dizia ${promised}%)`);
     stored = await savedMaps(page);
     assert.equal(stored.maps[0].known.length, 1);
     assert.equal(stored.maps[0].known[0].meters, real);

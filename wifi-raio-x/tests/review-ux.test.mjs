@@ -174,19 +174,26 @@ describe('ux-05: limite de buscas do Android', () => {
     }
   });
 
+  test('as peças comuns da interface não dependem de carregar o diagnóstico inteiro', () => {
+    // (ui/components.js entra em todas as telas; core/insights.js é pesado e, em Exportar, opcional)
+    assert.doesNotMatch(source('ui/components.js'), /core\/insights\.js'/);
+    assert.match(source('ui/components.js'), /from '\.\.\/core\/scan-throttle\.js'/);
+    assert.doesNotMatch(source('core/scan-throttle.js'), /^import /m, 'o módulo do limite de buscas não importa nada');
+  });
+
   test('o diagnóstico e o painel de ajuda usam o mesmo nome da chave', () => {
     assert.ok(insight({ sdk: 30 }).text.includes(`"${THROTTLE_OPTION_NAME}"`));
     // a chave só é escrita num lugar; as telas pegam de lá
-    assert.deepEqual(filesWith(THROTTLE_OPTION_NAME), ['core/insights.js']);
+    assert.deepEqual(filesWith(THROTTLE_OPTION_NAME), ['core/scan-throttle.js']);
     assert.deepEqual(filesWith('Limitação da busca'), []);
     assert.match(code(source('ui/components.js')), /copy\.optionName/);
     // o "toque 7 vezes" também
-    assert.deepEqual(filesWith('toque 7 vezes'), ['core/insights.js']);
+    assert.deepEqual(filesWith('toque 7 vezes'), ['core/scan-throttle.js']);
   });
 
   test('nenhuma tela escreve por conta própria que "dá para liberar/desligar" o limite', () => {
     // (a frase vem de scanThrottleCopy / pointByPointNote, que sabem a versão do Android)
-    assert.deepEqual(filesWith(/Dá para (liberar|desligar)/).sort(), ['core/insights.js', 'ui/map/map-ui-logic.js']);
+    assert.deepEqual(filesWith(/Dá para (liberar|desligar)/).sort(), ['core/scan-throttle.js', 'ui/map/map-ui-logic.js']);
     assert.match(source('ui/tools/about.js'), /A partir do Android 10 dá para desligar o limite/);
   });
 });

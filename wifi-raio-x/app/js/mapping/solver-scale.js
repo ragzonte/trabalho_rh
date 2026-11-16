@@ -38,11 +38,19 @@
 // as duas maiores distâncias da casa o mapa passava 3% do ponto). `weight` é a parte da incerteza
 // de antes que a medida tirou (0 = nenhuma, perto de 1 = o tamanho passou a vir da medida).
 //
-// Resultado na bancada (erro médio do tamanho, |mapa/real − 1|; antes -> depois, uma distância
-// exata): par proposto pela tela 0,17 -> 0,12 a 0,13; os dois lugares mais distantes de verdade
-// 0,17 -> 0,06; um par qualquer 0,17 -> 0,16; um par curto (2 a 4 m) não muda nada. Nos mapas que
-// saíram mais de 20% pequenos (escritório, casa grande): 0,29 -> 0,17 a 0,22 com o par proposto e
-// 0,06 com o par certo. Em nenhuma família de casas o erro médio piorou.
+// RESULTADO NA BANCADA (140 levantamentos com lugares marcados, uma distância exata, o solucionador
+// inteiro; erro médio do tamanho, |mapa/real − 1|, antes -> depois):
+//   par proposto pela tela (o mais distante no mapa)     0,168 -> 0,130   (regra antiga: 0,165)
+//   os dois lugares mais distantes de verdade            0,168 -> 0,061   (regra antiga: 0,153)
+//   um par distante qualquer (60% da maior distância)    0,168 -> 0,132   (regra antiga: 0,129)
+//   um par qualquer de 3 m ou mais                       0,168 -> 0,155   (regra antiga: 0,140)
+//   um par curto, de 2 a 4 m                             0,168 -> 0,166   (não muda nada)
+// Nos mapas que saíram mais de 20% pequenos (escritório, casas grandes): 0,285 -> 0,195 com o par
+// proposto e 0,039 com o par certo. Em nenhuma família de casas o erro médio piorou, com nenhum
+// desses pares, e a nota da bancada melhora em todos (48,2 -> 46,5 com o par proposto). O que se
+// perde: num mapa que saiu GRANDE (1 em cada 8) a medida não conserta nada — com o par mais
+// distante de verdade o erro até sobe um pouco (0,129 -> 0,164), pela folga do teto —, e com um
+// par sorteado ao acaso a regra antiga, de régua pelo par, ia um pouco melhor.
 
 /** Desvio-padrão (em ln) do tamanho do mapa em torno do real quando não há medida nenhuma. */
 export const SCALE_PRIOR_SD = 0.24;

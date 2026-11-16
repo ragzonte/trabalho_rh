@@ -18,7 +18,7 @@ import { h, nb, sheet, toast, cssVar, fmtDbm, fmtBand, fmtAgo, uid, NO_VALUE } f
 import { icon } from './icons.js';
 import { signalLevel } from '../core/signal.js';
 import { standardInfo } from '../core/phy.js';
-import { scanThrottleCopy } from '../core/insights.js';
+import { scanThrottleCopy } from '../core/scan-throttle.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 
@@ -641,7 +641,7 @@ export function textField({ label, value = '', placeholder, hint, error, type = 
 // ---------------------------------------------------------------------------
 
 /**
- * Os textos do limite de buscas para o aparelho de agora (core/insights.js: scanThrottleCopy).
+ * Os textos do limite de buscas para o aparelho de agora (core/scan-throttle.js: scanThrottleCopy).
  * Antes do primeiro "status" não se sabe a versão do Android: vale o caso comum (dá para liberar).
  * @param {{get:() => object}} store
  */

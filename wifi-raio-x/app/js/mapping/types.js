@@ -57,7 +57,10 @@ export const FLOOR_HEIGHT = 2.8;
  * @property {Object<string,{ssid:string, freq:number, device?:string}>} aps
  *           dados de cada BSSID visto; `device` identifica o aparelho físico (BSSIDs do mesmo roteador têm o mesmo `device`)
  * @property {{a:number, b:number, meters:number}[]} [knownDistances]
- *           calibração opcional do usuário: distância real (m) entre as varreduras de índice `a` e `b`
+ *           calibração opcional do usuário: distância real (m) entre as varreduras de índice `a` e `b`.
+ *           O solucionador compara a medida com o mapa inteiro, de ponta a ponta: a que não cabe nele
+ *           faz o mapa crescer até caber; a que cabe só acerta a distância entre os dois pontos (ver
+ *           solver-scale.js). O ajuste nunca encolhe o mapa
  */
 
 /**
@@ -68,7 +71,11 @@ export const FLOOR_HEIGHT = 2.8;
  * @property {Object<string,{x:number, y:number, z:number, p0:number, n:number, conf:number}>} aps
  *           por BSSID: posição estimada e o modelo ajustado  rssi(d) = p0 - 10 * n * log10(d)  (p0 = dBm a 1 m)
  * @property {number} scaleConf     0..1: confiança na escala absoluta (metros)
- * @property {object} [debug]
+ * @property {object} [debug]      resumo pequeno do que o solucionador fez (não é guardado com o mapa). Quando o
+ *           levantamento traz knownDistances, `debug.scaleAdjust` = {applied, factor, weight, used, ignored,
+ *           spanM, longestM}: se o mapa cresceu, por quanto (factor >= 1), o quanto as medidas passaram a mandar
+ *           no tamanho (weight, 0..1), quantas foram aceitas e ignoradas, quanto cabia no mapa de ponta a ponta
+ *           antes do ajuste (m) e a maior medida aceita (m)
  */
 
 // ---------------------------------------------------------------------------

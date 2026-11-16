@@ -320,7 +320,8 @@ test('ux-01: com o Android limitando as buscas, as instruções do mapa são as 
     await page.click('[aria-label="Mais opções do mapeamento"]');
     await page.locator('.sheet .row', { hasText: 'Como fazer um bom mapa' }).click();
     await page.waitForSelector('.sheet .map-tip');
-    const tips = await textOf(page, '.sheet');
+    // (o menu de ações ainda pode estar saindo da tela: lê o painel que tem as dicas)
+    const tips = flat(await page.locator('.sheet', { has: page.locator('.map-tip') }).innerText());
     assert.match(tips, /Marque pelo menos 12 lugares/);
     assert.doesNotMatch(tips, /Ande devagar|caminho andado/);
     await back(page);

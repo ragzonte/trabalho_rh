@@ -62,8 +62,10 @@ bagunçado que o simulador.
 - **Tamanho**: as distâncias em metros são a parte mais fraca. Saem em média 11% menores que
   as reais (com o app inteiro conduzido no simulador, de 12 a 38% menores, conforme o lugar)
   e, num mapa só, podem errar 25% ou mais (o pior caso visto na bancada: 40%). Informar uma
-  distância medida ("Ajustar a escala") ajuda onde o mapa saiu bem menor que o lugar e a
-  distância é grande; numa casa pequena, uma medida só não deixa o tamanho mais certo.
+  distância medida ("Ajustar a escala") só faz o mapa crescer, e só quando a distância não
+  cabe nele de ponta a ponta: com os dois lugares marcados mais distantes de verdade o erro
+  médio de tamanho cai de 17% para 6%; com o par que o app propõe (o mais distante no mapa),
+  para 13%; com uma distância curta nada muda, e um mapa que saiu grande não é corrigido.
 - **Área**: o app alarga a área desenhada para compensar o encolhimento. Na média dá certo
   (1,01), mas não mapa a mapa: de cada dez, um sai com menos de 0,6 e um com mais de 1,5 da
   área real. Casa pequena costuma sair uns 30% maior; lugar grande, pela metade.

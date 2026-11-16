@@ -24,6 +24,7 @@ import * as ouiMod from '../app/js/core/oui.js';
 import * as ratingMod from '../app/js/core/channel-rating.js';
 import * as bestMod from '../app/js/core/best-network.js';
 import * as insightsMod from '../app/js/core/insights.js';
+import * as scanThrottleMod from '../app/js/core/scan-throttle.js';
 import { apartment, mesh, office, wifi7, TS } from './fixtures/scans.mjs';
 
 const {
@@ -364,7 +365,7 @@ function checkOutput(out, label) {
 // ---------------------------------------------------------------------------
 
 describe('core/index.js', () => {
-  const MODULES = { signal: signalMod, phy: phyMod, channels: channelsMod, model: modelMod, ies: iesMod, security: securityMod, oui: ouiMod, 'channel-rating': ratingMod, 'best-network': bestMod, insights: insightsMod };
+  const MODULES = { signal: signalMod, phy: phyMod, channels: channelsMod, model: modelMod, ies: iesMod, security: securityMod, oui: ouiMod, 'channel-rating': ratingMod, 'best-network': bestMod, insights: insightsMod, 'scan-throttle': scanThrottleMod };
 
   test('reexporta tudo o que os módulos exportam, com o mesmo valor e sem default', () => {
     const owner = new Map();

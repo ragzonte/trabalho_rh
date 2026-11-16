@@ -149,4 +149,7 @@ export {
 } from './best-network.js';
 
 // Diagnóstico automático em português claro
-export { buildInsights, THROTTLE_OPTION_NAME, THROTTLE_SWITCH_SDK, canLiftScanThrottle, scanThrottleCopy } from './insights.js';
+export { buildInsights } from './insights.js';
+
+// Limite de buscas do Android: o nome da chave e quem pode desligá-la (os textos que as telas repetem)
+export { THROTTLE_OPTION_NAME, THROTTLE_SWITCH_SDK, canLiftScanThrottle, scanThrottleCopy } from './scan-throttle.js';

@@ -492,7 +492,7 @@ test('velocidade: antes do primeiro teste a tela diz com quem fala e quanto gast
     assert.match(intro, /só quando você pede/);
     assert.doesNotMatch(intro, /única função/, 'o teste de latência também usa a internet: a tela não afirma o contrário');
     assert.match(intro, /Nunca usa os dados móveis/);
-    assert.match(intro, /450\sMB num plano de 300\sMb\/s/);
+    assert.match(intro, /para cada Mb\/s, em cada direção \(num plano de 300\sMb\/s de download e 150 de upload, ≈\s450\sMB\)/);
     assert.match(intro, /Leve: até cerca de 35\sMB/);
     assert.equal(await page.getAttribute('.seg__opt:has-text("Completo")', 'aria-checked'), 'true');
     assert.equal(await page.locator('.gauge').count(), 0, 'sem teste ainda não há mostrador vazio');

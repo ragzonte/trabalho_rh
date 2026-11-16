@@ -1014,7 +1014,7 @@ export async function mountResult(root, env, { id }) {
           'p',
           null,
           h('strong', null, 'O tamanho. '),
-          `As distâncias em metros são a parte mais fraca: saem em média uns ${ACCURACY.shrinkPct}% menores que as reais e podem errar ${ACCURACY.scalePct}% ou mais, sobretudo em lugares grandes. A área do desenho compensa esse efeito na média, não em cada mapa: numa casa pequena costuma sair uns ${ACCURACY.smallAreaOverPct}% maior que a real, e num lugar grande, bem menor. Medir uma distância de verdade em “Ajustar a escala” ajuda, sobretudo em lugares grandes.`,
+          `As distâncias em metros são a parte mais fraca: saem em média uns ${ACCURACY.shrinkPct}% menores que as reais e podem errar ${ACCURACY.scalePct}% ou mais, sobretudo em lugares grandes. A área do desenho compensa esse efeito na média, não em cada mapa: numa casa pequena costuma sair uns ${ACCURACY.smallAreaOverPct}% maior que a real, e num lugar grande, bem menor. Medir, em “Ajustar a escala”, a distância entre os dois lugares mais afastados faz o mapa crescer quando ele saiu pequeno; o ajuste não diminui um mapa que saiu grande.`,
         ),
         h('p', null, h('strong', null, 'Por que pode sair girado ou espelhado. '), 'O Wi-Fi não sabe onde fica o norte nem o que é esquerda ou direita. Gire o mapa com o dedo até reconhecer a casa. Os andares são os que você marcou.'),
         h(
