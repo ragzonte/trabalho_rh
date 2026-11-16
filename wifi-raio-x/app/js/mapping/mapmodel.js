@@ -49,6 +49,7 @@ const TUNE = {
   roomEdgeHi: 6, // acima do número típico de ambientes: só fronteira mais forte que isto (x a diferença de dentro) separa
   roomEdgeLo: 1.8, // abaixo dele: só fronteira mais fraca que isto junta
   roomSeedK: 0.5, // peso da distância às marcas quando ambientes com nome disputam um pedaço
+  roomNameReachM: 2.8, // um ambiente com nome não passa disto (m) das marcas dele: o raio de um cômodo grande (roomM2Hi = π r²)
   roomM2Lo: 8, // no máximo um ambiente a cada 8 m²...
   roomM2Hi: 24, // ...e no mínimo um a cada 24 m²
   roomKnn: 5,
@@ -562,11 +563,25 @@ function buildArea(ctx, grid, members) {
   // O ponto mais incerto alcança mais longe, mas com a mesma "massa" (a densidade dele fica mais
   // rala): sozinho continua sem garantir área; onde há muitos, a borda avança. Posição exata
   // (confiança 1) não muda nada. Na bancada, com o solucionador de verdade, a área estimada passou de
-  // 0,65 para 0,95 da real (0,68 -> 0,99 em casas que não serviram de ajuste) e a sobreposição com a
-  // planta (IoU) de 0,55 para 0,64, sem mexer na posição de nenhum ponto nem dos roteadores. O que a
-  // conta não conserta é a escala de um mapa só (±15%) nem lugar grande que todo motor encolhe
-  // (escritório de 20 x 14 m: 0,55). A CONFIANÇA de cada célula continua medindo a distância ao
-  // caminho estimado, então a faixa que entrou só por causa da incerteza aparece como incerta.
+  // 0,65 para 0,95 da real (0,68 -> 0,99 em casas que não serviram de ajuste; 0,72 -> 1,04 em 96
+  // levantamentos de conferência, com outras sementes) e a sobreposição com a planta (IoU) de 0,55
+  // para 0,64 (0,59 -> 0,67 na conferência), sem mexer na posição de nenhum ponto nem dos roteadores.
+  //
+  // O QUE A CONTA NÃO FAZ (medido nos 184 levantamentos; vale dizer na tela):
+  //  - não prevê o mapa de cada um: na prática o alargamento multiplica a área por ~1,45 em todos, e
+  //    acerta NA MÉDIA. Mapa a mapa a área fica entre 0,6 e 1,5 da real (de cada dez, um abaixo e um
+  //    acima disso), porque a escala de um mapa só erra ±15% e a área vai com o quadrado dela;
+  //  - casa pequena (até ~45 m²; 52 levantamentos), que já saía quase do tamanho certo (0,91), passa
+  //    a sair em média 1,34 vez maior, com a sobreposição com a planta igual ou um pouco pior
+  //    (0,68 -> 0,67): ali o alargamento não ajuda. Diminuí-lo pelo tamanho do desenho foi testado e
+  //    piora o conjunto (o desenho pequeno é, muitas vezes, uma casa média que saiu encolhida).
+  //    Lugar grande que todo motor encolhe continua pela metade (escritório de 20 x 14 m: 0,56);
+  //  - levantamento pela metade: a área pode passar do que foi andado (apartamento com 20 a 50
+  //    leituras: 1,2 a 1,8 vez o pisado);
+  //  - depende do erro que a solução declara: se ela declarar o triplo do erro real, uma casa pequena
+  //    sai com o dobro da área. O teto é `areaErrConfMin`: nenhum ponto alcança mais de 2,9 m.
+  // A CONFIANÇA de cada célula continua medindo a distância ao caminho estimado, então a faixa que
+  // entrou só por causa da incerteza aparece como menos certa (hachura no 2D, cor lavada no 3D).
   const reachOf = (k) => reachGain(ctx, path[k].conf);
   const near = new Float32Array(size); // alcance: como `conf`, com o núcleo de cada ponto alargado pelo erro dele
   const mark = (x, y, wDens, wConf, g) => {
@@ -981,55 +996,54 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
       } else cross[x].set(y, [w, 1]);
     }
   }
-  // Com nomes no andar, primeiro os ambientes com nome crescem sobre os pedaços sem nome que
-  // encostam neles (como uma bacia a partir de cada marca): pedaço sem nome não se junta a
-  // outro sem nome antes disso, senão um bloco inteiro iria parar num ambiente só.
-  let seeded = labelNames.length >= 2;
+  // COM NOMES NO ANDAR (dois ou mais) os ambientes saem dos nomes, em três passos:
+  //  1. cada ambiente com nome cresce sobre os pedaços sem nome que encostam nele (como uma bacia a
+  //     partir de cada marca) — mas só até `roomNameReachM` das marcas dele. Quem deu nome a um
+  //     lugar disse onde está AQUELE lugar, não o resto da casa: sem esse limite, um apartamento de
+  //     seis cômodos com dois nomes saía inteiro pintado de "Sala" e "Cozinha" (na conferência, com
+  //     um terço dos cômodos batizados, só 50% da área com nome era mesmo do cômodo daquele nome, e
+  //     os nomes cobriam 84% da casa);
+  //  2. o que sobrou sem nome (longe de toda marca, ou atrás de uma fronteira forte) NÃO é repartido
+  //     pelo sinal — é a mesma decisão de buildFloor: sem nomes, as divisões sairiam quase ao acaso —;
+  //     os pedaços vizinhos viram um trecho só, que aparece como "Ambiente N" (nome automático);
+  //  3. sobra pequena demais para ser um cômodo (menos de `roomM2Lo`) vai para o ambiente com nome
+  //     de fronteira mais fraca: num mapa todo batizado não ficam retalhos sem nome.
+  // Pedaço sem nome não se junta a outro sem nome antes do passo 1, senão um bloco inteiro iria
+  // parar num ambiente só.
+  const namedMode = labelNames.length >= 2;
+  let phase = namedMode ? 'seed' : 'free';
   const seeds = labelNames.map(() => []);
   for (let a = 0; a < m; a++) if (scanLabel[a] >= 0) seeds[scanLabel[a]].push(members[a]);
+  const reach2 = tune.roomNameReachM * tune.roomNameReachM;
+  // Distância² do centro de um pedaço à marca mais próxima de um ambiente com nome.
+  const seedDist2 = (named, blob) => {
+    const bx = cs[blob * dim] / cn[blob];
+    const by = cs[blob * dim + 1] / cn[blob];
+    let d2 = Infinity;
+    for (const s of seeds[lab[named]]) d2 = Math.min(d2, (path[s].x - bx) ** 2 + (path[s].y - by) ** 2);
+    return d2;
+  };
   const strength = (a, b, e) => {
     if (lab[a] >= 0 && lab[b] >= 0 && lab[a] !== lab[b]) return Infinity;
     // Na fase das marcas a referência é o típico do andar, igual para todos: com a diferença
     // "de dentro" de cada um, o ambiente que cresce primeiro passaria a ganhar todas as disputas.
     // Entra também a distância do pedaço às marcas do ambiente: sem contraste de sinal que
     // decida, o pedaço fica com o ambiente cuja marca está mais perto.
-    if (seeded) {
+    if (phase === 'seed') {
       const named = lab[a] >= 0 ? a : b;
-      const blob = named === a ? b : a;
-      const bx = cs[blob * dim] / cn[blob];
-      const by = cs[blob * dim + 1] / cn[blob];
-      let d2 = Infinity;
-      for (const s of seeds[lab[named]]) d2 = Math.min(d2, (path[s].x - bx) ** 2 + (path[s].y - by) ** 2);
+      const d2 = seedDist2(named, named === a ? b : a);
+      if (d2 > reach2) return Infinity;
       return e[0] / e[1] / typical + (tune.roomSeedK * Math.sqrt(d2)) / tune.roomPosM;
     }
+    if (phase === 'rest') return e[0] / e[1];
     // A referência "de dentro" puxa para o típico do andar quando os pedaços têm poucas arestas.
     const inner = (intSum[a] + intSum[b] + 4 * typical) / (intCnt[a] + intCnt[b] + 4);
     return e[0] / e[1] / inner;
   };
-  while (count > kMin) {
-    let best = Infinity;
-    let ba = -1;
-    let bb = -1;
-    for (let a = 0; a < m; a++) {
-      if (!alive[a]) continue;
-      for (const [c, e] of cross[a]) {
-        if (c < a || (seeded && lab[a] < 0 === lab[c] < 0)) continue;
-        const v = strength(a, c, e);
-        if (v < best || (v === best && (a < ba || (a === ba && c < bb)))) {
-          best = v;
-          ba = a;
-          bb = c;
-        }
-      }
-    }
-    if (seeded && (ba < 0 || best > tune.roomEdgeHi)) {
-      seeded = false; // o que sobrou tem fronteira forte com os ambientes com nome: segue a regra geral
-      continue;
-    }
-    if (ba < 0 || best === Infinity) break;
-    // Acima do número típico de ambientes só fica separado o que tem fronteira forte; abaixo
-    // dele só se junta o que quase não tem fronteira (sala grande, escritório aberto).
-    if (count <= kMax && best > (count > kMid ? tune.roomEdgeHi : tune.roomEdgeLo)) break;
+  // Junta dois grupos vizinhos (o de índice maior entra no menor), com as fronteiras em dia nos dois sentidos.
+  const join = (ga, gb) => {
+    const ba = Math.min(ga, gb);
+    const bb = Math.max(ga, gb);
     intSum[ba] += intSum[bb] + cross[ba].get(bb)[0];
     intCnt[ba] += intCnt[bb] + cross[ba].get(bb)[1];
     cross[ba].delete(bb);
@@ -1040,6 +1054,11 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
       if (mine) {
         mine[0] += e[0];
         mine[1] += e[1];
+        const back = cross[c].get(ba);
+        if (back && back !== mine) {
+          back[0] += e[0];
+          back[1] += e[1];
+        }
       } else {
         const fresh = [e[0], e[1]];
         cross[ba].set(c, fresh);
@@ -1048,6 +1067,54 @@ function clusterRooms(ctx, members, areaM2, useLabels) {
     }
     cross[bb].clear();
     merge(ba, bb);
+  };
+  while (phase !== 'free' || count > kMin) {
+    let best = Infinity;
+    let ba = -1;
+    let bb = -1;
+    for (let a = 0; a < m; a++) {
+      if (!alive[a]) continue;
+      for (const [c, e] of cross[a]) {
+        if (c < a) continue;
+        if (phase === 'seed' && lab[a] < 0 === lab[c] < 0) continue; // só ambiente com nome x pedaço sem nome
+        if (phase === 'rest' && (lab[a] >= 0 || lab[c] >= 0)) continue; // só sobra x sobra
+        const v = strength(a, c, e);
+        if (v < best || (v === best && (a < ba || (a === ba && c < bb)))) {
+          best = v;
+          ba = a;
+          bb = c;
+        }
+      }
+    }
+    if (phase === 'seed' && (ba < 0 || best > tune.roomEdgeHi)) {
+      phase = 'rest'; // o que sobrou está longe das marcas ou tem fronteira forte com os ambientes com nome
+      continue;
+    }
+    if (ba < 0 || best === Infinity) break;
+    // (sem nomes: só a bancada chega aqui) Acima do número típico de ambientes só fica separado o que
+    // tem fronteira forte; abaixo dele só se junta o que quase não tem fronteira (sala grande, escritório aberto).
+    if (phase === 'free' && count <= kMax && best > (count > kMid ? tune.roomEdgeHi : tune.roomEdgeLo)) break;
+    join(ba, bb);
+  }
+  if (namedMode) {
+    // Passo 3: sobra menor que um cômodo pequeno vai para o vizinho com nome de fronteira mais fraca.
+    for (let guard = 0; guard < m; guard++) {
+      let pick = null;
+      for (let a = 0; a < m && !pick; a++) {
+        if (!alive[a] || lab[a] >= 0 || cn[a] * mass * tune.roomUnitM2 >= tune.roomM2Lo) continue;
+        let best = Infinity;
+        for (const [c, e] of cross[a]) {
+          if (lab[c] < 0) continue;
+          const v = e[0] / e[1] / typical + (tune.roomSeedK * Math.sqrt(seedDist2(c, a))) / tune.roomPosM;
+          if (v < best || (v === best && pick && c < pick[1])) {
+            best = v;
+            pick = [a, c];
+          }
+        }
+      }
+      if (!pick) break;
+      join(pick[0], pick[1]);
+    }
   }
 
   const assign = new Int32Array(m);
@@ -1688,10 +1755,15 @@ function buildFloor(ctx, grid, floorNumber, opts) {
   // pouco mais do que cortar a área ao acaso em pedaços contíguos: na bancada (88 levantamentos),
   // concordância com os cômodos reais (ARI, onde o mapa tem área) de 0,38 contra 0,27 do corte ao
   // acaso, e 0,61 com nomes; de cada "ambiente" automático, 71% era de um cômodo só (67% ao
-  // acaso, 82% com nomes). Desenhar divisões assim com cara de planta seria fingir uma certeza que
-  // não existe: sem nomes o andar sai como uma área só (sem ambientes e sem divisões internas), e
+  // acaso, 82% com nomes). Em 96 levantamentos de conferência (outras sementes): 0,40 contra 0,29
+  // e 0,62; 71% contra 65% e 83%; o automático ganha do acaso em 3 de cada 4 mapas, mas num
+  // apartamento, numa casa média, num sobrado ou num escritório os dois empatam. Desenhar divisões
+  // assim com cara de planta seria fingir uma certeza que não existe: sem nomes o andar sai como
+  // uma área só (sem ambientes e sem divisões internas), e
   // o sinal, o caminho e os roteadores continuam lá. `autoRooms: true` (só a bancada usa) força o
   // agrupamento automático, para a medida poder ser refeita.
+  // Com nomes, cada ambiente fica perto das marcas dele e o que sobra longe de toda marca vira um
+  // trecho sem nome ("Ambiente N"), sem ser repartido (ver clusterRooms).
   const useLabels = opts.labels !== false;
   const partition = opts.autoRooms === true || (useLabels && namedPlaces(ctx, members) >= 2);
   const clusters = partition ? clusterRooms(ctx, members, areaM2, useLabels) : { assign: new Int32Array(members.length), groups: [] };
@@ -1958,21 +2030,27 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
   const collapsed = ctx.collapsed;
 
   // ERRO TÍPICO ESPERADO (mediano, em metros). Duas fontes, que erram de jeitos diferentes:
-  //  - o tamanho do lugar: na bancada (88 levantamentos simulados, solucionador final) o erro mediano
-  //    cresce perto da raiz da área de um andar — 0,8 m numa kitnet de 30 m², 1,2 m num apartamento
-  //    de 63 m², 2,2 m num escritório de 280 m² —, é ~45% maior com uma varredura a cada 30 s e
-  //    ~35% maior numa casa de dois andares;
+  //  - o tamanho do lugar: na bancada (184 levantamentos simulados: os 88 de map-eval.mjs e 96 de
+  //    conferência, com outras sementes) o erro mediano cresce perto da raiz da área de um andar —
+  //    0,9 m numa kitnet de 30 m², 1,2 m num apartamento de 63 m², 2,4 m num escritório de 280 m² —,
+  //    é ~20% maior com uma varredura a cada 30 s (1,6 m contra 1,3 m; parar em pontos com as
+  //    varreduras livres dá 1,5 m) e ~15% maior numa casa de dois andares (1,6 m contra 1,4 m);
   //  - o que a própria solução declara: a confiança de cada ponto vem da discordância entre os
   //    motores ali (conf = 1 / (1 + (e / 1,5)²)), e dela sai o erro do levantamento pela calibração
   //    do solucionador. Sozinha ela subestima os lugares grandes, que todos os motores encolhem
   //    juntos sem discordar.
-  // A média das duas errou 0,27 m em média na bancada (viés +0,07 m); cada uma sozinha, ~0,30 m.
+  // A média das duas erra 0,31 m em média (viés +0,05 m): 0,28 m nos 88 levantamentos em que as
+  // constantes foram ajustadas e 0,34 m nos 96 de conferência; o que a solução declara, sozinho,
+  // 0,30 m. Os dois multiplicadores já foram 1,45 e 1,35 (tirados só dos primeiros 88): nos de
+  // conferência exageravam o erro em 0,3 m nas varreduras lentas e nos sobrados, e foram reduzidos
+  // ao que os 184 sustentam. O escritório continua subestimado (2,2 m declarados, 2,4 m reais; nos
+  // piores casos 2,0 contra 3,5 m).
   // Solução sem confiança própria (todas iguais: posições dadas de fora) fica só com o tamanho.
   const perFloor = Math.max(8, areaM2 / Math.max(1, floors.length));
   const typical = 1.2 * Math.pow(perFloor / 60, 0.54);
   let err = typical;
-  if (cadence > 10) err *= 1.45;
-  if (floors.length > 1) err *= 1.35;
+  if (cadence > 10) err *= 1.2;
+  if (floors.length > 1) err *= 1.15;
   if (P && !flat) {
     const point = CONF_HALF_M * Math.sqrt(1 / clamp(median(confs), 0.02, 1) - 1);
     const declared = SURVEY_ERR[0] + SURVEY_ERR[1] * Math.max(0, (point - POINT_ERR[0]) / POINT_ERR[1]);
@@ -2010,22 +2088,31 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     else if (P >= 25 && P < 50) notes.push('O mapa melhora com mais leituras: ande mais devagar e passe por todos os cômodos.');
     if (usable && often > 2 && strong < 3) notes.push('Só um roteador chega forte aqui: as posições ficam menos precisas.');
     if (cadence > 10) notes.push('Leituras lentas (o Android limita a uma a cada 30 s): marque mais lugares ou desligue o limite nas opções do desenvolvedor.');
-    // Tamanho. Na bancada a nuvem de pontos sai em média 13% menor que a casa; com esta confiança
-    // de escala, metade dos mapas erra o tamanho em mais de 11% (abaixo de 0,5: em mais de 25%).
+    // Tamanho. Na bancada (184 levantamentos) a nuvem de pontos sai em média 11% menor que a casa;
+    // com confiança de escala de 0,5 ou mais, metade dos mapas erra o tamanho em mais de 10% e um em
+    // cada cinco em mais de 21%; abaixo de 0,5, em mais de 19% e de 29%. O pior caso visto: 40%.
     if (usable && scaleConf < 0.5) notes.push('O tamanho é incerto: as distâncias em metros podem errar 40%. Para acertar, informe uma distância real em “Ajustar a escala”.');
     else if (usable && scaleConf < 0.7) notes.push('O tamanho é aproximado: as distâncias costumam sair um pouco menores que as reais e podem errar uns 25%.');
     // Sem pelo menos dois lugares com nome num andar, ele sai como uma área só (ver buildFloor).
     const plain = floors.filter((f) => !f.rooms.length).length;
-    const named = new Set(spots.map((s) => s.label.toLowerCase()).filter(Boolean)).size;
+    const named = spots.filter((s) => s.label).length;
     if (plain === floors.length) {
       if (!named) notes.push('O mapa não separa os ambientes porque nenhum lugar tem nome: pare em pelo menos dois cômodos, marque o lugar e diga onde está.');
-      else notes.push('Só um lugar tem nome: marque pelo menos mais um para o mapa separar os ambientes.');
-    } else if (plain > 0) notes.push('Num dos andares há menos de dois lugares com nome: ali o mapa não separa os ambientes.');
+      else if (named === 1) notes.push('Só um lugar tem nome: marque pelo menos mais um para o mapa separar os ambientes.');
+      else if (floors.length > 1) notes.push('Nenhum andar tem dois lugares com nomes diferentes: para o mapa separar os ambientes, marque pelo menos dois cômodos em cada andar e dê um nome a cada um.');
+      else notes.push('Os lugares marcados têm todos o mesmo nome: dê nome a pelo menos mais um cômodo para o mapa separar os ambientes.');
+    } else if (plain > 0) notes.push('Num dos andares há menos de dois lugares com nomes diferentes: ali o mapa não separa os ambientes.');
+    // Andar com nomes e uma parte sem nome ("Ambiente N"): o nome só vale perto de onde foi dado, e
+    // com poucos nomes um ambiente ainda invade o vizinho (na bancada, com metade dos cômodos
+    // batizados, 60 a 65% da área com nome é mesmo do cômodo daquele nome; com todos, 78%).
+    if (floors.some((f) => f.rooms.some((r) => r.auto) && f.rooms.some((r) => !r.auto))) {
+      notes.push('Parte do mapa está sem nome (“Ambiente”): pare nesses cômodos e marque cada um com o nome. Quanto mais cômodos com nome, mais certas ficam as divisões.');
+    }
     if (usable && !veryStrong && strong >= 3) notes.push('Nenhum roteador chega forte aqui: o sinal fraco deixa o mapa menos nítido.');
     if (usable && floors.length > 1) notes.push('Mais de um andar é o caso mais difícil só com o Wi-Fi: espere mais lugares fora do cômodo certo do que numa casa térrea.');
     if (usable && wide) {
       notes.push(
-        `Lugar grande (a sua rede sai de ${ownCount} pontos de acesso): em ambientes amplos o mapa costuma sair bem menor que o real — em simulação, um escritório de 280 m² sai com 60 a 70% do tamanho. Vale medir uma distância em “Ajustar a escala”.`,
+        `Lugar grande (a sua rede sai de ${ownCount} pontos de acesso): em ambientes amplos o mapa costuma sair bem menor que o real — em simulação, um escritório de 280 m² sai com 60 a 75% do tamanho e pouco mais da metade da área. Vale medir uma distância em “Ajustar a escala”.`,
       );
     }
   }
@@ -2037,10 +2124,11 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     // Mais de um andar nunca passa de 'razoavel': é o caso mais difícil (na bancada, 3 em cada 5
     // leituras caem no cômodo certo num sobrado, contra 4 em 5 ou mais nas casas de um andar). E
     // tamanho incerto também não: com confiança de escala abaixo de 0,5 metade dos mapas da bancada
-    // erra o tamanho em mais de 25% (é o caso dos lugares grandes, que saem encolhidos).
+    // erra o tamanho em mais de 19% e um em cada cinco em mais de 29% (com 0,5 ou mais: 10% e 21%).
     // Lugar amplo idem (veja `wide`): todos os motores do solucionador o encolhem e a área desenhada
-    // fica pela metade.
-    if (P >= 40 && excess <= LEVEL_GOOD && err <= 3.5 && floors.length === 1 && scaleConf >= 0.5 && !wide) level = 'boa';
+    // fica pela metade. E varredura lenta (uma a cada 30 s) também não: com 40 leituras ou mais,
+    // os levantamentos lentos da bancada erram 1,9 m, contra 1,05 m dos mapas 'boa'.
+    if (P >= 40 && excess <= LEVEL_GOOD && err <= 3.5 && floors.length === 1 && scaleConf >= 0.5 && !wide && cadence <= 10) level = 'boa';
     else if (P >= 15 && excess <= LEVEL_FAIR && err <= 5) level = 'razoavel';
   }
   return {
@@ -2063,8 +2151,8 @@ const LEVEL_FAIR = 1.9;
  * Rede "da casa" saindo de tantos aparelhos ou mais = lugar amplo (escritório, galpão, casa muito
  * grande): ninguém instala três pontos de acesso num apartamento. É o único indício do tamanho real
  * que não depende da escala do próprio mapa — e é justamente nesses lugares que o mapa sai
- * encolhido (o escritório de 280 m² da bancada, com 5 pontos de acesso, sai com 0,72 do tamanho;
- * conduzido pelo app, com 0,6). A área desenhada não serve de indício: casas grandes sorteadas, de
+ * encolhido (o escritório de 280 m² da bancada, com 5 pontos de acesso, sai com 0,73 do tamanho e
+ * 0,56 da área; conduzido pelo app, com 0,6 do tamanho). A área desenhada não serve de indício: casas grandes sorteadas, de
  * 100 a 140 m², saem do tamanho certo.
  */
 const WIDE_PLACE_APS = 3;
@@ -2212,7 +2300,9 @@ function build(survey, solution, opts) {
  * Entre uma varredura e outra o celular continua medindo a rede em que está CONECTADO (uma amostra
  * a cada 1 ou 2 s, `survey.track`). São medições de verdade, e entram no campo de sinal da rede
  * conectada como medições a mais, com três cuidados para o mapa continuar fiel ao que foi medido
- * (o ganho medido na bancada é pequeno, ~0,05 dB de erro a menos, e nunca piora):
+ * (o ganho medido na bancada é pequeno: ~0,04 dB de erro a menos na média de 184 levantamentos; mapa
+ * a mapa vai de 0,9 dB melhor a 0,4 dB pior, e por tipo de casa ou de caminhada a média não muda
+ * mais que 0,1 dB para nenhum lado):
  *
  *  - POSIÇÃO: a amostra não tem posição resolvida; fica na reta entre as duas varreduras que a
  *    cercam no tempo, e só quando elas estão a poucos segundos uma da outra (`trackMaxGapS`) e o
@@ -2382,7 +2472,12 @@ export function heatField(model, floorIndex, networkKey) {
     if (v < vMin) vMin = v;
     if (v > vMax) vMax = v;
   });
-  // Amostras do sinal conectado entre as varreduras (só a rede conectada as tem).
+  // Amostras do sinal conectado entre as varreduras (só a rede conectada as tem). Entram no VALOR
+  // do campo, não na CONFIANÇA dele: a confiança mede se há um lugar medido por perto, e a amostra
+  // não traz lugar novo (fica na reta entre duas varreduras, ou em cima de uma). Contando-as, a
+  // área "de confiança" crescia sem o erro cair: com uma varredura a cada 30 s ia de 57% para 75%
+  // do mapa e o erro dentro dela subia de 4,7 para 4,8 dB (96 levantamentos de conferência).
+  const scanCount = xs.length;
   const extra = heat.track && heat.track[networkKey];
   if (extra && extra.v && extra.f) {
     for (let s = 0; s < extra.v.length; s++) {
@@ -2433,8 +2528,8 @@ export function heatField(model, floorIndex, networkKey) {
         const d2 = dx * dx + dy * dy;
         let k = heat.wideW * Math.exp(-d2 / w2);
         if (d2 < cut) k += Math.exp(-d2 / n2);
-        // Confiança: medições a menos de ~1 m, numa escala fixa (não a do núcleo da regressão).
-        if (d2 < cutConf) dense += ws[s] * Math.exp(-d2 / c2);
+        // Confiança: varreduras a menos de ~1 m, numa escala fixa (não a do núcleo da regressão).
+        if (s < scanCount && d2 < cutConf) dense += ws[s] * Math.exp(-d2 / c2);
         k *= ws[s];
         s0 += k;
         sx += k * dx;

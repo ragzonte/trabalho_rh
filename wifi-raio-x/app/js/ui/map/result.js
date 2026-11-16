@@ -703,7 +703,7 @@ export async function mountResult(root, env, { id }) {
     if (!room) return;
     const typed = await promptSheet({
       title: 'Nome do ambiente',
-      subtitle: room.auto ? 'O app separou este ambiente pelo sinal do Wi-Fi. Como você chama este lugar?' : 'Todos os lugares marcados com este nome mudam junto.',
+      subtitle: room.auto ? 'Esta parte do mapa está sem nome: nenhum lugar marcado por perto tem um. Que cômodo fica no meio dela?' : 'Todos os lugares marcados com este nome mudam junto.',
       label: 'Nome do ambiente',
       value: room.auto ? '' : room.label,
       placeholder: 'Ex.: Sala',
@@ -777,7 +777,7 @@ export async function mountResult(root, env, { id }) {
       badge: room && room.auto ? badge('Nome automático') : null,
       edit: room ? () => renameRoomFlow(pick) : null,
       body: [
-        h('p.mrs-pick__line', null, [room && room.areaM2 > 0 ? `Área ≈${THIN}${fmtNum(Math.max(1, Math.round(room.areaM2)))}${THIN}m²` : null, floorText].filter(Boolean).join(' · ') || (plain ? 'Sem divisão em ambientes: nenhum lugar (ou só um) tem nome.' : 'Área aproximada')),
+        h('p.mrs-pick__line', null, [room && room.areaM2 > 0 ? `Área ≈${THIN}${fmtNum(Math.max(1, Math.round(room.areaM2)))}${THIN}m²` : null, floorText].filter(Boolean).join(' · ') || (plain ? 'Sem divisão em ambientes: faltam dois lugares com nomes diferentes neste andar.' : 'Área aproximada')),
         here,
         room && roomIndex >= 0 ? h('p.mrs-pick__sub', null, 'Sinal médio neste ambiente:') : null,
         room && roomIndex >= 0 ? signalRows((key) => roomSignal(model, fi, roomIndex, heatField(model, fi, key))) : null,
@@ -929,10 +929,15 @@ export async function mountResult(root, env, { id }) {
           'p',
           null,
           h('strong', null, 'O tamanho. '),
-          `As distâncias em metros são a parte mais fraca: saem em média uns ${ACCURACY.shrinkPct}% menores que as reais e podem errar ${ACCURACY.scalePct}% ou mais, sobretudo em lugares grandes. A área do desenho já desconta esse efeito; para as distâncias, meça uma de verdade em “Ajustar a escala”.`,
+          `As distâncias em metros são a parte mais fraca: saem em média uns ${ACCURACY.shrinkPct}% menores que as reais e podem errar ${ACCURACY.scalePct}% ou mais, sobretudo em lugares grandes. A área do desenho compensa esse efeito na média, não em cada mapa: numa casa pequena costuma sair uns ${ACCURACY.smallAreaOverPct}% maior que a real, e num lugar grande, bem menor. Para acertar as distâncias, meça uma de verdade em “Ajustar a escala”.`,
         ),
         h('p', null, h('strong', null, 'Por que pode sair girado ou espelhado. '), 'O Wi-Fi não sabe onde fica o norte nem o que é esquerda ou direita. Gire o mapa com o dedo até reconhecer a casa. Os andares são os que você marcou.'),
-        h('p', null, h('strong', null, 'Ambientes só com nomes. '), 'O mapa só é dividido em ambientes quando você marca pelo menos dois lugares com nome. Sem nomes, as divisões sairiam quase ao acaso, e o app prefere não inventar.'),
+        h(
+          'p',
+          null,
+          h('strong', null, 'Ambientes só com nomes. '),
+          `O mapa só é dividido em ambientes quando você marca pelo menos dois lugares com nomes diferentes no mesmo andar. Sem nomes, as divisões sairiam quase ao acaso, e o app prefere não inventar. Cada nome vale perto de onde foi dado: a parte da casa sem nenhum lugar com nome por perto aparece como “Ambiente”, sem divisões. Com todos os cômodos marcados, uns ${ACCURACY.namedAreaPct[0]} a ${ACCURACY.namedAreaPct[1]}% da área de cada ambiente são mesmo do cômodo daquele nome; com só alguns marcados, perto de ${ACCURACY.namedAreaPartialPct}%.`,
+        ),
       ),
     );
   }

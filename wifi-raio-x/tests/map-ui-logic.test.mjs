@@ -279,8 +279,22 @@ test('hasRooms / roomsInvite: sem dois lugares com nome o mapa não tem ambiente
   const part = L.roomsInvite(half);
   assert.equal(part.all, false);
   assert.match(part.title, /1º andar: sem divisão em ambientes/);
+  assert.match(part.text, /menos de dois lugares têm nomes diferentes/);
   assert.equal(L.roomsInvite(null), null);
   assert.equal(L.hasRooms(null), false);
+
+  // o convite diz a verdade sobre os nomes que já existem (o mapa só precisa de `floors` e `spots`)
+  const bare = (floors, spots) => ({ floors: floors.map((floor) => ({ floor, rooms: [] })), spots });
+  assert.match(L.roomsInvite(bare([0], [{ id: 1, floor: 0, label: 'Sala' }])).text, /^Só um lugar tem nome/);
+  // dois lugares com o MESMO nome: não é "só um lugar"
+  const same = L.roomsInvite(bare([0], [{ id: 1, floor: 0, label: 'Sala' }, { id: 2, floor: 0, label: 'sala ' }])).text;
+  assert.match(same, /têm todos o mesmo nome/);
+  assert.doesNotMatch(same, /Só um lugar/);
+  // um nome em cada andar: o que falta é o segundo nome DE CADA andar
+  const perFloor = L.roomsInvite(bare([0, 1], [{ id: 1, floor: 0, label: 'Sala' }, { id: 2, floor: 1, label: 'Quarto' }])).text;
+  assert.match(perFloor, /Nenhum andar tem dois lugares com nomes diferentes/);
+  assert.match(perFloor, /pelo menos dois cômodos em cada andar/);
+  for (const text of [same, perFloor]) assert.match(text, /não inventa divisões/);
 });
 
 test('coverageParts: inteiros que somam 100', () => {

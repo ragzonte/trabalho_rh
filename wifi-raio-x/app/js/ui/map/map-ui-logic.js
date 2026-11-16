@@ -351,33 +351,44 @@ export function rttTargets(aps = [], limit = 8) {
 
 /**
  * Os números de precisão que as telas citam. Vêm da bancada (tests/mapping/map-eval.mjs e
- * harness.mjs: 88 levantamentos simulados, solucionador e construtor finais) e do ensaio do app
- * inteiro no simulador (tests/e2e/map-quality.e2e.mjs). Mudou o solucionador? Meça de novo e
- * acerte aqui: os textos da tela de resultado saem destes valores.
+ * harness.mjs, solucionador e construtor finais: os 88 levantamentos simulados de map-eval mais 96
+ * de conferência com outras sementes, 184 ao todo) e do ensaio do app inteiro no simulador
+ * (tests/e2e/map-quality.e2e.mjs). Mudou o solucionador? Meça de novo e acerte aqui: os textos da
+ * tela de resultado saem destes valores.
  *
- *   erro mediano de posição (m), depois do melhor encaixe: kitnet de 30 m² 0,8 · apartamento de
- *   63 m² 1,2 · casas térreas sorteadas 1,3 · sobrado de 2 x 80 m² 1,7 · escritório de 280 m² 2,2
- *   (andando com leituras livres 1,2 a 1,5; uma leitura a cada 30 s 1,7); 9 em cada 10 posições
- *   erram menos que o dobro disso;
- *   tamanho (linear) do desenho / real: média 0,87; um em cada dez mapas sai mais de 29% menor e um
- *   em cada dez mais de 6% maior; com confiança de escala a partir de 0,5 metade erra mais de 11% e
- *   um em cada cinco mais de 26%; abaixo de 0,5, metade erra mais de 25% e um em cada cinco mais de 40%;
- *   leitura no cômodo certo: 80% (95% na kitnet, 81% no apartamento, 80% no escritório, 60% no sobrado);
- *   ambiente com nome: 77% da área dele é mesmo do cômodo com aquele nome.
+ *   erro mediano de posição (m), depois do melhor encaixe: kitnet de 30 m² 0,9 · casas térreas
+ *   sorteadas 1,0 (pequenas) a 1,4 (grandes) · apartamento de 63 m² 1,2 · sobrado de 2 x 80 m² 1,6 ·
+ *   escritório de 280 m² 2,4 (andando com leituras livres 1,2 a 1,5; uma leitura a cada 30 s 1,6);
+ *   9 em cada 10 posições erram menos que o dobro disso;
+ *   tamanho (linear) do desenho / real: média 0,89; um em cada dez mapas sai mais de 29% menor e um
+ *   em cada dez mais de 7% maior; com confiança de escala a partir de 0,5 metade erra mais de 10% e
+ *   um em cada cinco mais de 21%; abaixo de 0,5, metade erra mais de 19% e um em cada cinco mais de
+ *   29%; o pior caso, nos dois grupos, 40%;
+ *   área desenhada / real: 1,01 na média, mas de 0,6 a 1,5 mapa a mapa (um em cada dez abaixo e um
+ *   acima); casas de até ~45 m² 1,34; apartamento e casas médias e grandes 0,99; sobrado 0,88;
+ *   escritório 0,56;
+ *   leitura no cômodo certo: 81% (96% na kitnet, 78% no apartamento, 77% no escritório, 64% no sobrado);
+ *   ambiente com nome: com todos os cômodos batizados, 78% da área dele é mesmo do cômodo com aquele
+ *   nome (69% com um lugar marcado por cômodo); com metade dos cômodos batizados, 60 a 65%.
  */
 export const ACCURACY = Object.freeze({
   /** erro mediano de posição: [casa pequena, casa grande / dois andares], em metros */
   homeErrorM: [1, 2],
   /** num lugar grande (escritório de ~300 m²) */
-  largeErrorM: 2.2,
+  largeErrorM: 2.4,
   /** quanto o desenho costuma sair menor que a casa (linear) */
-  shrinkPct: 13,
+  shrinkPct: 10,
   /** folga do tamanho: confiança de escala normal (>= 0,5) e baixa */
   scalePct: 25,
   scaleLowPct: 40,
   /** leituras que caem no cômodo certo: casa térrea; casa de dois andares */
   rightRoom: [4, 5],
   rightRoomTwoFloors: [3, 5],
+  /** quanto a área desenhada costuma passar da real numa casa pequena (até ~45 m²) */
+  smallAreaOverPct: 30,
+  /** da área de um ambiente com nome, quanto é mesmo do cômodo daquele nome: [todos os cômodos batizados], só alguns */
+  namedAreaPct: [70, 80],
+  namedAreaPartialPct: 60,
 });
 
 /**
@@ -433,19 +444,23 @@ export function roomsInvite(model) {
   const plain = floors.filter((f) => !f || !Array.isArray(f.rooms) || !f.rooms.length);
   if (!plain.length) return null;
   const spots = model && Array.isArray(model.spots) ? model.spots : [];
-  const named = new Set(spots.map((sp) => fold(sp.label)).filter(Boolean)).size;
+  // lugares marcados que têm nome (dois lugares com o MESMO nome, ou em andares diferentes, não dividem nada)
+  const named = spots.filter((sp) => fold(sp.label)).length;
   if (plain.length < floors.length) {
     const names = plain.map((f) => floorName(f.floor)).join(' e ');
-    return { all: false, title: `${names}: sem divisão em ambientes`, text: 'Neste andar menos de dois lugares têm nome. Volte lá com “Continuar mapeando”, pare em cada cômodo e marque o lugar com o nome.' };
+    return {
+      all: false,
+      title: `${names}: sem divisão em ambientes`,
+      text: `${plain.length > 1 ? 'Nestes andares' : 'Neste andar'} menos de dois lugares têm nomes diferentes. Volte lá com “Continuar mapeando”, pare em cada cômodo e marque o lugar com o nome.`,
+    };
   }
-  return {
-    all: true,
-    title: 'Quer ver os cômodos no mapa?',
-    text:
-      named === 1
-        ? 'Só um lugar tem nome, e o app não inventa divisões: com o sinal sozinho elas sairiam quase ao acaso. Toque em “Continuar mapeando”, pare em mais um cômodo (ou em todos) e marque o lugar com o nome.'
-        : 'Este mapa mostra a área por onde você andou, sem dividir em ambientes: o app não inventa divisões, porque só com o sinal elas sairiam quase ao acaso. Toque em “Continuar mapeando”, pare em pelo menos dois cômodos e marque cada lugar com o nome.',
-  };
+  const why = 'o app não inventa divisões: só com o sinal elas sairiam quase ao acaso';
+  let text;
+  if (named === 0) text = `Este mapa mostra a área por onde você andou, sem dividir em ambientes: ${why}. Toque em “Continuar mapeando”, pare em pelo menos dois cômodos e marque cada lugar com o nome.`;
+  else if (named === 1) text = `Só um lugar tem nome, e ${why}. Toque em “Continuar mapeando”, pare em mais um cômodo (ou em todos) e marque o lugar com o nome.`;
+  else if (floors.length > 1) text = `Nenhum andar tem dois lugares com nomes diferentes, e ${why}. Toque em “Continuar mapeando” e marque pelo menos dois cômodos em cada andar, cada um com o seu nome.`;
+  else text = `Os lugares marcados têm todos o mesmo nome, e ${why}. Toque em “Continuar mapeando”, pare em outro cômodo e marque o lugar com o nome dele.`;
+  return { all: true, title: 'Quer ver os cômodos no mapa?', text };
 }
 
 /** Faixas da cobertura, na ordem do melhor para o pior. As palavras são as mesmas da legenda do mapa. */

@@ -672,7 +672,77 @@ test('duas salas com nome viram dois ambientes, com uma abertura onde o caminho 
   assertShape(single, survey.scans.length);
   assert.equal(single.floors[0].rooms.length, 0);
   assert.ok(single.spots.some((sp) => sp.label === 'Sala'));
-  assert.match(single.quality.notes.join(' | '), /Só um lugar tem nome/);
+  // (três lugares marcados, todos "Sala": a nota diz isso, e não que "só um lugar tem nome")
+  assert.match(single.quality.notes.join(' | '), /Os lugares marcados têm todos o mesmo nome/);
+  assert.doesNotMatch(single.quality.notes.join(' | '), /Só um lugar tem nome/);
+  // Um lugar com nome, de verdade: aí sim.
+  const lone = structuredClone(survey);
+  for (const sc of lone.scans) if (sc.spot !== 0) delete sc.label;
+  const loneModel = buildMap(lone, solution, { own: ['aa:00'] });
+  assert.equal(loneModel.floors[0].rooms.length, 0);
+  assert.match(loneModel.quality.notes.join(' | '), /Só um lugar tem nome/);
+});
+
+test('o nome vale perto de onde foi dado: o resto do andar fica sem nome, sem ser repartido', () => {
+  // Corredor comprido (16 x 3 m) andado de ponta a ponta; só as duas pontas de um lado têm nome.
+  const points = [];
+  const spot = (id, x, y, label) => {
+    for (let k = 0; k < 3; k++) points.push({ x, y, spot: id, label });
+  };
+  spot(0, 1, 1.5, 'Sala');
+  for (const p of serpentine(1.5, 0.6, 3.6, 2.4, 2, 0.7)) points.push(p);
+  spot(1, 4.2, 1.5, 'Cozinha');
+  for (const p of serpentine(4.8, 0.6, 15.4, 2.4, 2, 0.7)) points.push(p);
+  const aps = [{ id: 'aa:00', ssid: 'Casa', x: 1, y: 0.4, p0: -36 }, { id: 'bb:00', ssid: 'Vizinho B', x: 17, y: 1.5, p0: -40 }, ...NEIGHBOURS];
+  const { survey, solution } = synth({ points, aps });
+  const model = buildMap(survey, solution, { own: ['aa:00'] });
+  assertShape(model, points.length);
+  const floor = model.floors[0];
+  const named = floor.rooms.filter((r) => !r.auto);
+  const rest = floor.rooms.filter((r) => r.auto);
+  assert.deepEqual(named.map((r) => r.label).sort(), ['Cozinha', 'Sala']);
+  // A sobra é UM trecho só (nada de dividir pelo sinal o que não tem nome) e fica com a maior parte do corredor.
+  assert.equal(rest.length, 1, `trechos sem nome: ${rest.map((r) => r.label).join(', ')}`);
+  assert.match(rest[0].label, /^Ambiente \d+$/);
+  const namedArea = named.reduce((s, r) => s + r.areaM2, 0);
+  assert.ok(rest[0].areaM2 > namedArea, `sem nome ${rest[0].areaM2} m² x com nome ${namedArea} m²`);
+  // Nenhuma célula a mais de ~5 m das duas marcas leva o nome delas.
+  const roomAt = (x, y) => floor.room[Math.floor((y - model.bounds.minY) / model.cell) * model.nx + Math.floor((x - model.bounds.minX) / model.cell)];
+  for (const x of [10, 12, 14, 15]) assert.ok(floor.rooms[roomAt(x, 1.5)].auto, `x = ${x} m ficou com o nome "${floor.rooms[roomAt(x, 1.5)].label}"`);
+  assert.ok(!floor.rooms[roomAt(1, 1.5)].auto && !floor.rooms[roomAt(4.2, 1.5)].auto);
+  // A nota convida a dar nome ao resto.
+  assert.match(model.quality.notes.join(' | '), /Parte do mapa está sem nome/);
+
+  // Com todos os trechos batizados não sobra retalho sem nome nem a nota.
+  const full = structuredClone(survey);
+  let id = 10;
+  for (const x of [7, 10, 13]) {
+    const near = full.scans.map((s, i) => ({ i, d: Math.hypot(solution.points[i].x - x, solution.points[i].y - 1.5) })).filter((q) => full.scans[q.i].spot == null).sort((p, q) => p.d - q.d)[0];
+    full.scans[near.i] = { ...full.scans[near.i], spot: id++, still: true, label: `Quarto ${id}` };
+  }
+  const all = buildMap(full, solution, { own: ['aa:00'] });
+  assertShape(all, points.length);
+  assert.ok(all.floors[0].rooms.filter((r) => !r.auto).length === 5);
+  assert.doesNotMatch(all.quality.notes.join(' | '), /Parte do mapa está sem nome/);
+  assert.ok(all.floors[0].rooms.filter((r) => r.auto).reduce((s, r) => s + r.areaM2, 0) < 8, 'sobra sem nome menor que um cômodo pequeno');
+});
+
+test('nomes em andares diferentes não dividem nenhum deles, e a nota explica', () => {
+  const up = serpentine(0.6, 0.6, 5.4, 3.4, 3, 0.7).map((p) => ({ ...p, floor: 1 }));
+  const down = serpentine(0.6, 0.6, 5.4, 3.4, 3, 0.7).map((p) => ({ ...p, floor: 0 }));
+  const points = [];
+  for (let k = 0; k < 2; k++) points.push({ x: 1, y: 1, floor: 0, spot: 0, label: 'Sala' });
+  points.push(...down);
+  for (let k = 0; k < 2; k++) points.push({ x: 1, y: 1, floor: 1, spot: 1, label: 'Quarto' });
+  points.push(...up);
+  const { survey, solution } = synth({ points, aps: [{ id: 'aa:00', ssid: 'Casa', x: 2.5, y: 2 }, ...NEIGHBOURS] });
+  const model = buildMap(survey, solution, {});
+  assertShape(model, points.length);
+  assert.equal(model.floors.length, 2);
+  assert.ok(model.floors.every((f) => f.rooms.length === 0));
+  const notes = model.quality.notes.join(' | ');
+  assert.match(notes, /Nenhum andar tem dois lugares com nomes diferentes/);
+  assert.doesNotMatch(notes, /Só um lugar tem nome/);
 });
 
 test('mesmo nome = mesmo ambiente; nomes diferentes nunca se juntam, mesmo com sinal igual', () => {
@@ -832,14 +902,17 @@ test('sinal da rede conectada entre as varreduras (survey.track): entra no campo
     // o desvio do medidor (4 dB) foi descontado: o valor bate com o campo de verdade ali
     assert.ok(Math.abs(pack.v[i] - real(pack.x[i])) < 2.5, `amostra em x=${pack.x[i].toFixed(1)}: ${pack.v[i].toFixed(1)} x real ${real(pack.x[i]).toFixed(1)}`);
   }
-  // o campo com as amostras continua fiel ao que as varreduras mediram, e ganha confiança entre elas
+  // o campo com as amostras continua fiel ao que as varreduras mediram; a CONFIANÇA é a das
+  // varreduras, nem mais nem menos: a amostra não traz lugar novo, e contá-la faria o campo parecer
+  // mais certo do que é (medido na bancada: a área "de confiança" crescia sem o erro cair)
   const a = heatField(plain, 0, key);
   const b = heatField(withTrack, 0, key);
   const cellAt = (m, x, y) => Math.floor((y - m.bounds.minY) / m.cell) * m.nx + Math.floor((x - m.bounds.minX) / m.cell);
   for (const x of [2, 5, 8, 11]) {
     assert.ok(Math.abs(b.dbm[cellAt(withTrack, x, 2)] - a.dbm[cellAt(plain, x, 2)]) < 2.5, `campo em x=${x}`);
-    assert.ok(b.conf[cellAt(withTrack, x, 2)] >= a.conf[cellAt(plain, x, 2)] - 1e-6);
   }
+  assert.deepEqual(b.conf, a.conf, 'as amostras do sinal conectado não mexem na confiança do campo');
+  assert.notDeepEqual(b.dbm, a.dbm, 'mas entram no valor');
   assert.deepEqual(heatField(structuredClone(withTrack), 0, key), b, 'o modelo com as amostras sobrevive a um structuredClone');
 
   // Amostras do rádio que NÃO é o mais forte da rede (5 GHz, 10 dB abaixo) ficam de fora: não são a mesma grandeza.
