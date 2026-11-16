@@ -178,6 +178,18 @@ function congestionText(detail) {
 }
 
 /**
+ * O sinal de um ponto de acesso como a nota o usou: a média recente (rssiSmooth), e só sem ela a
+ * última leitura. O painel "Entenda a nota" mostra este valor na parte "Sinal" e em cada linha da
+ * lista de sinais da rede: os dois números saem da mesma conta.
+ * @param {{rssi?:number, rssiSmooth?:number}} ap
+ * @returns {number|null}
+ */
+export function apSignal(ap) {
+  if (!isObj(ap)) return null;
+  return isNum(ap.rssiSmooth) ? ap.rssiSmooth : isNum(ap.rssi) ? ap.rssi : null;
+}
+
+/**
  * As quatro partes da nota, prontas para virar barras.
  * @param {object} row  linha de rankNetworks
  * @returns {{id: 'signal'|'speed'|'congestion'|'security', icon: string, label: string, value: number,
@@ -197,7 +209,7 @@ export function scoreParts(row) {
 
   const make = (id, iconName, label, value, headline, text) => ({ id, icon: iconName, label, value: pct(value), tone: partTone(pct(value)), headline, text });
   return [
-    make('signal', 'signal', 'Sinal', parts.signal, isNum(detail.rssi) ? `${fmtDbm(detail.rssi)} · ${level.label.toLowerCase()}` : 'sem leitura', 'A força com que a rede chega neste ponto.'),
+    make('signal', 'signal', 'Sinal', parts.signal, isNum(detail.rssi) ? `${fmtDbm(detail.rssi)} · ${level.label.toLowerCase()}` : 'sem leitura', 'A força com que a rede chega neste ponto, na média das últimas leituras.'),
     make(
       'speed',
       'speed',
@@ -818,12 +830,15 @@ function apRow(entry, { best, onOpen }) {
   if (ap.connected) sub.push(h('span.best-row__connected', null, icon('check', { size: 14 }), 'Conectado'));
   if (best) sub.push(h('span.best-ap__best', null, 'Melhor'));
   sub.push(h('span', null, usable ? estText(entry.estMbps) : 'Sem uso'));
-  sub.push(h('span', null, fmtDbm(ap.rssi)));
+  // o mesmo sinal que a nota usou (média recente), não a última leitura crua: senão o painel
+  // mostra "−71 dBm · regular" em cima e "−78 dBm" logo abaixo para o mesmo ponto de acesso
+  const rssi = apSignal(ap);
+  sub.push(h('span', null, fmtDbm(rssi)));
   if (ap.stale && isNum(ap.ageMs)) sub.push(h('span', null, `visto ${fmtAgo(ap.ageMs)}`));
   return h(
     'button.row.row--tappable.best-ap',
     { type: 'button', key: `ap-${ap.bssid}`, class: [ap.stale && 'row--stale'], dataset: { bssid: ap.bssid }, onClick: () => onOpen(ap.bssid) },
-    h('span.row__lead', null, signalBars(ap.rssi)),
+    h('span.row__lead', null, signalBars(rssi)),
     h(
       'span.row__body',
       null,
@@ -895,8 +910,8 @@ function scoreSheetBody(row, { gone, favorite, on }) {
     h(
       'section.stack.stack--sm',
       { key: 'aps' },
-      h('h3.best-subtitle', null, entries.length > 1 ? 'Pontos de acesso desta rede' : 'Ponto de acesso', entries.length > 1 ? h('span.best-subtitle__count', null, entries.length) : null),
-      entries.length > 1 ? h('p.best-caption', null, 'Cada roteador ou repetidor, em cada faixa, é um ponto de acesso. A nota da rede é a do melhor deles; quem escolhe em qual ficar é o celular.') : null,
+      h('h3.best-subtitle', null, entries.length > 1 ? 'Sinais desta rede' : 'Sinal desta rede', entries.length > 1 ? h('span.best-subtitle__count', null, entries.length) : null),
+      entries.length > 1 ? h('p.best-caption', null, 'Cada roteador ou repetidor emite um sinal em cada faixa (2,4 e 5 GHz). A nota da rede é a do melhor deles; quem escolhe em qual ficar é o celular.') : null,
       h('div.card.card--flush.list', null, entries.map((entry, i) => apRow(entry, { best: i === 0 && entries.length > 1, onOpen: on.openAp }))),
     ),
   ];

@@ -331,7 +331,7 @@ test('medidor: abre na rede conectada, com leitura ao vivo, e devolve o ritmo no
     assert.equal(d.target, conn, 'o alvo padrão é a rede conectada');
     assert.equal(d.live, '1');
     assert.match(await page.textContent('.mtr-note'), /Leitura ao vivo/);
-    assert.match(await page.textContent('.mtr-target__row'), /Conectada/);
+    assert.match(await page.textContent('.mtr-target__row'), /Conectado/);
 
     // o mostrador mostra o que o celular mede
     const gauge = page.locator('.mtr-gauge .gauge');
@@ -708,7 +708,7 @@ test('conexão: máscara, validade do endereço e montagem das linhas (funções
     assert.deepEqual(r.leases.slice(5), [null, null, null]);
     assert.deepEqual(r.groups, [
       ['rede', ['Nome da rede', 'BSSID', 'Segurança', 'Padrão', 'Internet', 'Franquia de dados'], []],
-      ['sinal', ['Sinal', 'Qualidade', 'Distância do roteador', 'Faixa', 'Canal', 'Frequência'], ['Velocidade do enlace (receber)', 'Velocidade do enlace (enviar)']],
+      ['sinal', ['Sinal', 'Qualidade', 'Distância do roteador', 'Faixa', 'Canal', 'Frequência'], ['Velocidade até o roteador (receber)', 'Velocidade até o roteador (enviar)']],
       ['enderecos', ['IP do celular', 'Máscara de sub-rede', 'Roteador (gateway)', 'DNS 1', 'DNS 2', 'Interface', 'MTU', 'Endereço válido por'], []],
     ]);
     assert.equal(r.mask.text, '255.255.252.0');
@@ -722,7 +722,7 @@ test('conexão: máscara, validade do endereço e montagem das linhas (funções
     assert.ok(lines.includes('  Nome da rede: Casa'));
     assert.ok(lines.includes('  Máscara de sub-rede: 255.255.252.0 (/22)'));
     assert.ok(lines.includes('  DNS 2: 8.8.8.8'), 'DNS vazio é pulado');
-    assert.ok(lines.some((l) => l.startsWith('  Velocidade do enlace (receber): 72')));
+    assert.ok(lines.some((l) => l.startsWith('  Velocidade até o roteador (receber): 72')));
     assert.equal(lines[lines.length - 1], 'Gerado no celular pelo WiFi Raio-X.');
     // conexão sem dado nenhum além de "conectado": nada quebra e nada é inventado
     assert.deepEqual(r.bare.groups, [['rede', ['Nome da rede=O Android não informou']]]);
@@ -811,7 +811,7 @@ test('conexão: tocar copia (um campo, ou tudo pelo botão), e os atalhos funcio
     await waitToast(page, /Detalhes da conexão copiados/);
     const all = await clip();
     assert.match(all, /^Detalhes da conexão Wi-Fi\n/);
-    for (const piece of ['Rede', 'Sinal e velocidade', 'Endereços', `Nome da rede: ${conn.ssid}`, `BSSID: ${conn.bssid}`, `IP do celular: ${conn.ip}`, `Roteador (gateway): ${conn.gateway}`, 'Máscara de sub-rede: 255.255.255.0 (/24)', 'Velocidade do enlace (receber): ']) {
+    for (const piece of ['Rede', 'Sinal e velocidade', 'Endereços', `Nome da rede: ${conn.ssid}`, `BSSID: ${conn.bssid}`, `IP do celular: ${conn.ip}`, `Roteador (gateway): ${conn.gateway}`, 'Máscara de sub-rede: 255.255.255.0 (/24)', 'Velocidade até o roteador (receber): ']) {
       assert.ok(all.includes(piece), `o texto copiado traz "${piece}"`);
     }
     await page.evaluate(() => navigator.clipboard.writeText(''));

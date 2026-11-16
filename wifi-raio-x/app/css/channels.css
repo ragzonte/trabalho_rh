@@ -140,7 +140,7 @@
   overflow: hidden;
 }
 
-.card.ch-chart > * + * {
+.card.ch-chart > * {
   margin-top: 0;
 }
 

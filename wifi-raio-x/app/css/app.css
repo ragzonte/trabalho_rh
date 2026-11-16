@@ -721,11 +721,20 @@ canvas {
   color: var(--muted);
 }
 
-.card > * + * {
+/* Espaço entre os filhos de um cartão. Escrito como "todos os filhos, menos o primeiro" com
+   `> *` + `> :first-child`, e NÃO com `> * + *`: uma regra com `* + *` faz o navegador recalcular o
+   estilo de TODOS os descendentes do pai a cada filho que entra, sai ou muda de lugar em qualquer
+   ponto da página (numa lista de redes que se reordena a cada busca eram milhares de elementos por
+   busca). tests/review-res.test.mjs barra a volta desse seletor. */
+.card > * {
   margin-top: var(--sp-3);
 }
 
-.card--flush > * + * {
+.card > :first-child {
+  margin-top: 0;
+}
+
+.card--flush > * {
   margin-top: 0;
 }
 
@@ -870,7 +879,12 @@ canvas {
   white-space: nowrap;
 }
 
-.row__sub--clip > * + *::before {
+/* o "·" entre os itens: todos menos o primeiro (sem `* + *`: veja a nota em `.card > *`) */
+.row__sub--clip > :first-child::before {
+  content: none;
+}
+
+.row__sub--clip > *::before {
   content: '·';
   flex: none;
   margin: 0 6px;
@@ -993,6 +1007,10 @@ canvas {
     background-color 120ms var(--ease),
     border-color 120ms var(--ease),
     opacity 120ms var(--ease);
+}
+
+.btn > svg {
+  flex: none;
 }
 
 .btn:active {
@@ -1868,13 +1886,18 @@ canvas {
 .sheet__footer {
   flex: none;
   display: flex;
+  /* dois botões que não cabem lado a lado (rótulo comprido, tela de 360 px, letra ampliada) empilham */
+  flex-wrap: wrap;
   gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-5) calc(var(--sp-4) + var(--safe-b));
   border-top: 1px solid var(--line);
 }
 
+/* Dividem a largura por igual, mas nenhum fica mais estreito que o próprio rótulo (ícone + texto):
+   antes, o mais comprido vazava da caixa e o ícone era cortado. */
 .sheet__footer > .btn {
   flex: 1;
+  min-width: min-content;
 }
 
 /* com rodapé, quem cuida da margem de baixo (e da barra do sistema) é ele */

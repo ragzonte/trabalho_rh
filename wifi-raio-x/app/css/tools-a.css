@@ -812,10 +812,12 @@
 
 .exp-actions {
   display: flex;
+  /* (com a letra do sistema ampliada os dois não cabem lado a lado: empilham) */
+  flex-wrap: wrap;
   gap: var(--sp-2);
 }
 
 .exp-actions > .btn {
   flex: 1;
-  min-width: 0;
+  min-width: min-content;
 }

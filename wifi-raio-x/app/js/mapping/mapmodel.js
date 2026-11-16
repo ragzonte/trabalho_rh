@@ -2837,7 +2837,7 @@ export function describeMap(model) {
   }
   if (q.usable === false) {
     // Levantamento de que não sai mapa: diz isso, o motivo e o que fazer; nada de área nem ambientes.
-    out.push(`Deste levantamento (${q.scans} ${q.scans === 1 ? 'varredura' : 'varreduras'}) não saiu um mapa.`);
+    out.push(`Deste mapeamento (${q.scans} ${q.scans === 1 ? 'leitura' : 'leituras'}) não saiu um mapa.`);
     for (const n of q.notes) out.push(n);
     return out;
   }
@@ -2852,7 +2852,7 @@ export function describeMap(model) {
       : `com ${namedCount} ${namedCount === 1 ? 'ambiente' : 'ambientes'}${unnamedM2 > 0 ? ` com nome e cerca de ${brNum(unnamedM2)} m² ainda sem nome` : ''}`;
   out.push(
     `Mapa aproximado, feito só com o sinal do Wi-Fi: área de cerca de ${brNum(q.areaM2)} m² em ${single ? '1 andar' : `${floors.length} andares`}, ` +
-      `${roomsText}, a partir de ${q.scans} varreduras.`,
+      `${roomsText}, a partir de ${q.scans} leituras.`,
   );
   out.push(
     `Precisão ${q.level === 'boa' ? 'boa' : q.level === 'razoavel' ? 'razoável' : 'fraca'}: cada posição tem erro típico de uns ${brNum(q.expectedErrorM, 1)} m. Não é uma planta${roomCount ? ': as divisões entre ambientes são estimativas' : ''}.`,

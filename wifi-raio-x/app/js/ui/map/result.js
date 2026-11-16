@@ -10,7 +10,7 @@
 //   - a barra de cima do app com o nome do mapa, "Salvar" (enquanto não foi salvo) e o menu de compartilhar;
 //   - um cartão pequeno quando se toca num ambiente, roteador ou lugar marcado (onPick);
 //   - um painel embaixo (na horizontal, ao lado) que abre e fecha: "Mostrar" (ambientes ou o sinal
-//     de uma rede, com a legenda em dBm e palavras), 3D / Planta, relevo do sinal, andares, camadas,
+//     de uma rede, com a legenda em dBm e palavras), 3D / De cima, relevo do sinal, andares, camadas,
 //     e os cartões Cobertura, Sugestão, Qualidade do mapa, "Como este mapa é feito" e as ações.
 //
 // Honestidade em dois casos que não são "um mapa com ambientes":
@@ -34,7 +34,7 @@ import { button, iconButton, badge, banner, displaySsid, select, slider, errorSt
 import { buildMap, heatField, coverage, suggestRouterSpot, describeMap } from '../../mapping/mapmodel.js';
 import { recorderFromJSON } from '../../mapping/recorder.js';
 import { createViewer } from './viewer3d.js';
-import { signalScale, signalGradientCss, SIGNAL_BREAKS_DBM } from './map-colors.js';
+import { signalScale, signalGradientCss, SIGNAL_BREAKS_DBM, mapTheme } from './map-colors.js';
 import { actionSheet, promptSheet } from './library.js';
 import { processingView } from './survey.js';
 import {
@@ -370,7 +370,7 @@ export async function mountResult(root, env, { id }) {
         drawPick();
       },
       onFallback: () => {
-        viewerNote = 'O 3D não está disponível agora neste aparelho: o mapa aparece em planta.';
+        viewerNote = 'O 3D não está disponível agora neste aparelho: o mapa aparece visto de cima.';
         V.view = 'top';
         drawPanel();
       },
@@ -466,7 +466,7 @@ export async function mountResult(root, env, { id }) {
       if (gone) env.go('/mapa', { replace: true });
       return;
     }
-    const ok = await confirmDialog({ title: 'Descartar este mapa?', text: 'O levantamento que você acabou de fazer será apagado. Não dá para desfazer.', confirmLabel: 'Descartar', danger: true });
+    const ok = await confirmDialog({ title: 'Descartar este mapa?', text: 'O mapeamento que você acabou de fazer será apagado. Não dá para desfazer.', confirmLabel: 'Descartar', danger: true });
     if (!ok || dead) return;
     await storage.draft.clear();
     env.session.result = null;
@@ -876,6 +876,34 @@ export async function mountResult(root, env, { id }) {
     );
   }
 
+  /**
+   * O que a legenda principal não explica: o piso riscado (pouca confiança: trecho estimado) e as
+   * cores do caminho (o tempo, do começo ao fim). As amostras usam as cores do próprio desenho
+   * (map-colors.js), para a legenda não se afastar dele. O caminho só entra com a camada ligada.
+   */
+  function legendNotes() {
+    const colors = mapTheme(store.get().theme);
+    const path = Array.isArray(colors.path) && colors.path.length ? colors.path : null;
+    return h(
+      'p.mrs-legend-notes',
+      { key: 'legend-notes' },
+      h(
+        'span.mrs-legend-note',
+        { dataset: { note: 'hatch' } },
+        h('i.mrs-legend-note__swatch', { 'aria-hidden': 'true', style: { backgroundImage: `repeating-linear-gradient(135deg, ${colors.hatch} 0 1.5px, transparent 1.5px 5px)` } }),
+        'Riscado: trecho estimado, sem leitura por perto',
+      ),
+      V.layers.path && path
+        ? h(
+            'span.mrs-legend-note',
+            { dataset: { note: 'path' } },
+            h('i.mrs-legend-note__swatch.mrs-legend-note__swatch--line', { 'aria-hidden': 'true', style: { backgroundImage: `linear-gradient(to right, ${path.join(', ')})` } }),
+            'Caminho: azul no começo, rosa no fim',
+          )
+        : null,
+    );
+  }
+
   function coverageCard(net) {
     const cov = coverage(S.model, net.key);
     const parts = coverageParts(cov);
@@ -951,7 +979,7 @@ export async function mountResult(root, env, { id }) {
       ? h(
           'section.card.card--accent.mrs-card.mrs-save',
           { key: 'save' },
-          h('div', null, h('h3.card__title', null, S.id !== null ? 'Mapa atualizado, ainda não salvo' : 'Este mapa ainda não foi salvo'), h('p.mrs-card__sub', null, 'O levantamento está guardado como rascunho. Salve para o mapa aparecer na sua lista.')),
+          h('div', null, h('h3.card__title', null, S.id !== null ? 'Mapa atualizado, ainda não salvo' : 'Este mapa ainda não foi salvo'), h('p.mrs-card__sub', null, 'O mapeamento está guardado como rascunho. Salve para o mapa aparecer na sua lista.')),
           button('Salvar', { variant: 'primary', icon: 'save', onClick: save }),
         )
       : null;
@@ -977,7 +1005,7 @@ export async function mountResult(root, env, { id }) {
   function drawPanelNoMap() {
     const q = qualityInfo(S.model.quality);
     const meta = mapMeta(S.model, S.survey);
-    patch(quickEl, h('p.mrs-legend.mrs-legend--text', { key: 'legend' }, 'Deste levantamento não saiu um mapa. Veja abaixo o motivo e o que fazer.'));
+    patch(quickEl, h('p.mrs-legend.mrs-legend--text', { key: 'legend' }, 'Deste mapeamento não saiu um mapa. Veja abaixo o motivo e o que fazer.'));
     patch(
       moreEl,
       saveCard(),
@@ -1053,17 +1081,18 @@ export async function mountResult(root, env, { id }) {
         ),
       ),
       legend(),
+      legendNotes(),
       h(
         'div.mrs-tools',
         { key: 'tools' },
         is2d
-          ? h('span.mrs-tools__flat', null, icon('grid', { size: 18 }), 'Vista em planta')
+          ? h('span.mrs-tools__flat', null, icon('grid', { size: 18 }), 'Vista de cima')
           : h(
               'div.seg.seg--inline.mrs-tools__view',
               { role: 'radiogroup', 'aria-label': 'Vista do mapa' },
               [
                 ['orbit', '3D', 'cube'],
-                ['top', 'Planta', 'grid'],
+                ['top', 'De cima', 'grid'],
               ].map(([value, label, ic]) =>
                 h(
                   'button.seg__opt',
@@ -1164,6 +1193,7 @@ export async function mountResult(root, env, { id }) {
                   V.layers[key] = !V.layers[key];
                   viewer.setLayers({ [key]: V.layers[key] });
                   drawPanel();
+                  measurePad(); // a nota do caminho entra e sai da legenda: a altura do painel pode mudar
                 },
               },
               V.layers[key] ? icon('check', { size: 16 }) : null,
@@ -1251,7 +1281,7 @@ export async function mountResult(root, env, { id }) {
   if (viewer) {
     viewer.setLayers({ ...V.layers, relief: false });
     applyModel();
-    if (viewer.kind === '2d' && !viewerNote) viewerNote = 'Este aparelho não desenha em 3D: o mapa aparece em planta.';
+    if (viewer.kind === '2d' && !viewerNote) viewerNote = 'Este aparelho não desenha em 3D: o mapa aparece visto de cima.';
   }
   drawPanel();
   drawPick();
@@ -1330,7 +1360,7 @@ export async function mountResult(root, env, { id }) {
         return true;
       }
       // do resultado volta-se direto para a lista (e não para "#/mapa/ver")
-      if (!S.saved) toast('O mapa não foi salvo: o levantamento continua guardado como rascunho.');
+      if (!S.saved) toast('O mapa não foi salvo: o mapeamento continua guardado como rascunho.');
       env.go('/mapa', { replace: true });
       return true;
     }),

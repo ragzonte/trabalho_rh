@@ -135,7 +135,8 @@
 .net-conn__stats {
   display: grid;
   /* a distância é curta ("≈ 6 m"): a velocidade fica com o resto da largura */
-  grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+  /* (no máximo 45% para a distância: com a letra ampliada o rótulo dela quebra em vez de espremer a velocidade) */
+  grid-template-columns: minmax(0, 1fr) fit-content(45%);
   border-top: 1px solid var(--line);
 }
 
@@ -261,7 +262,7 @@
   gap: var(--sp-3);
 }
 
-.net-conn--off > * + * {
+.net-conn--off > * {
   margin-top: 0;
 }
 
@@ -731,8 +732,13 @@
   padding: 12px 12px 6px;
 }
 
-.ap-chart-card > * + * {
+/* (filhos menos o primeiro, sem `* + *`: veja a nota em `.card > *`, em app.css) */
+.ap-chart-card > * {
   margin-top: 6px;
+}
+
+.ap-chart-card > :first-child {
+  margin-top: 0;
 }
 
 .ap-chart-card__head {
@@ -1009,8 +1015,12 @@
   padding: 12px 12px 8px;
 }
 
-.hist-card > * + * {
+.hist-card > * {
   margin-top: 6px;
+}
+
+.hist-card > :first-child {
+  margin-top: 0;
 }
 
 .hist-card__head {

@@ -41,6 +41,8 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     /** A interface monta em 1 ou 2 segundos; passado este prazo sem sinal dela, algo a impede de rodar. */
     static final long PAGE_START_MS = 10_000;
     static final long PAGE_RECHECK_MS = 3_000;
+    /** Uma página de pé responde na hora; sem resposta neste prazo, ela está travada. */
+    static final long PAGE_ANSWER_MS = 5_000;
     /** Sem resposta da página ao "voltar" por este tempo, o próximo "voltar" sai do app sem perguntar. */
     static final long BACK_PATIENCE_MS = 1_500;
 
@@ -65,6 +67,9 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     private boolean startProblemShown;
     private AlertDialog startProblem;
     private final Runnable pageStartCheck = this::checkPageStarted;
+    private final Runnable pageSilent = this::onPageSilent;
+    /** O WebView que ainda deve a resposta à pergunta "está de pé?"; null = nenhuma pergunta em aberto. */
+    private WebView aliveAsked;
     /** O "Escolher arquivo" da página (importar um mapa). */
     private final FilePicker filePicker = new FilePicker();
 
@@ -332,11 +337,28 @@ public class MainActivity extends Activity implements JsSink, WebClient.Host {
     private void checkPageStarted() {
         final WebView asked = web;
         if (asked == null || pageAlive || !started || isFinishing() || isDestroyed()) return;
+        // Uma página travada a ponto de nem responder (visto num aparelho: um laço sem fim na partida
+        // deixava a tela de abertura para sempre, sem aviso nenhum) também conta como "não abriu".
+        main.removeCallbacks(pageSilent);
+        main.postDelayed(pageSilent, PAGE_ANSWER_MS);
+        if (aliveAsked == asked) return; // a pergunta anterior ainda está na fila dela: não empilha outra
+        aliveAsked = asked;
         try {
-            asked.evaluateJavascript(Js.ALIVE_SCRIPT, value -> onPageAliveAnswer(asked, "true".equals(value)));
+            asked.evaluateJavascript(Js.ALIVE_SCRIPT, value -> {
+                if (aliveAsked == asked) aliveAsked = null;
+                main.removeCallbacks(pageSilent);
+                onPageAliveAnswer(asked, "true".equals(value));
+            });
         } catch (RuntimeException ignored) {
-            // WebView em encerramento
+            aliveAsked = null; // WebView em encerramento
         }
+    }
+
+    /** A página não respondeu à pergunta "está de pé?" dentro do prazo. */
+    private void onPageSilent() {
+        final WebView asked = web;
+        if (asked == null || pageAlive || !started || isFinishing() || isDestroyed()) return;
+        onPageAliveAnswer(asked, false);
     }
 
     private void onPageAliveAnswer(WebView asked, boolean alive) {

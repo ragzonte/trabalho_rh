@@ -48,6 +48,7 @@ import { solveIsomap } from './solver-isomap.js';
 import { solveChain } from './solver-chain.js';
 import { solveFields } from './solver-fields.js';
 import { solveRange } from './solver-range.js';
+import { fuseScale, mapSpan } from './solver-scale.js';
 
 /**
  * O que a interface pode dizer sobre este solucionador. Os números vêm da bancada
@@ -123,9 +124,6 @@ const CONF_HALF_M = 1.5; // erro esperado em que a confiança de um ponto cai pa
 // real. O erro esperado é multiplicado por até isto quando há menos de FEW_RADIOS rádios úteis.
 const FEW_RADIOS = 6;
 const FEW_RADIOS_PENALTY = 1.65;
-// Distância medida pelo usuário: variância (m²) da distância entre dois pontos do mapa dividida pela
-// variância relativa da escala sem medida nenhuma; ver applyKnownDistances().
-const KNOWN_BASE_M2 = 80;
 
 // ---------------------------------------------------------------------------
 // solve
@@ -227,10 +225,10 @@ async function solveConsensus(survey, options) {
   const full = expand(view, prepared, merged);
   const sane = capSize(view, full);
   const known = knownPairs(survey, view);
-  const trust = applyKnownDistances(view, known, full);
+  const adjust = applyKnownDistances(view, known, full);
   orient(view, full, options.previous);
   const ownScale = sane ? merged.scaleConf : 0;
-  const solution = toSolution(view, full, trust > 0 ? Math.max(ownScale, 0.95 * trust) : ownScale);
+  const solution = toSolution(view, full, adjust ? Math.max(ownScale, 0.95 * adjust.weight) : ownScale);
   solution.debug = {
     members: used,
     skipped,
@@ -247,6 +245,8 @@ async function solveConsensus(survey, options) {
     expectedErrorM: round2(merged.expectedErrorM),
     ms: Math.round(now() - t0),
   };
+  // o que as distâncias medidas pelo usuário fizeram com o tamanho do mapa (só existe quando há alguma)
+  if (adjust) solution.debug.scaleAdjust = adjust;
   progress(1, 'Pronto');
   return solution;
 }
@@ -288,10 +288,11 @@ export function solveQuick(survey, options) {
     placeHidden(heard, [...hidden, ...spare], part);
     const full = expand(view, prepared, part);
     const ownScale = capSize(view, full) ? (0.8 * r.scaleConf) / (poor * poor) : 0;
-    const trust = applyKnownDistances(view, knownPairs(survey, view), full);
+    const adjust = applyKnownDistances(view, knownPairs(survey, view), full);
     orient(view, full, opts.previous);
-    const solution = toSolution(view, full, trust > 0 ? Math.max(ownScale, 0.95 * trust) : ownScale);
+    const solution = toSolution(view, full, adjust ? Math.max(ownScale, 0.95 * adjust.weight) : ownScale);
     solution.debug = { members: [{ name: 'isomap', ms: Math.round(now() - t0) }], skipped: [], unstable: hiddenIds(heard, hidden), standstills: heard.standstills || 0, quick: true };
+    if (adjust) solution.debug.scaleAdjust = adjust;
     return solution;
   } catch (err) {
     return collapsed(survey, String((err && err.message) || err));
@@ -1219,55 +1220,60 @@ function knownPairs(survey, view) {
 }
 
 /**
- * Aplica as distâncias medidas. Devolve o quanto elas mandaram na escala (0..1; 0 = nada).
+ * Aplica as distâncias medidas pelo usuário. Devolve o resumo do que elas fizeram (vai para
+ * `debug.scaleAdjust`), ou null quando não há distância nenhuma — e aí nada é tocado.
  *
- * - Escala: o fator que melhor leva as distâncias do mapa às medidas, aplicado na proporção da
- *   confiança da base, trust = Σm² / (Σm² + KNOWN_BASE_M2). A distância entre dois pontos DO MAPA
- *   erra uns 2 m (cada ponto tem ~1,5 m de erro, e o mapa é deformado), então uma base de 4 m mede
- *   a escala pior do que o passo de quem anda (que erra ~15-20%), e só uma de 10 m ou mais manda
- *   de verdade. Medido na bancada: acreditar por inteiro numa única medida PIORA o mapa em ~5
- *   pontos de nota; com este peso, bases curtas não estragam e as longas ajudam.
- * - Se a medida discorda do mapa por mais do que um erro de escala plausível (2x), o problema é de
- *   FORMA (os dois pontos estão mal colocados entre si): esticar o mapa inteiro estragaria o resto,
- *   e a escala fica como está.
- * - Em qualquer caso cada par medido sai EXATAMENTE com a distância pedida: os dois extremos (e as
- *   varreduras do mesmo ponto marcado) se afastam ou se aproximam por igual.
- * - Menos as medidas absurdas (mais de KNOWN_MAX_M, ou mais de 4 vezes o diâmetro do mapa): essas
- *   são ignoradas por inteiro.
+ * - TAMANHO. A medida é comparada com o mapa INTEIRO, não com a distância entre os dois pontos no
+ *   mapa: essa erra ±30% e é enviesada pela própria escolha do par (medido na bancada; os números
+ *   estão em solver-scale.js). Uma distância entre dois lugares não pode ser maior que a casa de
+ *   ponta a ponta; se ela não cabe no mapa, o mapa cresce (em torno do centro, roteadores juntos)
+ *   até caber — fuseScale() junta esse teto com o que o solucionador já achava do tamanho. Se
+ *   cabe, o tamanho fica como está: a medida não diz se o mapa está certo ou pequeno. O ajuste
+ *   nunca encolhe o mapa.
+ * - Medida que pede um mapa mais de 2 vezes maior contradiz o mapa por mais do que um erro de
+ *   escala plausível (erro de digitação, lugares trocados, ou dois pontos mal colocados entre si):
+ *   o mapa não é esticado por ela.
+ * - Medida absurda (mais de KNOWN_MAX_M, ou mais de 4 vezes o diâmetro do mapa) é ignorada por
+ *   inteiro.
+ * - Fora as absurdas, cada par medido sai EXATAMENTE com a distância pedida: os dois extremos (e as
+ *   varreduras do mesmo ponto marcado) se afastam ou se aproximam por igual. É o melhor palpite
+ *   para aqueles dois pontos (a distância entre eles é a única coisa que se sabe com certeza), e a
+ *   tela passa a mostrar entre os dois lugares o que o usuário mediu.
+ *
+ * @returns {{applied:boolean, factor:number, weight:number, used:number, ignored:number, spanM:number, longestM:number}|null}
+ *   applied: o mapa mudou de tamanho; factor: por quanto foi multiplicado (>= 1); weight: 0..1, o
+ *   quanto as medidas passaram a mandar no tamanho (parte da incerteza de antes que elas tiraram);
+ *   used / ignored: medidas que entraram na conta do tamanho / que ficaram de fora dela;
+ *   spanM: quanto cabia no mapa de ponta a ponta antes do ajuste; longestM: a maior medida usada
  */
 function applyKnownDistances(view, known, full) {
-  if (!known.length) return 0;
+  if (!known.length) return null;
   const { x, y } = full;
+  const geo = mapSpan(x, y);
+  const report = { applied: false, factor: 1, weight: 0, used: 0, ignored: known.length, spanM: round2(geo.span), longestM: 0 };
   // Medida muito maior do que o mapa inteiro não é um erro do mapa, é da medida (4,2 m digitado
   // como 42): honrá-la jogaria dois pontos para fora da casa. Fica de fora.
-  const { cx: mx, cy: my } = cloudStats(x, y);
   let reach = 0;
-  for (let i = 0; i < view.n; i++) reach = Math.max(reach, Math.hypot(x[i] - mx, y[i] - my));
+  for (let i = 0; i < view.n; i++) reach = Math.max(reach, Math.hypot(x[i] - geo.cx, y[i] - geo.cy));
   const longest = Math.max(10, 8 * reach); // 8 x o raio = 4 x o diâmetro do mapa
   const pairs = known.filter((kd) => kd.meters <= longest);
-  if (!pairs.length || !Number.isFinite(reach)) return 0;
-  let num = 0;
-  let den = 0;
-  let base2 = 0;
-  for (const kd of pairs) {
-    const d = Math.hypot(x[kd.a] - x[kd.b], y[kd.a] - y[kd.b]);
-    num += kd.meters * d;
-    den += d * d;
-    base2 += kd.meters * kd.meters;
-  }
-  const factor = den > 1e-9 ? num / den : NaN;
-  const plausible = factor > 0.5 && factor < 2;
-  const trust = plausible ? base2 / (base2 + KNOWN_BASE_M2) : 0;
-  if (plausible) {
-    const k = Math.pow(factor, trust);
-    const { cx, cy } = cloudStats(x, y);
+  if (!pairs.length || !Number.isFinite(reach)) return report;
+  const fused = fuseScale(geo.span, pairs.map((kd) => kd.meters));
+  report.used = fused.used;
+  report.ignored = known.length - fused.used;
+  report.weight = round2(fused.weight);
+  for (const kd of pairs) if (kd.meters <= 2 * geo.span && kd.meters > report.longestM) report.longestM = round2(kd.meters);
+  const k = fused.factor;
+  if (k > 1) {
+    report.applied = true;
+    report.factor = Math.round(k * 1000) / 1000;
     for (let i = 0; i < view.n; i++) {
-      x[i] = cx + (x[i] - cx) * k;
-      y[i] = cy + (y[i] - cy) * k;
+      x[i] = geo.cx + (x[i] - geo.cx) * k;
+      y[i] = geo.cy + (y[i] - geo.cy) * k;
     }
     for (const a of Object.values(full.aps)) {
-      a.x = cx + (a.x - cx) * k;
-      a.y = cy + (a.y - cy) * k;
+      a.x = geo.cx + (a.x - geo.cx) * k;
+      a.y = geo.cy + (a.y - geo.cy) * k;
       a.p0 += 10 * a.n * Math.log10(k);
     }
   }
@@ -1295,7 +1301,7 @@ function applyKnownDistances(view, known, full) {
       move(kd.b, shift * dx, shift * dy);
     }
   }
-  return trust;
+  return report;
 }
 
 // ---------------------------------------------------------------------------

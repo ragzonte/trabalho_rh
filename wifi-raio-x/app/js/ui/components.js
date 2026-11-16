@@ -14,7 +14,7 @@
 // Formulário       switchRow({...}) · select(opções, valor, onChange) · slider({...}) · textField({...})
 // Limite do Android  throttleTip(ctx) · openThrottleHelp(ctx) · throttleCopy(store)
 
-import { h, sheet, toast, cssVar, fmtDbm, fmtBand, fmtAgo, uid, NO_VALUE } from './dom.js';
+import { h, nb, sheet, toast, cssVar, fmtDbm, fmtBand, fmtAgo, uid, NO_VALUE } from './dom.js';
 import { icon } from './icons.js';
 import { signalLevel } from '../core/signal.js';
 import { standardInfo } from '../core/phy.js';
@@ -205,7 +205,7 @@ export function ssidLabel(ssid, { tag = 'span' } = {}) {
 export function apRow(ap, { onClick, showVendor = true } = {}) {
   // do mais importante para o menos: em telas estreitas os últimos itens ficam de fora
   const sub = [];
-  if (ap.connected) sub.push(h('span.accent.strong', null, 'Conectada'));
+  if (ap.connected) sub.push(h('span.accent.strong', null, 'Conectado'));
   if (ap.band) sub.push(bandBadge(ap.band, { plain: true }));
   if (ap.security) sub.push(securityBadge(ap.security, { plain: true }));
   if (ap.channel != null) sub.push(h('span', null, `Canal ${ap.channel}`));
@@ -345,8 +345,8 @@ export function card({ title, text, tone, flush = false, onClick, key, ...rest }
   return h(
     onClick ? 'button' : 'section',
     { class: cls, key, type: onClick ? 'button' : undefined, onClick, ...rest },
-    title ? h('h3.card__title', null, title) : null,
-    text ? h('p.card__text', null, text) : null,
+    title ? h('h3.card__title', null, nb(title)) : null,
+    text ? h('p.card__text', null, nb(text)) : null,
     children,
   );
 }
@@ -368,7 +368,7 @@ export function card({ title, text, tone, flush = false, onClick, key, ...rest }
 export function listRow({ icon: iconName, neutral = false, lead, title, subtitle, trail, chevron = false, onClick, href, key, dense = false }) {
   const kids = [
     lead ? h('span.row__lead', null, lead) : iconName ? h('span', { class: ['row__icon', neutral && 'row__icon--neutral'] }, icon(iconName)) : null,
-    h('span.row__body', null, h('span.row__title', null, title), subtitle ? h('span.row__sub', null, subtitle) : null),
+    h('span.row__body', null, h('span.row__title', null, nb(title)), subtitle ? h('span.row__sub', null, nb(subtitle)) : null),
     trail != null || chevron ? h('span.row__trail', null, trail, chevron ? icon('chevron-right', { size: 20 }) : null) : null,
   ];
   const cls = ['row', (onClick || href) && 'row--tappable', dense && 'row--dense'];
@@ -386,7 +386,7 @@ export function sectionHeader(title, { count, action } = {}) {
   return h(
     'div.section-h',
     null,
-    h('h2.section-h__title', null, title, isNum(count) ? h('span.section-h__count', null, count) : null),
+    h('h2.section-h__title', null, nb(title), isNum(count) ? h('span.section-h__count', null, count) : null),
     action ? button(action.label, { variant: 'quiet', small: true, icon: action.icon, onClick: action.onClick }) : null,
   );
 }
@@ -458,8 +458,8 @@ export function emptyState({ icon: iconName = 'info', title, text, tone, action,
     'div.empty',
     null,
     h('div', { class: ['empty__icon', tone && `empty__icon--${tone}`] }, icon(iconName, { size: 28 })),
-    h('h2.empty__title', null, title),
-    text ? h('p.empty__text', null, text) : null,
+    h('h2.empty__title', null, nb(title)),
+    text ? h('p.empty__text', null, nb(text)) : null,
     action || secondary
       ? h(
           'div.empty__actions',
@@ -519,8 +519,8 @@ export function banner({ tone = 'info', icon: iconName, title, text, actions, on
     h(
       'div.banner__body',
       null,
-      title ? h('strong.banner__title', null, title) : null,
-      text ? h('span.banner__text', null, text) : null,
+      title ? h('strong.banner__title', null, nb(title)) : null,
+      text ? h('span.banner__text', null, nb(text)) : null,
       actions && actions.length
         ? h(
             'div.banner__actions',
@@ -568,7 +568,7 @@ export function switchRow({ title, subtitle, checked, onChange, disabled = false
     'label.row',
     { for: id, key },
     iconName ? h('span.row__icon.row__icon--neutral', null, icon(iconName)) : null,
-    h('span.row__body', null, h('span.row__title', null, title), subtitle ? h('span.row__sub', null, subtitle) : null),
+    h('span.row__body', null, h('span.row__title', null, nb(title)), subtitle ? h('span.row__sub', null, nb(subtitle)) : null),
     h('input.switch', { id, type: 'checkbox', role: 'switch', checked: !!checked, disabled, onChange: (ev) => onChange(ev.currentTarget.checked) }),
   );
 }

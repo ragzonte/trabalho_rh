@@ -209,6 +209,135 @@ test('andar até um ponto fraco sem trocar de rádio: o cartão, o diagnóstico 
   });
 });
 
+// ---------------------------------------------------------------------------
+// realphone-06: uma varredura = uma atualização só da tela Redes
+// ---------------------------------------------------------------------------
+
+const layoutCount = async (cdp) => (await cdp.send('Performance.getMetrics')).metrics.find((m) => m.name === 'LayoutCount').value;
+
+test('batch(): várias atualizações contam como uma só (um acerto de rolagem e de foco, no fim)', T, async () => {
+  await withApp(env, { params: { speed: 1, walk: 'still' }, route: '/ferramentas/sobre' }, async ({ page, context }) => {
+    const cdp = await context.newCDPSession(page);
+    await cdp.send('Performance.enable');
+    // uma "tela" de teste: quem rola é o pai; dentro, cinco regiões atualizadas uma a uma
+    await page.evaluate(async () => {
+      const { h, patch, batch } = await import('./js/ui/dom.js');
+      const regions = [0, 1, 2, 3, 4].map(() => h('div'));
+      const root = h('div', null, regions);
+      const scroller = h('div', { style: { position: 'fixed', top: '0', left: '0', width: '300px', height: '200px', overflow: 'auto', zIndex: 9999, background: '#000' } }, root);
+      const other = h('div');
+      const otherScroller = h('div', { style: { position: 'fixed', top: '0', left: '320px', width: '60px', height: '100px', overflow: 'auto', zIndex: 9999 } }, other);
+      document.body.append(scroller, otherScroller);
+      let round = 0;
+      const block = (key, px) => h('div', { key, style: { height: `${px}px` } }, key);
+      const draw = (i) => {
+        const kids = [block(`a${i}`, 80 + round * 3), block(`b${i}`, 90), block(`c${i}`, 70 + round)];
+        if (i === 2) kids.push(h('input', { key: 'campo', type: 'text', value: 'texto digitado' }));
+        if (round % 2) kids.reverse(); // a ordem muda a cada rodada (o campo com foco muda de lugar)
+        patch(regions[i], kids);
+      };
+      const drawOther = () => patch(other, [block('x', 400 + round), block('y', 300)]);
+      const all = () => {
+        round += 1;
+        for (let i = 0; i < 5; i++) draw(i);
+      };
+      all();
+      drawOther();
+      scroller.scrollTop = 300;
+      otherScroller.scrollTop = 150;
+      const input = root.querySelector('input');
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(2, 5);
+      window.__lote = {
+        separate: all,
+        batched: () => batch(root, all),
+        // dentro do lote, uma atualização FORA da raiz dele continua cuidando da própria rolagem
+        mixed: () =>
+          batch(root, () => {
+            all();
+            drawOther();
+          }),
+        state: () => ({ top: scroller.scrollTop, otherTop: otherScroller.scrollTop, focused: document.activeElement === root.querySelector('input'), selection: [root.querySelector('input').selectionStart, root.querySelector('input').selectionEnd], sameInput: root.querySelector('input') === input }),
+        remove: () => {
+          scroller.remove();
+          otherScroller.remove();
+        },
+      };
+    });
+    const expected = { top: 300, otherTop: 150, focused: true, selection: [2, 5], sameInput: true };
+    const measure = async (name) => {
+      await settle(page);
+      const before = await layoutCount(cdp);
+      await page.evaluate((n) => window.__lote[n](), name);
+      const after = await layoutCount(cdp);
+      assert.deepEqual(await page.evaluate(() => window.__lote.state()), expected, `${name}: a rolagem, o foco e a seleção ficam onde estavam`);
+      return after - before;
+    };
+    const separate = await measure('separate');
+    const batched = await measure('batched');
+    const mixed = await measure('mixed');
+    await page.evaluate(() => window.__lote.remove());
+    // cada patch() sozinho relê a rolagem depois de mexer (um layout forçado por região); o lote relê uma vez
+    assert.ok(separate >= 5, `cinco atualizações separadas: ${separate} layouts`);
+    assert.ok(batched <= 2, `as mesmas cinco num lote: ${batched} layouts`);
+    assert.ok(mixed <= 4, `lote + uma atualização de fora: ${mixed} layouts`);
+  });
+});
+
+test('Redes com 150 redes: cada varredura acerta a rolagem uma vez só, sem perder a posição nem o foco', T, async () => {
+  await withApp(env, { params: { speed: 1, walk: 'still', hostile: 0 }, route: '/redes' }, async ({ page }) => {
+    await waitForScans(page, 1);
+    await page.evaluate(() => {
+      window.__wrx.app.scanLoop.setMode('paused');
+      const hx = (n) => (n & 255).toString(16).padStart(2, '0');
+      let round = 0;
+      const t0 = Date.now();
+      // 150 redes; a cada rodada todos os sinais mudam e a ordem da lista muda junto
+      window.__feed = () => {
+        round += 1;
+        const aps = [];
+        for (let i = 0; i < 150; i++) {
+          aps.push({ bssid: `02:11:22:00:${hx(i >> 8)}:${hx(i)}`, ssid: `Rede ${i}`, level: -40 - ((i * 7 + round * 3) % 50), frequency: i % 2 ? 5180 + 20 * (i % 8) : 2412 + 5 * (i % 11), channelWidth: 0, centerFreq0: 0, centerFreq1: 0, capabilities: '[WPA2-PSK-CCMP][ESS]', ageMs: 30, wifiStandard: 4 });
+        }
+        // cada rodada 2 s depois da anterior no relógio do "celular" (o mesmo beacon relido em menos de 0,5 s não conta como leitura nova)
+        window.__wrx.app.store.ingestScan({ ts: t0 + round * 2000, fresh: true, source: 'request', aps });
+      };
+      window.__feed();
+      window.__feed();
+    });
+    await settle(page);
+    assert.equal(await page.locator('.net-list > .net-row').count(), 80, 'a lista desenha uma janela de 80 linhas');
+
+    // a pessoa rolou a lista e deixou o foco numa linha (a 12ª); chega uma varredura
+    const probe = await page.evaluate(() => {
+      const view = document.querySelector('.view');
+      view.scrollTop = 700;
+      const row = document.querySelectorAll('.net-list > .net-row')[12];
+      row.focus({ preventScroll: true });
+      const bssid = row.dataset.bssid;
+      // conta quantas vezes a rolagem da área de conteúdo é lida durante a varredura
+      const desc = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop');
+      let reads = 0;
+      Object.defineProperty(view, 'scrollTop', { configurable: true, get: () => ((reads += 1), desc.get.call(view)), set: (v) => desc.set.call(view, v) });
+      const top = desc.get.call(view);
+      const order = () => [...document.querySelectorAll('.net-list > .net-row')].map((r) => r.dataset.bssid).join(',');
+      const before = order();
+      window.__feed();
+      const out = { top, topAfter: desc.get.call(view), reads, focused: document.activeElement && document.activeElement.dataset.bssid, bssid, reordered: order() !== before };
+      delete view.scrollTop;
+      return out;
+    });
+    assert.equal(probe.reordered, true, 'a varredura mudou a ordem das linhas');
+    assert.equal(probe.topAfter, probe.top, 'a lista fica onde a pessoa a deixou');
+    assert.equal(probe.focused, probe.bssid, 'o foco continua na mesma linha');
+    assert.ok(probe.reads <= 4, `a rolagem foi lida ${probe.reads} vezes numa varredura (antes do lote: uma leitura antes e outra depois de CADA região)`);
+
+    // progressivo: nos WebViews que entendem, as linhas fora da tela não são estilizadas nem desenhadas
+    assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('.net-list > .net-row')).contentVisibility), 'auto');
+    assert.deepEqual(await page.evaluate(() => [...new Set([...document.querySelectorAll('.net-list > .net-row')].map((r) => Math.round(r.getBoundingClientRect().height)))]), [84], 'a altura reservada para as linhas fora da tela (84px no CSS) é a altura de verdade de uma linha');
+  });
+});
+
 // (os testes das demais descobertas vêm abaixo)
 void simState;
 void simEval;

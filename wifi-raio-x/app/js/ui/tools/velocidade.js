@@ -18,7 +18,7 @@ import { h, patch, sheet, toast, confirmDialog, fmtNum, fmtMbps, fmtMs, fmtClock
 import { icon } from '../icons.js';
 import { button, segmented, banner, sectionHeader, kvList, meter, badge, ssidLabel, spinner } from '../components.js';
 import { createGauge } from '../charts/gauge.js';
-import { speedVerdict, wifiVsInternet, gaugeMax, estimateTestBytes, LIGHT_MAX_BYTES, formatBytes, serverCity, sanitizeSpeedHistory, addSpeedResult, speedHistoryKey } from './net-logic.js';
+import { speedVerdict, wifiVsInternet, gaugeMax, estimateTestBytes, fullTestDataText, LIGHT_MAX_BYTES, formatBytes, serverCity, sanitizeSpeedHistory, addSpeedResult, speedHistoryKey } from './net-logic.js';
 
 const KEY_MODE = 'speed.mode';
 const PHASES = ['latency', 'download', 'upload'];
@@ -177,7 +177,7 @@ function aboutContent({ compact = false } = {}) {
       'download',
       'Gasta dados da internet da casa.',
       [
-        `Completo: cerca de 1${THIN}MB para cada Mb/s de velocidade (≈${THIN}450${THIN}MB num plano de 300${THIN}Mb/s). Leve: até cerca de ${formatBytes(LIGHT_MAX_BYTES)}.`,
+        `Completo: ${fullTestDataText().text}. Leve: até cerca de ${formatBytes(LIGHT_MAX_BYTES)}.`,
         compact ? null : ' Se o seu Wi-Fi tem franquia (internet via rádio ou satélite, ou roteada de outro celular), prefira o leve.',
       ],
     ),
@@ -346,7 +346,7 @@ export async function mount(root, ctx) {
     let caption;
     if (now === 'light') caption = `Cerca de 3${THIN}s em cada direção. Usa até cerca de ${formatBytes(LIGHT_MAX_BYTES)} de dados.`;
     else if (estimate) caption = `Cerca de 8${THIN}s em cada direção. Deve usar ≈${THIN}${formatBytes(estimate)} de dados (pela última medição).`;
-    else caption = `Cerca de 8${THIN}s em cada direção. Usa cerca de 1${THIN}MB de dados para cada Mb/s da sua internet.`;
+    else caption = `Cerca de 8${THIN}s em cada direção. Usa ${fullTestDataText().rule} (download e upload).`;
     return h(
       'div.tb-duration',
       { key: 'mode' },
@@ -539,7 +539,7 @@ export async function mount(root, ctx) {
           ['Dados usados', total > 0 ? formatBytes(total) : null, total > 0 ? `download ${formatBytes(rec.bytesDown)} · upload ${formatBytes(rec.bytesUp)}` : undefined],
           ['Tipo de teste', rec.mode === 'light' ? 'Leve' : 'Completo'],
           rec.ssid ? ['Rede', ssidLabel(rec.ssid)] : null,
-          isNum(rec.linkMbps) ? ['Link Wi-Fi no teste', fmtMbps(rec.linkMbps), 'a velocidade combinada entre o celular e o roteador'] : null,
+          isNum(rec.linkMbps) ? ['Velocidade até o roteador no teste', fmtMbps(rec.linkMbps), 'a velocidade combinada entre o celular e o roteador'] : null,
           ['Servidor', rec.server ? (city ? `${city} (${rec.server})` : rec.server) : 'Cloudflare', rec.server ? 'Cloudflare' : undefined],
         ]),
       ),

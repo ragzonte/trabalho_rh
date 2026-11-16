@@ -681,6 +681,19 @@ export const SPEED_MODES = Object.freeze({
   light: Object.freeze({ phaseS: 3, downCap: 25e6, upCap: 10e6 }),
 });
 
+/**
+ * Quanto o teste completo gasta, em palavras, com um exemplo cuja conta fecha: a regra vale em
+ * CADA direção (download e upload), e o número do exemplo sai de estimateTestBytes, o mesmo
+ * modelo que estima o gasto antes de cada teste.
+ * @returns {{rule:string, example:string, text:string}}
+ */
+export function fullTestDataText() {
+  const plan = { downMbps: 300, upMbps: 150 };
+  const rule = `cerca de 1${THIN}MB para cada Mb/s, em cada direção`;
+  const example = `num plano de ${plan.downMbps}${THIN}Mb/s de download e ${plan.upMbps} de upload, ≈${THIN}${formatBytes(estimateTestBytes('full', plan.downMbps, plan.upMbps))}`;
+  return { rule, example, text: `${rule} (${example})` };
+}
+
 /** O máximo que o teste leve trafega, em bytes (25 MB de download + 10 MB de upload). */
 export const LIGHT_MAX_BYTES = SPEED_MODES.light.downCap + SPEED_MODES.light.upCap;
 

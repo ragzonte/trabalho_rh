@@ -1407,7 +1407,7 @@ export async function mount(root, ctx) {
             'ul',
             null,
             h('li', null, h('strong', null, 'Cada montanha é uma rede Wi-Fi'), ' que o celular ouve daqui.'),
-            h('li', null, h('strong', null, 'A posição é o canal.'), ' Canal é a “faixa da estrada” que a rede usa para transmitir. Os números ficam embaixo.'),
+            h('li', null, h('strong', null, 'A posição é o canal.'), ' Canal é a “pista” da estrada que a rede usa para transmitir. Os números ficam embaixo.'),
             h('li', null, h('strong', null, 'A largura é o espaço que ela ocupa'), ': 20, 40, 80 ou 160 MHz. Mais larga = mais rápida, mas esbarra em mais vizinhos.'),
             h('li', null, h('strong', null, 'A altura é a força do sinal'), ' neste ponto, em dBm. São números negativos: perto de −40 é muito forte; abaixo de −80, fraco.'),
             h('li', null, h('strong', null, 'Montanhas uma em cima da outra disputam o mesmo espaço.'), ' No mesmo canal, elas se revezam. Meio desencontradas, uma atropela a outra, o que é pior.'),

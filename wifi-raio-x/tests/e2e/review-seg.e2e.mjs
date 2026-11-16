@@ -386,7 +386,7 @@ test('privacidade: nenhuma tela diz que o teste de velocidade é a única coisa 
     const chip = (label) => page.locator('.tb-setup .chip', { hasText: new RegExp(`^${label}$`) });
     await chip('Roteador').click();
     assert.equal(await page.locator('.tb-note--out').count(), 0, 'até o roteador nada sai da rede da casa');
-    for (const label of ['Internet', 'Internet 2', 'Site']) {
+    for (const label of ['Internet \\(Cloudflare\\)', 'Internet \\(Google\\)', 'Site']) {
       await chip(label).click();
       await page.waitForSelector('.tb-note--out');
       assert.match(await page.textContent('.tb-note--out'), /vê o endereço IP da sua internet/, label);

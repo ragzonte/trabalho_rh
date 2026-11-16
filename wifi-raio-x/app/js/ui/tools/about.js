@@ -1,14 +1,15 @@
 // Sobre e limitações: o que o app faz, o que ele NÃO manda para lugar nenhum e onde os números
 // são estimativas. Texto estático, mais os dados do aparelho (DeviceInfo).
 
-import { h, mount as render, sheet, fmtBand } from '../dom.js';
+import { h, nb, mount as render, sheet, fmtBand } from '../dom.js';
 import { icon } from '../icons.js';
 import { button, kvList, sectionHeader, spinner } from '../components.js';
 import { MAC_HIDDEN_SINCE_ANDROID } from './net-logic.js';
 
-const p = (...kids) => h('p', null, kids);
-const b = (text) => h('strong', null, text);
-const li = (...kids) => h('li', null, kids);
+// (nb(): nos textos corridos "Wi-Fi" não se parte no hífen ao quebrar a linha)
+const p = (...kids) => h('p', null, kids.map(nb));
+const b = (text) => h('strong', null, nb(text));
+const li = (...kids) => h('li', null, kids.map(nb));
 
 function bandsText(bands) {
   if (!bands || typeof bands !== 'object') return null;

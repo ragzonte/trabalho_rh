@@ -802,6 +802,55 @@ public class MainActivityTest extends AllSdks {
         assertNull(activity.startProblemDialog());
     }
 
+    /**
+     * Visto num aparelho: um laço sem fim na partida da página deixava a tela de abertura para
+     * sempre. A pergunta "está de pé?" nunca voltava, e sem resposta o aviso não aparecia.
+     */
+    @Test
+    public void aPageTooStuckToEvenAnswerAlsoGetsTheExplanation() {
+        MainActivity activity = launch();
+        ShadowWebView web = shadowOf(activity.webView());
+        advance(MainActivity.PAGE_START_MS);
+        assertEquals(Js.ALIVE_SCRIPT, web.getLastEvaluatedJavascript());
+        android.webkit.ValueCallback<String> question = web.getLastEvaluatedJavascriptCallback();
+        assertNull("ainda dentro do prazo da resposta", activity.startProblemDialog());
+
+        advance(MainActivity.PAGE_ANSWER_MS); // a página não respondeu
+        android.app.AlertDialog dialog = activity.startProblemDialog();
+        assertNotNull("sem resposta também é \"não abriu\"", dialog);
+        assertTrue(dialog.isShowing());
+        assertFalse(activity.isFinishing());
+
+        // enquanto a página não responde, não se empilham perguntas na fila dela
+        advance(MainActivity.PAGE_RECHECK_MS * 5 + MainActivity.PAGE_ANSWER_MS * 5);
+        assertSame(question, web.getLastEvaluatedJavascriptCallback());
+        assertTrue(dialog.isShowing());
+
+        // a página destravou: a resposta atrasada fecha o aviso sozinha
+        question.onReceiveValue("true");
+        assertFalse(dialog.isShowing());
+        assertNull(activity.startProblemDialog());
+        advance(MainActivity.PAGE_START_MS * 3);
+        assertNull(activity.startProblemDialog());
+        assertSame("página de pé não é perguntada de novo", question, web.getLastEvaluatedJavascriptCallback());
+    }
+
+    @Test
+    public void aStuckPageThatAnswersNoIsAskedAgainUntilItStarts() {
+        MainActivity activity = launch();
+        ShadowWebView web = shadowOf(activity.webView());
+        advance(MainActivity.PAGE_START_MS);
+        android.webkit.ValueCallback<String> first = web.getLastEvaluatedJavascriptCallback();
+        advance(MainActivity.PAGE_ANSWER_MS);
+        assertNotNull(activity.startProblemDialog());
+        first.onReceiveValue("false"); // respondeu, mas os módulos ainda não rodaram
+        advance(MainActivity.PAGE_RECHECK_MS);
+        android.webkit.ValueCallback<String> second = web.getLastEvaluatedJavascriptCallback();
+        assertTrue("pergunta de novo depois de uma resposta", second != first);
+        second.onReceiveValue("true");
+        assertNull(activity.startProblemDialog());
+    }
+
     @Test
     public void aHealthyPageIsCheckedOnceAndNeverBothered() {
         MainActivity activity = launch();

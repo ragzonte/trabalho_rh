@@ -317,8 +317,12 @@ const SEVERITY_WORD = { critical: 'Crítico', warning: 'Atenção', info: 'Infor
  * uma nota inventada). Com um único par de aspas, tudo o que é nome fica visivelmente dentro dele.
  */
 const quoted = (name) => (isText(name) && cleanText(name).trim() !== '' ? `"${cleanText(name).replace(/["\u201c\u201d\u201e\u201f\u00ab\u00bb\uff02]/g, "'")}"` : '(rede oculta)');
-/** Distância estimada: uma casa decimal só abaixo de 3 m, e sem ",0". */
-const metersText = (m) => `${numText(m, m < 2.95 ? 1 : 0).replace(/,0$/, '')} m`;
+/**
+ * Distância estimada, arredondada como na tela (fmtMeters com {approx:true}, em ui/dom.js; este
+ * módulo não importa nada): de meio em meio metro abaixo de 2,75 m, metro inteiro daí em diante.
+ * Assim o relatório não diz "1,4 m" de uma rede que a tela mostra a "≈ 1,5 m".
+ */
+const metersText = (m) => `${m >= 2.75 ? numText(m) : numText(Math.round(m * 2) / 2, 1).replace(/,0$/, '')} m`;
 // as frases que vêm das análises usam os sinais tipográficos da interface: aqui viram os comuns
 const TYPOGRAPHIC_SPACES = /[\u00a0\u2009\u202f]/g;
 const plain = (text) => String(text ?? '').replace(/\u2212/g, '-').replace(TYPOGRAPHIC_SPACES, ' ');
@@ -366,7 +370,7 @@ export function buildReport(data) {
     const where = [bandText(c.band), isNum(c.channel) ? `canal ${c.channel}` : '', isNum(c.widthMHz) ? `${c.widthMHz} MHz` : ''].filter(Boolean).join(', ');
     out.push(`Rede: ${quoted(c.ssid)}${where ? ` (${where})` : ''}`);
     if (isNum(c.rssi)) out.push(`Sinal: ${dbmText(c.rssi)} (${levelWord(c.rssi)})`);
-    if (isNum(c.linkSpeed) && c.linkSpeed > 0) out.push(`Velocidade entre o celular e o roteador: ${mbpsText(c.linkSpeed)}`);
+    if (isNum(c.linkSpeed) && c.linkSpeed > 0) out.push(`Velocidade até o roteador: ${mbpsText(c.linkSpeed)}`);
     if (isNum(c.distanceM)) out.push(`Distância do roteador: cerca de ${metersText(c.distanceM)} (estimativa pelo sinal)`);
     if (isText(c.standard)) out.push(`Padrão: ${para(c.standard)}`);
     if (isText(c.security)) out.push(`Segurança: ${para(c.security)}`);
@@ -417,7 +421,7 @@ export function buildReport(data) {
   networks.slice(0, limit).forEach((n, i) => {
     const bands = (Array.isArray(n.bands) ? n.bands : []).map(bandText).filter(Boolean).join(' e ');
     const chans = Array.isArray(n.channels) && n.channels.length ? `${n.channels.length === 1 ? 'canal' : 'canais'} ${n.channels.join(', ')}` : '';
-    const tags = [n.connected ? 'conectada' : '', n.mine ? 'minha' : '', isNum(n.radios) && n.radios > 1 ? `${n.radios} rádios` : ''].filter(Boolean).join(', ');
+    const tags = [n.connected ? 'conectada' : '', n.mine ? 'minha' : '', isNum(n.radios) && n.radios > 1 ? `${n.radios} sinais` : ''].filter(Boolean).join(', ');
     const parts = [`${dbmText(n.bestRssi)} (${levelWord(n.bestRssi)})`, [bands, chans].filter(Boolean).join(' '), isText(n.security) ? para(n.security) : '', tags];
     out.push(`${String(i + 1).padStart(2, ' ')}. ${quoted(n.hidden ? '' : n.name)} · ${parts.filter(Boolean).join(' · ')}`);
   });

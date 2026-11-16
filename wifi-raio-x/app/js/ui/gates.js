@@ -7,7 +7,7 @@
 //   gates.current() -> 'permission' | 'blocked' | 'precise' | 'location' | 'wifi' | 'unknown' | null
 //   gates.destroy()
 
-import { h, mount, pushLayer, toast } from './dom.js';
+import { h, nb, mount, pushLayer, toast } from './dom.js';
 import { icon } from './icons.js';
 import { button } from './components.js';
 
@@ -143,9 +143,10 @@ export function createGates({ store, bridge, onDemo }) {
         'div.gate__main',
         null,
         h('div', { class: ['gate__art', c.tone && `gate__art--${c.tone}`] }, icon(c.icon, { size: 48, stroke: 1.5 })),
-        h('h1.gate__title', { id: titleId }, c.title),
-        h('p.gate__text', null, c.text),
-        c.note ? h('p.gate__note', null, icon('shield-check', { size: 18 }), h('span', null, c.note)) : null,
+        // nb(): "Wi-Fi" nunca se parte no hífen ("Wi-" / "Fi"), nem no título da primeira tela do app
+        h('h1.gate__title', { id: titleId }, nb(c.title)),
+        h('p.gate__text', null, nb(c.text)),
+        c.note ? h('p.gate__note', null, icon('shield-check', { size: 18 }), h('span', null, nb(c.note))) : null,
       ),
       h(
         'div.gate__actions',

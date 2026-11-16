@@ -849,7 +849,7 @@ export async function mount(root, ctx) {
     }
 
     const sub = [];
-    if (t.live) sub.push(h('span.accent.strong', null, 'Conectada'));
+    if (t.live) sub.push(h('span.accent.strong', null, 'Conectado'));
     if (t.ap && t.ap.band) sub.push(h('span', null, fmtBand(t.ap.band)));
     if (t.ap && isNum(t.ap.channel)) sub.push(h('span', null, `Canal ${t.ap.channel}`));
     if (t.ap && t.ap.vendor) sub.push(h('span', null, t.ap.vendor));
@@ -1158,7 +1158,7 @@ export async function mount(root, ctx) {
     if (picker && picker.isOpen()) return;
     picker = sheet({
       title: 'Qual rede medir?',
-      subtitle: 'Cada linha é um roteador (ou um rádio dele)',
+      subtitle: 'Cada linha é um sinal: o mesmo roteador pode ter um em 2,4 GHz e outro em 5 GHz',
       tall: true,
       content: pickerView(),
       onClose: () => {

@@ -605,13 +605,13 @@ export function sheet({ title, subtitle, content, footer, tall = false, onClose 
   const titleId = uid('sheet');
   let open = true;
 
-  const titleEl = h('h2.sheet__title', { id: titleId }, title);
+  const titleEl = h('h2.sheet__title', { id: titleId }, nb(title));
   const body = h('div.sheet__body', null, content);
   const grab = h('div.sheet__grab', { 'aria-hidden': 'true' });
   const header = h(
     'div.sheet__header',
     null,
-    h('div.sheet__titles', null, titleEl, subtitle ? h('p.sheet__subtitle', null, subtitle) : null),
+    h('div.sheet__titles', null, titleEl, subtitle ? h('p.sheet__subtitle', null, nb(subtitle)) : null),
     h('button.icon-btn.icon-btn--muted', { type: 'button', 'aria-label': 'Fechar', onClick: () => close() }, icon('close')),
   );
   const panel = h(
@@ -742,8 +742,8 @@ export function confirmDialog({ title, text, confirmLabel = 'Confirmar', cancelL
     const box = h(
       'div.dialog',
       { role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': titleId, 'aria-describedby': text ? textId : null },
-      h('h2.dialog__title', { id: titleId }, title),
-      text ? h('p.dialog__text', { id: textId }, text) : null,
+      h('h2.dialog__title', { id: titleId }, nb(title)),
+      text ? h('p.dialog__text', { id: textId }, nb(text)) : null,
       h('div.dialog__actions', null, cancel, ok),
     );
     const layer = h('div.layer.layer--center', null, h('div.scrim', { onClick: () => finish(false) }), box);

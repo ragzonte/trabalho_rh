@@ -375,7 +375,7 @@ describe('relatório em texto', () => {
     }
     assert.ok(lines.includes('Rede: "Casa_5G" (5 GHz, canal 36, 80 MHz)'));
     assert.ok(lines.includes('Sinal: -52 dBm (ótimo)'));
-    assert.ok(lines.includes('Velocidade entre o celular e o roteador: 433 Mb/s'));
+    assert.ok(lines.includes('Velocidade até o roteador: 433 Mb/s'));
     assert.ok(lines.includes('Distância do roteador: cerca de 4 m (estimativa pelo sinal)'));
     assert.ok(lines.includes('Padrão: Wi-Fi 5 (802.11ac)'));
     assert.ok(lines.includes('Segurança: WPA2'));
@@ -386,7 +386,7 @@ describe('relatório em texto', () => {
     assert.ok(lines.includes('5 GHz: Pode deixar como está.'));
     assert.ok(lines.includes('[Atenção] Canal congestionado'));
     assert.ok(lines.includes('  Troque para o canal 1.'));
-    assert.ok(lines.includes(' 1. "Casa_5G" · -52 dBm (ótimo) · 2,4 GHz e 5 GHz canais 6, 36 · WPA2 · conectada, minha, 2 rádios'));
+    assert.ok(lines.includes(' 1. "Casa_5G" · -52 dBm (ótimo) · 2,4 GHz e 5 GHz canais 6, 36 · WPA2 · conectada, minha, 2 sinais'));
     assert.ok(lines.includes(' 2. (rede oculta) · -80 dBm (fraco) · 2,4 GHz canal 11'));
     assert.ok(text.includes('estimativas'), 'as estimativas são chamadas de estimativas');
     assert.ok(text.endsWith('Gerado no celular pelo WiFi Raio-X 1.0.0. Nada foi enviado para a internet.\n'));
@@ -405,7 +405,7 @@ describe('relatório em texto', () => {
       { name: 'E', hidden: false, score: 5, estMbps: 0, connected: false, mine: false },
     ];
     const text = buildReport(data);
-    assert.ok(text.includes('Velocidade entre o celular e o roteador: 1,2 Gb/s'));
+    assert.ok(text.includes('Velocidade até o roteador: 1,2 Gb/s'));
     assert.ok(text.includes('Distância do roteador: cerca de 1 m (estimativa pelo sinal)'));
     assert.ok(text.includes('1. "A": nota 100 de 100, cerca de 9 Mb/s'));
     assert.ok(text.includes('2. "B": nota 12 de 100, cerca de 0,4 Mb/s'));

@@ -592,7 +592,7 @@
   gap: 10px;
 }
 
-.best-diag > * + * {
+.best-diag > * {
   margin-top: 0;
 }
 
@@ -774,8 +774,8 @@
   gap: 14px;
 }
 
-.best-parts > * + *,
-.best-why > * + * {
+.best-parts > *,
+.best-why > * {
   margin-top: 0;
 }
 

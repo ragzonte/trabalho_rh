@@ -574,7 +574,7 @@ export function openNetworkDetail(ctx, networkKey) {
     if (!colorOf.has(bssid)) colorOf.set(bssid, SERIES_TOKENS[colorOf.size % SERIES_TOKENS.length]);
     return colorOf.get(bssid);
   };
-  const slot = chartSlot({ windowMs: 120_000, height: 190, labels: true, zoneWords: false, ariaLabel: 'Sinal de cada ponto de acesso desta rede nos últimos 2 minutos' });
+  const slot = chartSlot({ windowMs: 120_000, height: 190, labels: true, zoneWords: false, ariaLabel: 'Cada sinal desta rede nos últimos 2 minutos' });
   const radioLabel = (ap) => `${ap.band ? fmtBand(ap.band) : '?'} · canal ${ap.channel ?? '?'}`;
 
   const countLine = (net) => `${plural(net.aps.length, 'sinal', 'sinais')} em ${plural(net.devices, 'roteador', 'roteadores')}${net.bands.length ? ` · ${bandsText(net.bands)}` : ''}`;
@@ -610,7 +610,7 @@ export function openNetworkDetail(ctx, networkKey) {
       h(
         'section',
         { key: 'radios', class: 'stack stack--sm' },
-        h('h3.ap-section-title', null, 'Pontos de acesso desta rede'),
+        h('h3.ap-section-title', null, 'Sinais desta rede'),
         h('p.ap-section-text', null, 'O mesmo nome pode vir de mais de um rádio: um por faixa do roteador e um por repetidor. O celular escolhe sozinho em qual ficar.'),
         h(
           'div.card.card--flush.list',

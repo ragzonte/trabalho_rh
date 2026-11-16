@@ -440,7 +440,7 @@ export async function mount(root, ctx) {
         note: gw ? 'Mede só o trecho entre o celular e o roteador, ou seja, o seu Wi-Fi.' : 'Conecte-se a um Wi-Fi para medir o roteador.',
       },
       { id: 'internet', kind: 'internet', label: 'Internet', host: '1.1.1.1', who: 'Cloudflare', note: 'Mede o Wi-Fi mais o caminho pela internet do provedor.' },
-      { id: 'internet2', kind: 'internet', label: 'Internet 2', host: '8.8.8.8', who: 'Google', note: 'Um segundo destino na internet, para confirmar o resultado.' },
+      { id: 'internet2', kind: 'internet', label: 'Internet (Google)', host: '8.8.8.8', who: 'Google', note: 'Um segundo destino na internet, para confirmar o resultado.' },
       { id: 'site', kind: 'internet', label: 'Site', host: SITE_HOST, note: 'Como abrir um site: inclui descobrir o endereço pelo nome (DNS).' },
       { id: 'custom', kind: 'other', label: 'Outro', host: null, note: null },
     ];
@@ -611,7 +611,8 @@ export async function mount(root, ctx) {
               },
             },
             p.id === 'gateway' ? icon('router', { size: 16 }) : p.id === 'custom' ? icon('edit', { size: 16 }) : p.id === 'site' ? icon('globe', { size: 16 }) : null,
-            p.label,
+            // os dois destinos "na internet" dizem quem responde: "Internet 2" não explicava a diferença
+            p.id === 'internet' && p.who ? `${p.label} (${p.who})` : p.label,
           ),
         ),
       ),

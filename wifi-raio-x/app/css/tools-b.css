@@ -138,8 +138,13 @@
 /* 2. Latência                                                               */
 /* ------------------------------------------------------------------------ */
 
-.tb-setup > * + * {
+/* (filhos menos o primeiro, sem `* + *`: veja a nota em `.card > *`, em app.css) */
+.tb-setup > * {
   margin-top: var(--sp-3);
+}
+
+.tb-setup > :first-child {
+  margin-top: 0;
 }
 
 .tb-duration {
@@ -218,8 +223,12 @@
 /* 3. Dispositivos                                                           */
 /* ------------------------------------------------------------------------ */
 
-.tb-sum > * + * {
+.tb-sum > * {
   margin-top: 6px;
+}
+
+.tb-sum > :first-child {
+  margin-top: 0;
 }
 
 .tb-sum__top {
@@ -284,7 +293,7 @@
   gap: var(--sp-3);
 }
 
-.tb-facts > * + * {
+.tb-facts > * {
   margin-top: 0;
 }
 
@@ -312,9 +321,14 @@
 /* 4. Velocidade                                                             */
 /* ------------------------------------------------------------------------ */
 
-.tb-intro > * + *,
-.tb-hero > * + * {
+.tb-intro > *,
+.tb-hero > * {
   margin-top: var(--sp-4);
+}
+
+.tb-intro > :first-child,
+.tb-hero > :first-child {
+  margin-top: 0;
 }
 
 .tb-intro__head {
@@ -430,7 +444,11 @@
   flex: none;
 }
 
-.tb-sub > * + *::before {
+.tb-sub > :first-child::before {
+  content: none;
+}
+
+.tb-sub > *::before {
   content: '·';
   margin: 0 6px;
   color: var(--faint);
@@ -438,8 +456,10 @@
 
 .tb-sub > .ssid,
 .tb-sub > .tb-sub__flex {
-  flex: 0 1 auto;
-  min-width: min(5em, 100%);
+  /* base de 5em: cabe na linha enquanto sobrar isso (e aí ocupa o resto, com reticências);
+     com menos, vai para a linha de baixo, onde tem a largura toda */
+  flex: 1 1 5em;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }

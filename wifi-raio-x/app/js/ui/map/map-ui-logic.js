@@ -543,7 +543,7 @@ export function qualityInfo(quality) {
       usable: false,
       label: 'Sem mapa',
       tone: 'warning',
-      text: notes[0] || 'Deste levantamento não foi possível tirar um mapa.',
+      text: notes[0] || 'Deste mapeamento não foi possível tirar um mapa.',
       errorText: 'Posições sem valor: o desenho não representa a casa',
       scaleText: 'Tamanho desconhecido',
       notes: notes.slice(1),

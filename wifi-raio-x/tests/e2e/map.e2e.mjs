@@ -247,7 +247,7 @@ test('fluxo completo: demonstração automática -> prévia -> resultado -> salv
     if (is3d) {
       await page.click('.mrs-tools__relief');
       assert.equal(await page.getAttribute('.mrs-tools__relief', 'aria-pressed'), 'true');
-      await page.locator('.mrs-tools__view .seg__opt', { hasText: 'Planta' }).click();
+      await page.locator('.mrs-tools__view .seg__opt', { hasText: 'De cima' }).click();
       await settle(page);
       await page.locator('.mrs-tools__view .seg__opt', { hasText: '3D' }).click();
     }
@@ -710,9 +710,9 @@ test('visualizador 2D de reserva, tema claro, 360 px e tela deitada', T, async (
     await goto(page, `/mapa/ver/${id}?visual=2d`);
     await page.waitForSelector('.mrs:not([hidden]) .mrs__stage canvas');
     await settle(page);
-    assert.equal(await count(page, '.mrs-tools__view'), 0, 'em 2D não há 3D / Planta');
+    assert.equal(await count(page, '.mrs-tools__view'), 0, 'em 2D não há 3D / De cima');
     assert.equal(await count(page, '.mrs-tools__relief'), 0);
-    assert.match(await text(page, '.mrs-tools__flat'), /planta/);
+    assert.match(await text(page, '.mrs-tools__flat'), /Vista de cima/);
     assert.match(await text(page, '.mrs__note'), /não desenha em 3D/);
     await showChips(page).nth(1).click();
     await page.waitForSelector('.mrs-legend__bar');

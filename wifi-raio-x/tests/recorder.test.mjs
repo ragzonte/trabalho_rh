@@ -409,7 +409,7 @@ test('pontos: varreduras paradas levam o ponto e o nome; a lista que chega logo 
   assert.equal(rec.currentSpot.scans, 2);
   assert.match(rec.stats().hint, /Fique parado: 2 de 3/);
   feed(rec, clock, 4);
-  assert.match(rec.stats().hint, /Ponto marcado/);
+  assert.match(rec.stats().hint, /Lugar marcado/);
   assert.equal(rec.endSpot(), true);
   assert.equal(rec.endSpot(), false);
   assert.equal(rec.currentSpot, null);
@@ -658,8 +658,8 @@ test('níveis: 25 medições para o mínimo, 60 para bom, 120 e 3 nomes para ót
     const s = rec.stats();
     assert.equal(s.useful, i);
     levels[i] = s.level;
-    if (i === 24) assert.match(s.hint, /falta 1 varredura para um mapa mínimo/);
-    if (i === 10) assert.match(s.hint, /faltam 15 varreduras/);
+    if (i === 24) assert.match(s.hint, /falta 1 leitura para um mapa mínimo/);
+    if (i === 10) assert.match(s.hint, /faltam 15 leituras/);
     if (i === 25) assert.match(s.hint, /Marque pelo menos 3 lugares com nome/);
   }
   assert.equal(levels[1], 'insuficiente');
@@ -698,7 +698,7 @@ test('níveis: com o celular limitado valem os pontos — 12 para o mínimo, 20 
     if (i === 5) {
       assert.equal(s.throttled, true);
       assert.equal(s.cadenceS, 30);
-      assert.match(s.hint, /limitando as buscas.*marque um ponto \(faltam 7\)/);
+      assert.match(s.hint, /limitando as buscas.*toque em “Marcar este lugar” \(faltam 7\)/);
     }
     if (i === 13) assert.match(s.hint, /faltam 7\)/, 'agora a meta é o nível bom');
   }
@@ -727,7 +727,7 @@ test('ponto com o celular lento: se a segunda varredura demora, uma já basta �
   clock.advance(1500);
   // 8,5 s sem a segunda: o celular não está varrendo no ritmo normal
   assert.equal(rec.stats().spot.target, 1);
-  assert.match(rec.stats().hint, /Ponto marcado/);
+  assert.match(rec.stats().hint, /Lugar marcado/);
   assert.equal(rec.stats().throttled, false, 'ainda não dá para dizer que é o limite do Android');
   // a seguinte chega logo depois: a meta deste ponto continua 1 (a tela não volta a pedir espera)
   feed(rec, clock, 2, 1000);
@@ -755,7 +755,7 @@ test('ponto com o celular lento: se a segunda varredura demora, uma já basta �
   assert.equal(s.throttled, true);
   assert.equal(s.cadenceS, null);
   assert.equal(s.spot.target, 1);
-  assert.match(s.hint, /Fique parado até a varredura deste ponto chegar/);
+  assert.match(s.hint, /Fique parado até a leitura deste lugar chegar/);
 });
 
 test('limite informado pela tela: setThrottled (ou o contexto de onScan) vale na hora', () => {
@@ -770,9 +770,9 @@ test('limite informado pela tela: setThrottled (ou o contexto de onScan) vale na
   assert.equal(rec.stats().throttled, true);
   rec.beginSpot('Sala');
   assert.equal(rec.currentSpot.target, 1, 'a primeira varredura do ponto já basta');
-  assert.match(rec.stats().hint, /Fique parado até a varredura/);
+  assert.match(rec.stats().hint, /Fique parado até a leitura/);
   feed(rec, clock, 1);
-  assert.match(rec.stats().hint, /Ponto marcado/);
+  assert.match(rec.stats().hint, /Lugar marcado/);
   rec.endSpot();
   assert.match(rec.stats().hint, /limitando as buscas/);
 
@@ -888,7 +888,7 @@ test('dicas: uma frase para cada momento', () => {
   assert.match(rec.stats().hint, /Toque em começar/);
   assert.equal(rec.stats().lastScanAgoS, null);
   rec.start();
-  assert.match(rec.stats().hint, /Aguardando a primeira varredura/);
+  assert.match(rec.stats().hint, /Aguardando a primeira leitura/);
   feed(rec, clock, 0);
   clock.advance(4200);
   assert.equal(rec.stats().lastScanAgoS, 4.2);
@@ -911,7 +911,7 @@ test('dicas: uma frase para cada momento', () => {
   feed(full.rec, full.clock, 300);
   assert.match(full.rec.stats().hint, /bom mapa\. Mais uma volta/);
   full.rec.stop();
-  assert.match(full.rec.stats().hint, /Levantamento encerrado/);
+  assert.match(full.rec.stats().hint, /Mapeamento encerrado/);
 });
 
 // ---------------------------------------------------------------------------

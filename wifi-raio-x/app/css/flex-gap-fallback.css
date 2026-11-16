@@ -169,8 +169,12 @@
   margin-bottom: var(--sp-3);
 }
 
-.sheet__footer > *:not(:last-child) {
-  margin-right: var(--sp-2);
+.sheet__footer {
+  margin-bottom: calc(var(--sp-2) * -1);
+}
+
+.sheet__footer > * {
+  margin-right: var(--sp-2); margin-bottom: var(--sp-2);
 }
 
 .dialog__actions {
@@ -909,8 +913,8 @@
   margin-bottom: 1px;
 }
 
-.net-conn__stat-value > *:not(:last-child) {
-  margin-right: 5px;
+.net-conn__stat-value > * {
+  margin-right: 5px; margin-bottom: 0;
 }
 
 .net-insight > *:not(:last-child) {
@@ -1116,8 +1120,12 @@
   margin-right: var(--sp-3);
 }
 
-.exp-actions > *:not(:last-child) {
-  margin-right: var(--sp-2);
+.exp-actions {
+  margin-bottom: calc(var(--sp-2) * -1);
+}
+
+.exp-actions > * {
+  margin-right: var(--sp-2); margin-bottom: var(--sp-2);
 }
 
 /* ---- tools-b.css ---- */

@@ -151,9 +151,19 @@ export function describeConnection(conn, ap) {
   if (isText(conn.bssid)) net.push({ label: 'BSSID', text: conn.bssid, mono: true, copyable: true, hint: 'O endereço físico do rádio do roteador em que o celular está.', field: 'bssid' });
   if (ap && ap.vendor) net.push({ label: 'Fabricante', text: ap.vendorGuess ? `${ap.vendor} (provável)` : ap.vendor });
 
+  // O rótulo é o da rede na lista (o mesmo de Redes, do painel de detalhes, de Melhor Wi-Fi e do
+  // relatório): "WPA2", "WPA2/WPA3"... O tipo que o Android informa para a conexão
+  // (SECURITY_TYPE_PSK = "WPA/WPA2 Pessoal" para qualquer rede com senha) só entra quando a rede
+  // conectada não está na lista (acabou de conectar, rede oculta): senão a mesma rede apareceria
+  // aqui como "WPA/WPA2", que nas outras telas quer dizer modo misto com o WPA antigo.
+  const typed = isNum(conn.securityType) && conn.securityType >= 0;
   let securityText = null;
-  if (isNum(conn.securityType) && conn.securityType >= 0) securityText = securityTypeLabel(conn.securityType);
-  else if (ap && ap.security && ap.security.known !== false) securityText = ap.security.label;
+  let negotiated = null;
+  if (ap && ap.security && ap.security.known !== false && isText(ap.security.label)) {
+    securityText = ap.security.label;
+    // rede de transição: o tipo negociado diz com qual das duas proteções este celular entrou
+    if (/WPA2\/WPA3/.test(securityText) && (conn.securityType === 2 || conn.securityType === 4)) negotiated = `Este celular entrou com ${conn.securityType === 4 ? 'WPA3' : 'WPA2'}.`;
+  } else if (typed) securityText = securityTypeLabel(conn.securityType);
   if (securityText) {
     const issues = ap && ap.security && Array.isArray(ap.security.issues) ? ap.security.issues : [];
     const issue = issues.find((i) => i && (i.severity === 'high' || i.severity === 'medium'));
@@ -162,7 +172,7 @@ export function describeConnection(conn, ap) {
       label: 'Segurança',
       text: securityText,
       tone: weak || (issue && issue.severity === 'high') ? 'warning' : undefined,
-      hint: issue ? issue.text : conn.securityType === 0 ? 'Sem senha: o que você envia pode ser visto por quem estiver por perto.' : undefined,
+      hint: issue ? issue.text : conn.securityType === 0 ? 'Sem senha: o que você envia pode ser visto por quem estiver por perto.' : negotiated || undefined,
       field: 'security',
     });
   }
@@ -206,8 +216,8 @@ export function describeConnection(conn, ap) {
   const maxTx = positive(conn.maxTxSpeed);
   const speed = { rx, tx, maxRx, maxTx, usable: usableMbps(rx ?? tx) };
   const speedRows = [];
-  if (rx !== null) speedRows.push({ label: 'Velocidade do enlace (receber)', text: maxRx ? `${fmtMbps(rx)} de ${fmtMbps(maxRx)} possíveis` : fmtMbps(rx) });
-  if (tx !== null) speedRows.push({ label: 'Velocidade do enlace (enviar)', text: maxTx ? `${fmtMbps(tx)} de ${fmtMbps(maxTx)} possíveis` : fmtMbps(tx) });
+  if (rx !== null) speedRows.push({ label: 'Velocidade até o roteador (receber)', text: maxRx ? `${fmtMbps(rx)} de ${fmtMbps(maxRx)} possíveis` : fmtMbps(rx) });
+  if (tx !== null) speedRows.push({ label: 'Velocidade até o roteador (enviar)', text: maxTx ? `${fmtMbps(tx)} de ${fmtMbps(maxTx)} possíveis` : fmtMbps(tx) });
 
   // --- endereços
   const addr = [];
@@ -304,7 +314,8 @@ function speedCard(data) {
   return h(
     'section.card.cnx-speed',
     { key: 'speed', dataset: { group: 'velocidade' } },
-    h('h3.card__title', null, 'Velocidade do enlace'),
+    // (o mesmo nome do cartão da tela Redes; "enlace" é jargão)
+    h('h3.card__title', null, 'Velocidade até o roteador'),
     rx !== null ? speedBar('Receber', 'download', rx, maxRx) : null,
     tx !== null ? speedBar('Enviar', 'upload', tx, maxTx) : null,
     h('p.card__text', null, advice),
@@ -313,7 +324,9 @@ function speedCard(data) {
           'p.cnx-speed__usable',
           null,
           icon('speed', { size: 18 }),
-          h('span', null, 'Na prática, este Wi-Fi entrega cerca de ', h('strong', null, fmtMbps(usable, { approx: true })), ' (estimativa: parte da velocidade fica com o próprio protocolo).'),
+          // (o "≈" já diz que é aproximado; e a conta parte da velocidade negociada AGORA, por isso
+          // difere um pouco da estimativa de "Melhor Wi-Fi", que parte do sinal e da ocupação do canal)
+          h('span', null, 'Na prática, pela velocidade negociada agora, este Wi-Fi entrega ', h('strong', null, fmtMbps(usable, { approx: true })), ' (estimativa: parte da velocidade fica com o próprio protocolo).'),
         )
       : null,
   );

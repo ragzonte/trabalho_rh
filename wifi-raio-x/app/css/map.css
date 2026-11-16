@@ -1518,6 +1518,38 @@
   opacity: 0.75;
 }
 
+/* o que o piso riscado e as cores do caminho querem dizer */
+.mrs-legend-notes {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: var(--fs-xs);
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.mrs-legend-note {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 12px;
+}
+
+.mrs-legend-note__swatch {
+  flex: none;
+  width: 14px;
+  height: 10px;
+  margin-right: 6px;
+  border-radius: 2px;
+  border: 1px solid var(--line-strong);
+}
+
+.mrs-legend-note__swatch--line {
+  width: 18px;
+  height: 4px;
+  border: 0;
+  border-radius: var(--r-full);
+}
+
 /* as larguras acompanham as faixas de dBm da barra (−90 a −50) */
 .mrs-legend__words {
   display: grid;
@@ -1620,6 +1652,8 @@
 
 .mrs-card__actions > .btn {
   flex: 1 1 150px;
+  /* nunca mais estreito que o rótulo ("Continuar mapeando" não cabia na meia largura): desce para a linha de baixo */
+  min-width: min-content;
 }
 
 .mrs-save {
@@ -1689,11 +1723,13 @@
 
 .mrs-nomap__actions {
   display: flex;
+  flex-wrap: wrap;
   margin-top: 2px;
 }
 
 .mrs-nomap__actions > .btn {
   flex: 1;
+  min-width: min-content;
 }
 
 .mrs-cov__bar {

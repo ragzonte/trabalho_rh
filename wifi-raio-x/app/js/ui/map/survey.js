@@ -111,7 +111,7 @@ function ring(fraction, center, tone) {
 function levelMeter(info) {
   return h(
     'span.msv-level__bar',
-    { role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': info.steps, 'aria-valuenow': info.index, 'aria-label': `Progresso do levantamento: ${info.label}` },
+    { role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': info.steps, 'aria-valuenow': info.index, 'aria-label': `Progresso do mapeamento: ${info.label}` },
     Array.from({ length: info.steps }, (_, i) => h('i', { class: i < info.index ? `is-on is-${info.tone}` : null })),
   );
 }
@@ -632,7 +632,7 @@ export async function mountSurvey(root, env) {
         setTopActions();
         draw();
         if (viewer) viewer.resize();
-        toast('Cálculo cancelado. O levantamento continua guardado.');
+        toast('Cálculo cancelado. O mapeamento continua guardado.');
         return;
       }
       console.error('[mapa] o cálculo do mapa falhou', err);

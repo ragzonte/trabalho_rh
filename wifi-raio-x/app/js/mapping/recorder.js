@@ -922,40 +922,43 @@ export function createRecorder({ now = Date.now, timeScale = 1 } = {}) {
     return spot.relaxed ? 1 : T.scansPerSpot;
   }
 
+  // As dicas aparecem na tela do mapeamento: usam as palavras de lá ("leitura", "lugar",
+  // "mapeamento") e os nomes dos botões como estão escritos neles (“Marcar este lugar”,
+  // “Concluir”, “Retomar o mapeamento”). "Varredura" e "ponto" são nomes daqui de dentro.
   function hintFor(s) {
     if (s.state === 'idle') return 'Toque em começar e ande devagar pela casa, com o celular na mão.';
-    if (s.state === 'stopped') return s.level === 'insuficiente' ? 'Poucas medições: o mapa vai sair bem aproximado.' : 'Levantamento encerrado.';
-    if (s.state === 'paused') return 'Em pausa. Toque em continuar quando voltar a andar.';
-    if (s.full) return 'Este levantamento chegou ao tamanho máximo. Finalize para ver o mapa.';
-    if (s.scans === 0) return 'Aguardando a primeira varredura do Wi-Fi…';
+    if (s.state === 'stopped') return s.level === 'insuficiente' ? 'Poucas medições: o mapa vai sair bem aproximado.' : 'Mapeamento encerrado.';
+    if (s.state === 'paused') return 'Em pausa. Toque em “Retomar o mapeamento” quando voltar a andar.';
+    if (s.full) return 'Este mapeamento chegou ao tamanho máximo. Toque em “Concluir” para ver o mapa.';
+    if (s.scans === 0) return 'Aguardando a primeira leitura do Wi-Fi…';
     if (s.scans >= T.fewDevicesAfter && s.devicesOften < T.minDevices) {
       return 'Só um roteador ao alcance: para montar o mapa o app precisa ouvir pelo menos três (os dos vizinhos contam). Aqui não vai dar.';
     }
     if (s.spot) {
-      if (s.spot.scans >= s.spot.target) return 'Ponto marcado. Pode seguir para o próximo lugar.';
-      if (s.spot.target === 1) return 'Fique parado até a varredura deste ponto chegar (pode levar meio minuto).';
-      return `Fique parado: ${s.spot.scans} de ${s.spot.target} varreduras neste ponto.`;
+      if (s.spot.scans >= s.spot.target) return 'Lugar marcado. Pode seguir para o próximo.';
+      if (s.spot.target === 1) return 'Fique parado até a leitura deste lugar chegar (pode levar meio minuto).';
+      return `Fique parado: ${s.spot.scans} de ${s.spot.target} leituras neste lugar.`;
     }
     if (s.useful >= T.stillAfter && s.spreadDb !== null && s.spreadDb < T.stillSpreadDb) {
       return 'O sinal quase não mudou: ande pelos cômodos para o mapa ganhar forma.';
     }
     if (s.throttled && s.level !== 'bom' && s.level !== 'otimo') {
       const missing = Math.max(1, (s.level === 'insuficiente' ? T.minSpots : T.goodSpots) - s.spots);
-      return `O celular está limitando as buscas: pare em cada lugar e marque um ponto (faltam ${missing}).`;
+      return `O celular está limitando as buscas: pare em cada lugar e toque em “Marcar este lugar” (${missing === 1 ? 'falta 1' : `faltam ${missing}`}).`;
     }
     if (s.scans >= T.fewDevicesAfter && s.devicesOften < T.wantDevices) {
       return 'Só dois roteadores ao alcance: o mapa sai pouco confiável. Continue andando; se aparecerem redes de vizinhos, melhora.';
     }
     if (s.level === 'insuficiente') {
       const missing = Math.max(1, T.minUseful - s.useful);
-      return `Continue andando: ${missing === 1 ? 'falta 1 varredura' : `faltam ${missing} varreduras`} para um mapa mínimo.`;
+      return `Continue andando: ${missing === 1 ? 'falta 1 leitura' : `faltam ${missing} leituras`} para um mapa mínimo.`;
     }
-    if (s.labels.length < T.labelsWanted) return `Marque pelo menos ${T.labelsWanted} lugares com nome: pare, toque em marcar ponto e diga onde está.`;
+    if (s.labels.length < T.labelsWanted) return `Marque pelo menos ${T.labelsWanted} lugares com nome: pare, toque em “Marcar este lugar” e diga onde está.`;
     if (s.level === 'minimo') return 'Continue andando: faltam cômodos e cantos para um mapa bom.';
     if (s.level === 'bom') {
       return s.floors.length < 2 ? 'Já dá um bom mapa. Passe pelos cantos que faltam; se houver outro andar, suba ou desça e marque o andar.' : 'Já dá um bom mapa. Mais uma volta pelos cantos deixa melhor.';
     }
-    return 'Levantamento ótimo. Pode finalizar quando quiser.';
+    return 'Mapeamento ótimo. Pode concluir quando quiser.';
   }
 
   /** @returns {RecorderStats} */
