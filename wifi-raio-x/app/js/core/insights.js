@@ -68,8 +68,44 @@ const MODEST_WIDTH_MHZ = 40;
 const WIFI4_MIN_DBM = -60;
 /** WifiInfo.getRssi() quando não há medida. */
 const INVALID_RSSI = -127;
+// --- limite de buscas: o nome da chave e quem pode desligá-la, num lugar só -----------------------
+// Todas as telas que falam do limite (diagnóstico, dica de Redes, painel "como liberar", mapa,
+// Sobre) usam estas três coisas: assim não aparecem dois nomes para a mesma chave nem a promessa
+// "dá para liberar" num Android que não tem a opção.
+/**
+ * O nome da chave nas Opções do desenvolvedor, como o Android em pt-BR a escreve (texto
+ * wifi_scan_throttling do AOSP, igual do Android 10 ao 15; algumas marcas mudam um pouco).
+ */
+export const THROTTLE_OPTION_NAME = 'Limitar busca por Wi-Fi';
 /** Build.VERSION.SDK_INT do Android 10, o primeiro com a opção "Limitar busca por Wi-Fi". */
-const THROTTLE_SWITCH_SDK = 29;
+export const THROTTLE_SWITCH_SDK = 29;
+/**
+ * Esta versão do Android deixa desligar o limite de buscas? Só não deixa quando se sabe que é
+ * anterior ao Android 10; versão desconhecida e simulador (sdk 0) contam como "deixa".
+ * @param {number|null|undefined} sdk  DeviceInfo.sdk
+ */
+export function canLiftScanThrottle(sdk) {
+  return !(isNum(sdk) && sdk > 0 && sdk < THROTTLE_SWITCH_SDK);
+}
+/** Como fazer as Opções do desenvolvedor aparecerem (o passo que vale para qualquer marca). */
+const DEVELOPER_UNLOCK_STEP = 'em Configurações > "Sobre o dispositivo" (ou "Sobre o telefone"), toque 7 vezes em "Número da versão"';
+/**
+ * Os textos sobre o limite de buscas que se repetem pelas telas, já de acordo com a versão do
+ * Android: o nome da chave, se dá para desligar, a frase curta que fecha qualquer aviso e o
+ * rótulo do botão que abre o passo a passo (null quando não há o que liberar).
+ * @param {number|null|undefined} sdk  DeviceInfo.sdk
+ * @returns {{canLift:boolean, optionName:string, lift:string, action:string|null, unlockStep:string}}
+ */
+export function scanThrottleCopy(sdk) {
+  const canLift = canLiftScanThrottle(sdk);
+  return {
+    canLift,
+    optionName: THROTTLE_OPTION_NAME,
+    lift: canLift ? 'Dá para liberar buscas mais rápidas nas opções do desenvolvedor.' : 'Nesta versão do Android não dá para desligar esse limite.',
+    action: canLift ? 'Como liberar' : null,
+    unlockStep: DEVELOPER_UNLOCK_STEP,
+  };
+}
 // WifiInfo.SECURITY_TYPE_OPEN e SECURITY_TYPE_WEP (Android 12+)
 const SECURITY_TYPE_OPEN = 0;
 const SECURITY_TYPE_WEP = 1;
@@ -652,12 +688,11 @@ function scanThrottled(f) {
   if (!f.status || f.status.throttled !== true) return null;
   const why = 'O Android só deixa cada app procurar redes 4 vezes a cada 2 minutos; por isso a lista e o mapa demoram a atualizar.';
   // A chave que desliga o limite só existe do Android 10 (API 29) em diante
-  const sdk = f.device && isNum(f.device.sdk) ? f.device.sdk : 0;
   const how =
-    sdk > 0 && sdk < THROTTLE_SWITCH_SDK
+    !canLiftScanThrottle(f.device ? f.device.sdk : 0)
       ? 'Nesta versão do Android não há como desligar esse limite (a opção só existe a partir do Android 10).'
-      : 'Para liberar: Configurações > Sistema > Opções do desenvolvedor > Redes > desligue "Limitar busca por Wi-Fi" (o caminho muda um pouco conforme a marca do celular). ' +
-        'Se as Opções do desenvolvedor não aparecem, vá em Configurações > "Sobre o dispositivo" (ou "Sobre o telefone") e toque 7 vezes em "Número da versão".';
+      : `Para liberar: Configurações > Sistema > Opções do desenvolvedor > Redes > desligue "${THROTTLE_OPTION_NAME}" (o caminho muda um pouco conforme a marca do celular). ` +
+        `Se as Opções do desenvolvedor não aparecem: ${DEVELOPER_UNLOCK_STEP}.`;
   return { id: 'scan-throttled', severity: 'info', title: 'O Android está limitando as buscas', text: `${why} ${how}` };
 }
 

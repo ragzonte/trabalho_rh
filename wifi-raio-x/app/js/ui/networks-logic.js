@@ -10,6 +10,8 @@
 //   sortRows(linhas, ordem)            -> cópia ordenada
 //   summarize(estado)                  -> { networks, devices, signals, bands: {'2.4', '5', '6'} }
 //   connectionView(estado, agora)      -> o que o cartão "sua conexão" mostra
+//   liveConnection(estado, {now, history}) -> a conexão com a leitura ao vivo do sinal por cima (diagnóstico, exportar)
+//   liveSignalKey(estado, {now, history})  -> o nível do sinal ao vivo ('fair', 'weak'...): muda só quando troca de faixa
 //   channelsText(canais)               -> "canal 6" · "canais 6 e 44" · "canais 1, 6, 11 +2"
 //   bandsText(faixas)                  -> "2,4 e 5 GHz"
 //   countText(linha)                   -> "2 sinais" · "3 sinais em 2 roteadores"
@@ -22,7 +24,7 @@
 // ou um sinal (BSSID), sempre com os Ap do store por baixo.
 
 import { freqToChannel, bandOf } from '../core/channels.js';
-import { indoorDistance } from '../core/signal.js';
+import { indoorDistance, signalLevel } from '../core/signal.js';
 import { standardInfo } from '../core/phy.js';
 import { fmtDbm, fmtMbps, fmtMeters, fmtPct, fmtFreq, fmtWidth, fmtBand, fmtAgo, fmtClock, NO_VALUE, THIN } from './dom.js';
 
@@ -420,6 +422,65 @@ export function summarize(state) {
 
 /** Uma leitura do sinal (evento 'rssi') mais velha que isto não é mais "ao vivo". */
 export const LIVE_RSSI_MS = 5000;
+/** Quantas leituras recentes pedir ao store (store.rssiHistory(n)) para a mediana: 5 s a até 4 por segundo, com folga. */
+export const LIVE_RSSI_SAMPLES = 32;
+
+/** A leitura é do rádio conectado (ou não diz de qual é) e ainda é "ao vivo"? Uma regra só, para o cartão e para o diagnóstico. */
+function isLiveSample(sample, bssid, now) {
+  if (!isObj(sample) || !isNum(sample.rssi) || !isNum(sample.ts) || Math.abs(now - sample.ts) > LIVE_RSSI_MS) return false;
+  return !sample.bssid || !bssid || String(sample.bssid).toLowerCase() === bssid;
+}
+
+/**
+ * A conexão como ela está AGORA: a de state.connection com a leitura ao vivo do sinal por cima.
+ *
+ * O Android só reenvia a conexão quando ela muda de rede ou de rádio: o sinal e as velocidades que
+ * vêm nela ficam parados desde então (a pessoa anda pela casa e `connection.rssi` continua sendo o
+ * do lugar onde o app abriu). Quem acompanha a pessoa é a leitura de cada segundo (state.rssi).
+ * Tudo o que analisa ou exporta a conexão (diagnóstico, relatório) parte daqui, não de
+ * state.connection direto.
+ *
+ * Com `history` (store.rssiHistory), o sinal é a mediana das leituras ao vivo: uma leitura torta
+ * sozinha não muda a conclusão de quem compara com um limite ("sinal fraco"). Sem `history` vale a
+ * última leitura. Sem leitura ao vivo do rádio conectado, a conexão volta como está.
+ * @param {{connection:object|null, rssi:object|null}} state
+ * @param {{now?:number, history?:object[]|null}} [options]  history: RssiSample[], a mais nova por último
+ * @returns {object|null} uma cópia com rssi/linkSpeed/txSpeed/rxSpeed/frequency em dia (ou a própria conexão)
+ */
+export function liveConnection(state, { now = Date.now(), history = null } = {}) {
+  const s = isObj(state) ? state : {};
+  const conn = isObj(s.connection) ? s.connection : null;
+  if (!conn || conn.connected !== true) return conn;
+  const bssid = typeof conn.bssid === 'string' ? conn.bssid.toLowerCase() : '';
+  const sample = isLiveSample(s.rssi, bssid, now) ? s.rssi : null;
+  if (!sample) return conn;
+
+  let rssi = sample.rssi;
+  if (Array.isArray(history) && history.length) {
+    // do fim para o começo, até a primeira leitura velha ou de outro rádio (o celular trocou de rádio ali)
+    const recent = [];
+    for (let i = history.length - 1; i >= 0 && isLiveSample(history[i], bssid, now); i--) recent.push(history[i].rssi);
+    if (recent.length) {
+      recent.sort((a, b) => a - b);
+      const mid = recent.length >> 1;
+      rssi = recent.length % 2 ? recent[mid] : Math.round((recent[mid - 1] + recent[mid]) / 2);
+    }
+  }
+  const out = { ...conn, rssi };
+  // velocidade desconhecida (0 ou -1) não apaga a que a conexão trouxe
+  for (const key of ['linkSpeed', 'txSpeed', 'rxSpeed', 'frequency']) if (isNum(sample[key]) && sample[key] > 0) out[key] = sample[key];
+  return out;
+}
+
+/**
+ * Em que nível está o sinal ao vivo da conexão ('excellent' ... 'very-weak'; '' sem conexão ou sem
+ * leitura). Serve de chave para refazer uma análise: muda só quando o sinal troca de faixa, não a
+ * cada leitura.
+ */
+export function liveSignalKey(state, options) {
+  const conn = liveConnection(state, options);
+  return conn && conn.connected === true && isNum(conn.rssi) ? signalLevel(conn.rssi).key : '';
+}
 
 /**
  * O que o cartão da conexão mostra, juntando a conexão (WifiInfo), a leitura ao vivo do sinal
@@ -441,8 +502,7 @@ export function connectionView(state, now = Date.now()) {
   const ap = aps.find((a) => a.connected) || (bssid ? aps.find((a) => a.bssid === bssid) : null) || null;
 
   const sample = isObj(s.rssi) ? s.rssi : null;
-  const sameBssid = !sample || !sample.bssid || !bssid || String(sample.bssid).toLowerCase() === bssid;
-  const live = !!sample && isNum(sample.rssi) && sameBssid && isNum(sample.ts) && Math.abs(now - sample.ts) <= LIVE_RSSI_MS;
+  const live = isLiveSample(sample, bssid, now);
 
   const pick = (...values) => {
     for (const v of values) if (isNum(v) && v > 0) return v;

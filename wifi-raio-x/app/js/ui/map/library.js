@@ -5,7 +5,8 @@
 //       (só no modo demonstração), o rascunho em andamento, os mapas salvos e "Importar".
 //   openStartSheet(env, { onStart })
 //       o passo "antes de começar": quais redes são do usuário, as três dicas e, com o Android
-//       limitando as buscas, a explicação do mapeamento "ponto a ponto".
+//       limitando as buscas, a explicação do mapeamento "ponto a ponto" (dicas próprias, com
+//       quantos lugares marcar).
 //   defaultOwnSsids(store) -> string[]      as redes já marcadas (conectada + favoritas)
 //
 // Peças usadas também pelas outras partes do mapa:
@@ -17,8 +18,9 @@
 
 import { h, patch, sheet, toast, confirmDialog, fmtDateTime, fmtAgo, plural } from '../dom.js';
 import { icon } from '../icons.js';
-import { button, iconButton, badge, banner, sectionHeader, ssidLabel, signalBars, openThrottleHelp, spinner } from '../components.js';
-import { candidateNetworks, metaLine, readRecord, cleanMapName, qualityInfo, isDemoOrigin, matchesMode, foreignDraftText } from './map-ui-logic.js';
+import { button, iconButton, badge, banner, sectionHeader, ssidLabel, signalBars, openThrottleHelp, throttleCopy, spinner } from '../components.js';
+import { SURVEY_THRESHOLDS } from '../../mapping/recorder.js';
+import { candidateNetworks, metaLine, readRecord, cleanMapName, qualityInfo, isDemoOrigin, matchesMode, foreignDraftText, surveyTips, surveyTimeText, pointByPointNote } from './map-ui-logic.js';
 
 // ---------------------------------------------------------------------------
 // Peças compartilhadas
@@ -123,11 +125,8 @@ export function defaultOwnSsids(store) {
 // Antes de começar
 // ---------------------------------------------------------------------------
 
-const TIPS = [
-  { icon: 'walk', title: 'Ande devagar e por todos os cômodos', text: 'O app lê o Wi-Fi a cada poucos segundos. Quanto mais cantos da casa você visitar, melhor o mapa.' },
-  { icon: 'pin', title: 'Pare e marque cada cômodo com o nome', text: 'Toque em “Marcar este lugar”, fique parado alguns segundos e siga andando.' },
-  { icon: 'floor-up', title: 'Ao trocar de andar, avise', text: 'Mude o controle “Andar” assim que chegar ao outro piso.' },
-];
+// As dicas, o tempo estimado e o aviso "ponto a ponto" saem de map-ui-logic.js (surveyTips,
+// surveyTimeText, pointByPointNote): andando sem parar e ponto a ponto pedem instruções diferentes.
 
 /**
  * Painel "Antes de começar".
@@ -140,6 +139,8 @@ export function openStartSheet(env, { onStart }) {
   const nets = candidateNetworks(state);
   const chosen = new Set(nets.filter((n) => n.selected).map((n) => n.ssid));
   const throttled = !!state.loop.throttled;
+  const lift = throttleCopy(ctx.store);
+  const note = pointByPointNote({ canLift: lift.canLift });
 
   const netRows = nets.length
     ? h(
@@ -174,7 +175,7 @@ export function openStartSheet(env, { onStart }) {
 
   const panel = sheet({
     title: 'Antes de começar',
-    subtitle: 'Leva de 3 a 10 minutos, conforme o tamanho da casa.',
+    subtitle: surveyTimeText(throttled, SURVEY_THRESHOLDS),
     tall: true,
     content: h(
       'div.map-start',
@@ -183,9 +184,9 @@ export function openStartSheet(env, { onStart }) {
         ? banner({
             tone: 'warning',
             icon: 'clock',
-            title: 'O mapa será feito ponto a ponto',
-            text: 'O Android está limitando as buscas: chega uma leitura a cada 30 segundos, mais ou menos. Em vez de andar sem parar, vá de cômodo em cômodo, marque o lugar e espere parado a leitura chegar. Dá para liberar buscas rápidas nas opções do desenvolvedor.',
-            actions: [{ label: 'Como liberar', onClick: () => openThrottleHelp(ctx) }],
+            title: note.title,
+            text: note.text,
+            actions: lift.action ? [{ label: lift.action, onClick: () => openThrottleHelp(ctx) }] : undefined,
           })
         : null,
       h(
@@ -195,7 +196,7 @@ export function openStartSheet(env, { onStart }) {
         h(
           'ol.map-tips',
           null,
-          TIPS.map((tip) => h('li.map-tip', null, h('span.map-tip__icon', null, icon(tip.icon)), h('div.map-tip__body', null, h('strong', null, tip.title), h('span', null, tip.text)))),
+          surveyTips({ throttled }, SURVEY_THRESHOLDS).map((tip) => h('li.map-tip', null, h('span.map-tip__icon', null, icon(tip.icon)), h('div.map-tip__body', null, h('strong', null, tip.title), h('span', null, tip.text)))),
         ),
       ),
       h(

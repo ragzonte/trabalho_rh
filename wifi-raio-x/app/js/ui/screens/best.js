@@ -31,6 +31,7 @@ import { badge, bandBadge, securityBadge, standardBadge, signalBars, ssidLabel, 
 import { signalLevel } from '../../core/signal.js';
 import { rankNetworks, advise, speedScore, isInsecure, formatGain, INSECURE_FACTOR, WEAK_SECURITY_FACTOR, WPA3_BONUS, SPEED_GOOD_MBPS, SPEED_GOOD_SCORE, SPEED_TOP_MBPS } from '../../core/best-network.js';
 import { buildInsights } from '../../core/insights.js';
+import { liveConnection, liveSignalKey, LIVE_RSSI_SAMPLES } from '../networks-logic.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 const isObj = (x) => x !== null && typeof x === 'object';
@@ -321,10 +322,13 @@ export function gainText(gain) {
 
 /**
  * Toda a análise da tela a partir do estado do store. Nunca lança: o que falhar vira lista vazia.
+ * O diagnóstico olha a conexão com o sinal de agora (state.rssi, a leitura de cada segundo): o
+ * sinal que vem em state.connection é o do lugar onde o app abriu.
  * @param {object} state  store.get()
+ * @param {{now?:number, history?:object[]}} [live]  relógio e store.rssiHistory(), para o sinal ao vivo
  * @returns {{ranking: object[], advice: object, insights: object[], connected: boolean, band: string|null}}
  */
-export function analyse(state) {
+export function analyse(state, live = {}) {
   const conn = isObj(state.connection) && state.connection.connected === true ? state.connection : null;
   const bssid = conn && typeof conn.bssid === 'string' ? conn.bssid : '';
   const favorites = state.favorites instanceof Set ? state.favorites : new Set();
@@ -362,7 +366,7 @@ export function analyse(state) {
     // o laço de buscas percebe o limite do Android mesmo quando o celular não o informa
     const throttled = (isObj(state.status) && state.status.throttled === true) || (isObj(state.loop) && state.loop.throttled === true);
     const status = isObj(state.status) ? { ...state.status, throttled: throttled ? true : state.status.throttled } : throttled ? { throttled: true } : undefined;
-    insights = buildInsights({ aps, connection: state.connection || undefined, device: state.info || undefined, status, clone: state.clone || undefined });
+    insights = buildInsights({ aps, connection: liveConnection(state, live || {}) || undefined, device: state.info || undefined, status, clone: state.clone || undefined });
   } catch {
     insights = [];
   }
@@ -1275,7 +1279,7 @@ export async function mount(root, ctx) {
 
   function refresh() {
     if (dead) return;
-    data = analyse(store.get());
+    data = analyse(store.get(), { history: store.rssiHistory(LIVE_RSSI_SAMPLES) });
     drawLoading();
     drawHero();
     drawTip();
@@ -1286,7 +1290,8 @@ export async function mount(root, ctx) {
   }
 
   // Uma análise por varredura: `aps` é trocado a cada varredura (e quando a conexão muda de
-  // BSSID ou uma rede é marcada); as leituras de sinal a cada segundo não passam por aqui.
+  // BSSID ou uma rede é marcada). As leituras de sinal a cada segundo só refazem a análise quando
+  // o sinal ao vivo troca de nível (a pessoa andou até um ponto fraco, ou saiu dele).
   // Tudo num seletor só: quando várias partes mudam na mesma ação, a análise roda uma vez.
   const inputs = (state) => [
     state.aps,
@@ -1295,6 +1300,7 @@ export async function mount(root, ctx) {
     state.favorites,
     state.info,
     state.loop.throttled === true || (!!state.status && state.status.throttled === true),
+    liveSignalKey(state, { history: store.rssiHistory(LIVE_RSSI_SAMPLES) }),
   ];
   const sameInputs = (a, b) => a.length === b.length && a.every((x, i) => Object.is(x, b[i]));
   store.subscribe(inputs, refresh, { equal: sameInputs });

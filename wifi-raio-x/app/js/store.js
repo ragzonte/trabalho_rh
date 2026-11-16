@@ -18,6 +18,9 @@
 //   info         DeviceInfo | null             (bridge.js) modelo, versão do Android, faixas que o celular suporta
 //   status       Status | null                 (bridge.js) Wi-Fi/localização/permissão/limite; canScan
 //   connection   Connection | null             (bridge.js) a rede em que o celular está conectado
+//                                              ATENÇÃO: rssi e velocidades daqui são do momento em que a conexão
+//                                              foi informada (o Android só a reenvia quando muda de rede ou de rádio).
+//                                              Para o sinal de agora use liveConnection() de ui/networks-logic.js
 //   rssi         RssiSample | null             última leitura do sinal da rede conectada (~1 por segundo)
 //   theme        'dark' | 'light'              tema em uso (já resolvido quando o ajuste é "sistema")
 //   settings     Settings                      (prefs.js) theme, scanIntervalS, demo, demoWorld, units, tipsDismissed
@@ -72,6 +75,7 @@
 //   store.apById(bssid)     -> Ap | null (da lista atual)
 //   store.history(bssid)    -> histórico de sinal daquele BSSID (ApTracker.history)
 //   store.rssiHistory()     -> RssiSample[] dos últimos minutos da rede conectada (o mais novo por último)
+//                              store.rssiHistory(n) devolve só as n leituras mais novas
 //   store.connectedAp()     -> Ap | null
 //
 // ---------------------------------------------------------------------------------------------
@@ -433,7 +437,7 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
     apById: (bssid) => byId.get(macOf(bssid)) || null,
     connectedAp: () => state.aps.find((ap) => ap.connected) || null,
     history: (bssid) => (tracker ? tracker.history(macOf(bssid)) : []),
-    rssiHistory: () => rssiLog.slice(),
+    rssiHistory: (last) => (typeof last === 'number' && last > 0 ? rssiLog.slice(-Math.ceil(last)) : rssiLog.slice()),
     isFavorite: (ssid) => state.favorites.has(ssid),
     isOwn: (bssid) => state.own.has(macOf(bssid)),
 

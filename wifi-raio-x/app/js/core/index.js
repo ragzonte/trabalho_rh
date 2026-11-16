@@ -149,4 +149,4 @@ export {
 } from './best-network.js';
 
 // Diagnóstico automático em português claro
-export { buildInsights } from './insights.js';
+export { buildInsights, THROTTLE_OPTION_NAME, THROTTLE_SWITCH_SDK, canLiftScanThrottle, scanThrottleCopy } from './insights.js';

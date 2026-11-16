@@ -6,6 +6,8 @@
 //   floorName(n) · floorShort(n) · clampFloor(n)
 // Levantamento
 //   levelInfo(nível) · finishBlocker(stats, limites) · fmtTimer(segundos) · pulseInfo({...}) · previewDue({...})
+//   surveyTimeText(limitado, limites) · surveyTips({throttled, during}, limites) · pointByPointNote({...})
+//   radarInfo({...}) · spotCounter({...}, limites)      (o que a tela diz andando x "ponto a ponto")
 //   candidateNetworks({networks, favorites, connection}) · ownBssidsFor(survey, ssids, extras)
 //   rttTargets(aps, limite)
 // Resultado
@@ -241,7 +243,10 @@ export function finishBlocker(stats, limits = {}) {
   const minUseful = isNum(limits.minUseful) ? limits.minUseful : 25;
   const minSpots = isNum(limits.minSpots) ? limits.minSpots : 12;
   const scans = isNum(st.scans) ? st.scans : 0;
-  if (scans === 0) return 'Para concluir, o mapa precisa de leituras: ande pela casa com o app aberto.';
+  if (scans === 0) {
+    // ponto a ponto ninguém "anda sem parar": o que conta são os lugares marcados
+    return st.throttled ? `Para concluir, marque pelo menos ${minSpots} lugares (${SPOTS_PER_ROOM}).` : 'Para concluir, o mapa precisa de leituras: ande pela casa com o app aberto.';
+  }
   // um roteador só ao alcance: não é questão de quantidade de leituras, deste lugar não sai mapa
   const fewAfter = isNum(limits.fewDevicesAfter) ? limits.fewDevicesAfter : 8;
   const minDevices = isNum(limits.minDevices) ? limits.minDevices : 2;
@@ -255,9 +260,136 @@ export function finishBlocker(stats, limits = {}) {
   // leituras de sobra e mesmo assim insuficiente: o sinal não variou (a pessoa não saiu do lugar)
   if (needUseful === 0 || needSpots === 0) return 'Para concluir, ande por mais cômodos: até aqui o sinal quase não mudou.';
   const lugares = needSpots === 1 ? 'falta 1 lugar marcado' : `faltam ${needSpots} lugares marcados`;
-  if (st.throttled) return `Para concluir, ${lugares} (uma leitura em cada).`;
+  // (uma casa de 4 a 6 cômodos não chega ao mínimo com um lugar por cômodo: a frase diz que vale repetir)
+  if (st.throttled) return `Para concluir, ${lugares} (uma leitura em cada). Vale mais de um lugar no mesmo cômodo, em cantos diferentes.`;
   const leituras = needUseful === 1 ? 'falta 1 leitura' : `faltam ${needUseful} leituras`;
   return `Para concluir, ${leituras} andando pela casa (ou ${needSpots === 1 ? '1 lugar marcado' : `${needSpots} lugares marcados`}).`;
+}
+
+// --- o que a tela diz conforme o ritmo das leituras ---------------------------------------------
+// Com o Android limitando as buscas (o padrão em celular de verdade) chega uma leitura a cada ~30 s
+// e o mapa é feito "ponto a ponto": quem conta são os lugares marcados, não a caminhada. Os textos
+// de um modo não servem para o outro ("ande sem parar" x "espere parado"), e o limite pode ligar
+// ou desligar com a tela aberta: por isso saem todos daqui, calculados na hora de desenhar.
+
+/** Intervalo típico entre as leituras com o Android limitando as buscas (s). */
+export const THROTTLED_GAP_S = 30;
+
+/** Como chegar ao mínimo de lugares numa casa de poucos cômodos. */
+const SPOTS_PER_ROOM = '2 ou 3 por cômodo, em cantos diferentes';
+
+const spotLimits = (limits = {}) => {
+  const minSpots = isNum(limits.minSpots) ? limits.minSpots : 12;
+  const goodSpots = isNum(limits.goodSpots) && limits.goodSpots > minSpots ? limits.goodSpots : Math.round(minSpots * 1.7);
+  return { minSpots, goodSpots, minMinutes: Math.ceil((minSpots * THROTTLED_GAP_S) / 60), goodMinutes: Math.ceil((goodSpots * THROTTLED_GAP_S) / 60) };
+};
+
+/**
+ * Subtítulo de "Antes de começar": quanto tempo leva. Ponto a ponto a conta é a do gravador
+ * (mínimo de lugares × uma leitura a cada ~30 s), não a da caminhada.
+ * @param {boolean} throttled
+ * @param {{minSpots?:number, goodSpots?:number}} [limits]  SURVEY_THRESHOLDS do gravador
+ */
+export function surveyTimeText(throttled, limits = {}) {
+  if (!throttled) return 'Leva de 3 a 10 minutos, conforme o tamanho da casa.';
+  const l = spotLimits(limits);
+  return `Leva de ${l.minMinutes} a ${l.goodMinutes} minutos: uma leitura a cada ${THROTTLED_GAP_S} segundos, em pelo menos ${l.minSpots} lugares.`;
+}
+
+/**
+ * As dicas de como mapear, em "Antes de começar" e em "Como fazer um bom mapa".
+ * @param {{throttled?:boolean, during?:boolean}} [o]  during: já na tela do levantamento (cita os botões de lá)
+ * @param {{minSpots?:number, goodSpots?:number}} [limits]  SURVEY_THRESHOLDS do gravador
+ * @returns {{icon:string, title:string, text:string}[]}
+ */
+export function surveyTips({ throttled = false, during = false } = {}, limits = {}) {
+  const l = spotLimits(limits);
+  const floor = { icon: 'floor-up', title: 'Ao trocar de andar, avise', text: 'Mude o controle “Andar” assim que chegar ao outro piso.' };
+  const undo = { icon: 'undo', title: 'Errou? Desfaça', text: '“Desfazer” tira a última leitura; a pausa serve para atender a porta sem bagunçar o mapa.' };
+  let tips;
+  if (throttled) {
+    tips = [
+      {
+        icon: 'pin',
+        title: `Marque pelo menos ${l.minSpots} lugares`,
+        text: during
+          ? `Marque ${SPOTS_PER_ROOM}: são os lugares marcados que desenham a área do mapa.`
+          : `Marque ${SPOTS_PER_ROOM}, e dê o nome do cômodo. Leva uns ${l.minMinutes} minutos; quanto mais lugares, melhor o mapa.`,
+      },
+      {
+        icon: 'clock',
+        title: 'Em cada lugar, espere a leitura chegar',
+        text: during
+          ? 'Toque em “Marcar este lugar”, fique parado até o app avisar (até meio minuto) e toque em “Segui andando”.'
+          : 'Toque em “Marcar este lugar” e fique parado até o app avisar (até meio minuto). Só então vá ao próximo lugar.',
+      },
+    ];
+  } else {
+    tips = [
+      {
+        icon: 'walk',
+        title: 'Ande devagar e por todos os cômodos',
+        text: during ? 'Passe também pelos cantos: é o caminho andado que desenha a área do mapa.' : 'O app lê o Wi-Fi a cada poucos segundos. Quanto mais cantos da casa você visitar, melhor o mapa.',
+      },
+      {
+        icon: 'pin',
+        title: 'Pare e marque cada cômodo com o nome',
+        text: during ? 'Toque em “Marcar este lugar”, espere parado as leituras chegarem e toque em “Segui andando”.' : 'Toque em “Marcar este lugar”, fique parado alguns segundos e siga andando.',
+      },
+    ];
+  }
+  tips.push(floor);
+  if (during) tips.push(undo);
+  return tips;
+}
+
+/**
+ * O aviso "ponto a ponto" (Android limitando as buscas), antes de começar e durante o levantamento.
+ * @param {{during?:boolean, canLift?:boolean}} [o]  canLift: esta versão do Android deixa desligar o limite
+ * @returns {{title:string, text:string}}
+ */
+export function pointByPointNote({ during = false, canLift = true } = {}) {
+  const why = `O Android está limitando as buscas: chega uma leitura a cada ${THROTTLED_GAP_S} segundos, mais ou menos.`;
+  const how = during
+    ? `Marque um lugar de cada vez (${SPOTS_PER_ROOM}) e fique parado até a leitura chegar.`
+    : `Em vez de andar sem parar, você marca um lugar de cada vez (${SPOTS_PER_ROOM}) e espera parado a leitura chegar.`;
+  const lift = canLift ? (during ? '' : ' Dá para liberar buscas rápidas nas opções do desenvolvedor.') : ' Nesta versão do Android não dá para desligar esse limite.';
+  return { title: during ? 'Mapeamento ponto a ponto' : 'O mapa será feito ponto a ponto', text: `${why} ${how}${lift}` };
+}
+
+/**
+ * O que o "radar" diz enquanto a prévia do mapa ainda não apareceu.
+ * @param {{scans?:number, minScans?:number, throttled?:boolean, spot?:boolean, resumed?:boolean}} [o]
+ *        spot: há um lugar marcado em aberto (a pessoa está parada: não é hora de mandar andar)
+ *        resumed: as leituras vieram de um rascunho retomado
+ * @returns {{text:string, sub:string}}
+ */
+export function radarInfo({ scans = 0, minScans = 5, throttled = false, spot = false, resumed = false } = {}) {
+  const next = spot ? '' : throttled ? 'Vá ao próximo lugar e marque.' : 'Continue andando.';
+  if (scans >= minScans) {
+    if (resumed) return { text: 'Refazendo a prévia…', sub: `${scans} leituras guardadas do rascunho.` };
+    return { text: 'Montando a primeira prévia…', sub: next || 'Só um instante.' };
+  }
+  if (scans <= 0) {
+    return {
+      text: 'A prévia do mapa aparece aqui',
+      sub: throttled ? 'Depois das primeiras leituras, o desenho vai se formando a cada lugar marcado.' : 'Depois das primeiras leituras, o desenho vai se formando enquanto você anda.',
+    };
+  }
+  return { text: scans === 1 ? '1 leitura recebida' : `${scans} leituras recebidas`, sub: `A prévia do mapa aparece com ${minScans} leituras.${next ? ` ${next}` : ''}` };
+}
+
+/**
+ * O contador de lugares marcados. Ponto a ponto, enquanto não dá para concluir, mostra o
+ * progresso ("5 de 12"): é o número que libera o botão "Concluir".
+ * @param {{spots?:number, throttled?:boolean, canFinish?:boolean}} o
+ * @param {{minSpots?:number}} [limits]
+ * @returns {{value:string, of:string|null, label:string}}
+ */
+export function spotCounter({ spots = 0, throttled = false, canFinish = false } = {}, limits = {}) {
+  const n = isNum(spots) ? spots : 0;
+  const progress = throttled && !canFinish;
+  return { value: String(n), of: progress ? `de ${spotLimits(limits).minSpots}` : null, label: n === 1 && !progress ? 'lugar marcado' : 'lugares marcados' };
 }
 
 /**

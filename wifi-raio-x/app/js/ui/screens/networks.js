@@ -29,7 +29,7 @@ import { signalLevel } from '../../core/signal.js';
 import { buildInsights } from '../../core/insights.js';
 import { sparkline, sparklineGeometry } from '../charts/sparkline.js';
 import { ensureNetworksCss, openApDetail, openNetworkDetail } from '../ap-detail.js';
-import { sanitizeControls, toggleFilter, selectRows, windowRows, ROW_PAGE, summarize, connectionView, channelsText, countText, cleanName } from '../networks-logic.js';
+import { sanitizeControls, toggleFilter, selectRows, windowRows, ROW_PAGE, summarize, connectionView, liveConnection, LIVE_RSSI_SAMPLES, channelsText, countText, cleanName } from '../networks-logic.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 
@@ -397,8 +397,11 @@ export async function mount(root, ctx) {
   // --- desenho de cada região ---
 
   function currentInsights(state) {
-    const conn = state.connection;
-    const key = `${state.scan.seq}|${conn && conn.connected ? conn.bssid : ''}|${state.loop.throttled}|${state.favorites.size}`;
+    // a conexão com o sinal de agora: o de state.connection ficou no lugar onde o app abriu
+    const conn = liveConnection(state, { history: store.rssiHistory(LIVE_RSSI_SAMPLES) });
+    const level = conn && conn.connected && isNum(conn.rssi) ? signalLevel(conn.rssi).key : '';
+    // refeito a cada varredura e quando o sinal ao vivo troca de nível (não a cada leitura)
+    const key = `${state.scan.seq}|${conn && conn.connected ? conn.bssid : ''}|${state.loop.throttled}|${state.favorites.size}|${level}`;
     if (insights.key !== key || insights.aps !== state.aps) {
       let list = [];
       try {

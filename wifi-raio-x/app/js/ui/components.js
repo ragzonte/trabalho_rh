@@ -12,12 +12,13 @@
 //                  statTile({label, value, unit, hint}) · kvList(linhas) · meter(pct, {tone})
 // Estados          emptyState({...}) · errorState({...}) · skeletonList(n) · spinner() · banner({...}) · tipBanner({...})
 // Formulário       switchRow({...}) · select(opções, valor, onChange) · slider({...}) · textField({...})
-// Limite do Android  throttleTip(ctx) · openThrottleHelp(ctx)
+// Limite do Android  throttleTip(ctx) · openThrottleHelp(ctx) · throttleCopy(store)
 
 import { h, sheet, toast, cssVar, fmtDbm, fmtBand, fmtAgo, uid, NO_VALUE } from './dom.js';
 import { icon } from './icons.js';
 import { signalLevel } from '../core/signal.js';
 import { standardInfo } from '../core/phy.js';
+import { scanThrottleCopy } from '../core/insights.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 
@@ -640,45 +641,68 @@ export function textField({ label, value = '', placeholder, hint, error, type = 
 // ---------------------------------------------------------------------------
 
 /**
- * Painel que explica o limite de buscas do Android e como desligá-lo.
+ * Os textos do limite de buscas para o aparelho de agora (core/insights.js: scanThrottleCopy).
+ * Antes do primeiro "status" não se sabe a versão do Android: vale o caso comum (dá para liberar).
+ * @param {{get:() => object}} store
+ */
+export function throttleCopy(store) {
+  const info = store.get().info;
+  return scanThrottleCopy(info && typeof info.sdk === 'number' ? info.sdk : 0);
+}
+
+/**
+ * Painel que explica o limite de buscas do Android e como desligá-lo. Num Android sem a chave
+ * (anterior ao 10) fica só a explicação: sem passo a passo nem "Abrir opções".
  * @param {{bridge:object, store:object}} ctx
  */
 export function openThrottleHelp(ctx) {
   const demo = ctx.store.get().backend === 'sim';
+  const copy = throttleCopy(ctx.store);
+  const why = h('p', null, 'Para poupar bateria, o Android só deixa cada app procurar redes ', h('strong', null, '4 vezes a cada 2 minutos'), '. Quando o limite acaba, o app mostra a última lista que o celular guardou e avisa a idade dela.');
   const panel = sheet({
     title: 'Por que a lista demora a atualizar?',
     content: [
-      h(
-        'div.prose',
-        null,
-        h('p', null, 'Para poupar bateria, o Android só deixa cada app procurar redes ', h('strong', null, '4 vezes a cada 2 minutos'), '. Quando o limite acaba, o app mostra a última lista que o celular guardou e avisa a idade dela.'),
-        h('p', null, 'Você pode desligar esse limite. O app continua funcionando sem isso, só que com a lista mais lenta:'),
-        h(
-          'ol.steps',
-          null,
-          h('li', null, 'Ative as ', h('strong', null, 'Opções do desenvolvedor'), ': em Configurações › Sobre o telefone, toque 7 vezes em “Número da versão”.'),
-          h('li', null, 'Abra as Opções do desenvolvedor e procure por ', h('strong', null, '“Limitação da busca por Wi-Fi”'), '.'),
-          h('li', null, 'Desligue essa chave e volte para o app.'),
-        ),
-        h('p', null, 'Durante o mapeamento da casa isso faz bastante diferença: as leituras chegam a cada poucos segundos em vez de a cada 30.'),
-      ),
+      copy.canLift
+        ? h(
+            'div.prose',
+            null,
+            why,
+            h('p', null, 'Você pode desligar esse limite. O app continua funcionando sem isso, só que com a lista mais lenta:'),
+            h(
+              'ol.steps',
+              null,
+              h('li', null, 'Ative as ', h('strong', null, 'Opções do desenvolvedor'), `: ${copy.unlockStep}.`),
+              h('li', null, 'Abra as Opções do desenvolvedor e procure por ', h('strong', null, `“${copy.optionName}”`), ' (costuma ficar em “Redes”; o nome muda um pouco conforme a marca).'),
+              h('li', null, 'Desligue essa chave e volte para o app.'),
+            ),
+            h('p', null, 'Durante o mapeamento da casa isso faz bastante diferença: as leituras chegam a cada poucos segundos em vez de a cada 30.'),
+          )
+        : h(
+            'div.prose',
+            null,
+            why,
+            h('p', null, h('strong', null, 'Nesta versão do Android não dá para desligar esse limite'), ': a chave que faz isso só existe a partir do Android 10. O app funciona do mesmo jeito, só que com a lista mais lenta.'),
+            h('p', null, 'No mapeamento da casa as leituras chegam a cada 30 segundos, mais ou menos: marque um lugar de cada vez e espere parado a leitura chegar.'),
+          ),
     ],
-    footer: [
-      button('Agora não', { variant: 'secondary', onClick: () => panel.close() }),
-      button('Abrir opções', {
-        variant: 'primary',
-        icon: 'external',
-        onClick: async () => {
-          panel.close();
-          if (demo) {
-            toast('Na demonstração não há configurações do Android para abrir.');
-            return;
-          }
-          const res = await ctx.bridge.openSettings('developer').catch(() => null);
-          if (!res || res.ok === false) toast('Não foi possível abrir. Procure “Opções do desenvolvedor” nas configurações do Android.');
-        },
-      }),
-    ],
+    footer: copy.canLift
+      ? [
+          button('Agora não', { variant: 'secondary', onClick: () => panel.close() }),
+          button('Abrir opções', {
+            variant: 'primary',
+            icon: 'external',
+            onClick: async () => {
+              panel.close();
+              if (demo) {
+                toast('Na demonstração não há configurações do Android para abrir.');
+                return;
+              }
+              const res = await ctx.bridge.openSettings('developer').catch(() => null);
+              if (!res || res.ok === false) toast('Não foi possível abrir. Procure “Opções do desenvolvedor” nas configurações do Android.');
+            },
+          }),
+        ]
+      : [button('Entendi', { variant: 'primary', block: true, onClick: () => panel.close() })],
   });
   return panel;
 }
@@ -691,13 +715,15 @@ export function openThrottleHelp(ctx) {
 export function throttleTip(ctx) {
   const state = ctx.store.get();
   if (!state.loop.throttled) return null;
+  const copy = throttleCopy(ctx.store);
   return tipBanner({
     id: 'throttle',
     store: ctx.store,
     tone: 'warning',
     icon: 'clock',
     title: 'O Android está limitando as buscas',
-    text: 'A lista se atualiza a cada 30 segundos, mais ou menos. Dá para liberar buscas mais rápidas nas opções do desenvolvedor.',
-    actions: [{ label: 'Como liberar', onClick: () => openThrottleHelp(ctx) }],
+    text: `A lista se atualiza a cada 30 segundos, mais ou menos. ${copy.lift}`,
+    // sem a chave no Android (anterior ao 10) não há o que "liberar": a dica só explica
+    actions: copy.action ? [{ label: copy.action, onClick: () => openThrottleHelp(ctx) }] : undefined,
   });
 }
