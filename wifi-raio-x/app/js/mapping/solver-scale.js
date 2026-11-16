@@ -55,11 +55,14 @@
 /** Desvio-padrão (em ln) do tamanho do mapa em torno do real quando não há medida nenhuma. */
 export const SCALE_PRIOR_SD = 0.24;
 /**
- * A casa de ponta a ponta, em raios quadráticos médios das varreduras: o maior valor típico da
- * bancada. Maior que o real na maioria das casas, de propósito: errar para cima só deixa o ajuste
- * mais tímido; errar para baixo esticaria um mapa que estava certo.
+ * A casa de ponta a ponta, em raios quadráticos médios das varreduras: o valor que 9 em cada 10
+ * levantamentos andando da bancada não passam. Maior que o real na maioria das casas, de
+ * propósito: errar para cima só deixa o ajuste mais tímido; errar para baixo esticaria um mapa que
+ * estava certo. (Com 3,4 o ajuste rendia um ponto percentual a mais na média, mas quem media
+ * exatamente de uma ponta à outra de um levantamento andando saía com o mapa grande demais em três
+ * famílias de casas: erro de 12,5% -> 15,7% no apartamento.)
  */
-export const SPAN_RADII = 3.4;
+export const SPAN_RADII = 3.6;
 /** Folga do teto, em ln: incerteza do comprimento do mapa (0,09) somada ao erro de quem mede (trena ou passos: ~0,05). */
 export const SPAN_EDGE = 0.1;
 /** Medida que pede um mapa mais do que isto maior contradiz o mapa: erro de digitação ou lugares trocados. Não entra. */
