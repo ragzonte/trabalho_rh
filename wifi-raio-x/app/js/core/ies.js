@@ -1070,6 +1070,9 @@ export function parseIes(ies) {
  * @property {(4|5|6|7|null)} gen       geração do Wi-Fi anunciada (HT/VHT/HE/EHT)
  * @property {?number} nss              fluxos espaciais (antenas úteis) do AP
  * @property {?number} maxMcs           maior MCS da geração mais nova anunciada
+ * @property {?(20|40|80|160|320)} maxWidthMHz  maior largura de canal que o AP anuncia saber usar (HT: 40 MHz ou
+ *                                      não; VHT e HE: 80, ou 160 com o bit; EHT: 320); null sem HT/VHT/HE/EHT.
+ *                                      É o que o beacon diz hoje: um roteador com 160 MHz desligado pode não anunciar
  * @property {?number} stations         aparelhos associados (BSS Load; senão o contador do Cisco CCX)
  * @property {?number} utilization      ocupação do canal medida pelo AP, 0..1
  * @property {{k:boolean, v:boolean, r:boolean}} roaming
@@ -1127,6 +1130,17 @@ export function summarizeIes(info) {
     }
   }
 
+  // Maior largura anunciada. VHT obriga 80 MHz; 160 (ou 80+80) é opcional e tem bit próprio, em
+  // VHT e em HE; 320 só em EHT. (Em 2,4 GHz quem usa o número limita a 40.)
+  let maxWidthMHz = null;
+  const widest = (w) => {
+    if (maxWidthMHz === null || w > maxWidthMHz) maxWidthMHz = w;
+  };
+  if (ht) widest(ht.width40 ? 40 : 20);
+  if (vht) widest(vht.width160 || vht.width80p80 ? 160 : 80);
+  if (he) widest(he.width160 || he.width80p80 ? 160 : he.width80 ? 80 : he.width40 ? 40 : 20);
+  if (eht && eht.width320) widest(320);
+
   let model = null;
   if (wps) {
     const name = typeof wps.modelName === 'string' ? wps.modelName : '';
@@ -1148,6 +1162,7 @@ export function summarizeIes(info) {
     gen,
     nss,
     maxMcs,
+    maxWidthMHz,
     stations: bssLoad ? num(bssLoad.stations) : cisco ? num(cisco.clients) : null,
     utilization: bssLoad ? num(bssLoad.utilization) : null,
     roaming: { k: !!obj(i.rm), v: ext.bssTransition === true, r: !!obj(i.mobilityDomain) },

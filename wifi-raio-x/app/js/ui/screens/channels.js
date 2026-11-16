@@ -175,6 +175,33 @@ export function defaultWidth(band, own) {
   return 80;
 }
 
+/**
+ * Largura em que o cartão "Melhor canal" é calculado. Com o roteador do usuário conhecido é
+ * SEMPRE a que ele usa de verdade: o seletor de largura é um "e se" que só muda o ranking, e o
+ * cartão não pode afirmar "seu roteador está no canal 44 (40 MHz)" de um roteador em 80 MHz.
+ * Sem roteador conhecido não há fato a contrariar: vale a largura escolhida.
+ * @param {string} band
+ * @param {object|null} own       o roteador analisado nesta faixa
+ * @param {number} selected       a largura escolhida no seletor
+ */
+export function verdictWidth(band, own, selected) {
+  return own ? defaultWidth(band, own) : selected;
+}
+
+/**
+ * Larguras que o seletor deixa escolher: as que a recomendação de largura avaliou (recommendWidth
+ * já corta o que o roteador não alcança). Uma largura lembrada que ficou de fora volta para `fallback`.
+ */
+export function usableWidth(remembered, widths, options, fallback) {
+  const allowed = new Set((Array.isArray(options) ? options : []).map((o) => o.widthMHz));
+  return widths.includes(remembered) && allowed.has(remembered) ? remembered : fallback;
+}
+
+/** O selo do melhor canal de uma linha do ranking. Num "e se" de largura ele não é a recomendação do cartão: é só o mais livre. */
+export function bestTag(row, whatIf) {
+  return whatIf ? 'Mais livre' : row.isCurrent ? 'Melhor' : 'Recomendado';
+}
+
 /** A nota em palavras e em um dos cinco degraus de cor (1 = melhor). */
 export function scoreLevel(score) {
   const value = isNum(score) ? score : 0;
@@ -393,7 +420,7 @@ const BAND_ROAD = {
 };
 
 const OTHERS_REASON = {
-  2.4: 'Ficam entre os canais padrão (1, 6 e 11): um roteador ali atrapalha, e é atrapalhado por, dois deles ao mesmo tempo.',
+  2.4: 'Ficam fora dos canais padrão (1, 6 e 11). Entre eles (2 a 5 e 7 a 10), um roteador atrapalha, e é atrapalhado por, dois canais padrão ao mesmo tempo; o 12 e o 13 ainda invadem o 11 e não são vistos por alguns aparelhos importados.',
   5: 'Usam a faixa de 5,9 GHz (U-NII-4), que poucos roteadores e aparelhos aceitam.',
   6: 'Estão fora dos canais preferenciais (PSC): alguns aparelhos demoram a encontrar uma rede ali.',
 };
@@ -510,11 +537,17 @@ export async function mount(root, ctx) {
     const own = pickOwn(candidates, memo.own[band]);
     const widths = widthsFor(band);
     const autoWidth = defaultWidth(band, own);
-    const width = widths.includes(memo.width[band]) ? memo.width[band] : autoWidth;
+    const widthAdvice = recommendWidth(state.aps, band, { own });
+    // (uma largura lembrada que este roteador não alcança não vale: volta para a dele)
+    const width = usableWidth(memo.width[band], widths, widthAdvice.options, autoWidth);
+    // `rec` segue o seletor de largura e marca as linhas do ranking; `verdict` é o que o cartão
+    // "Melhor canal" afirma sobre o roteador, sempre na largura que ele usa (veja verdictWidth)
     const rec = recommendChannel(state.aps, { band, widthMHz: width, own });
+    const cardWidth = verdictWidth(band, own, width);
+    const verdict = cardWidth === width ? rec : recommendChannel(state.aps, { band, widthMHz: cardWidth, own });
+    const whatIf = cardWidth !== width; // o ranking mostra uma largura que não é a do roteador
     const exclude = ownExclusion(state.devices, own);
     const ratings = rateChannels(state.aps, { band, widthMHz: width, exclude });
-    const widthAdvice = recommendWidth(state.aps, band, { own });
 
     const orderFor = `${band}|${width}|${own ? own.bssid : ''}`;
     if (orderFor !== ui.orderFor) {
@@ -526,7 +559,7 @@ export async function mount(root, ctx) {
     ui.order = mainRows.map((r) => r.key);
     const otherRows = all.filter((r) => !r.main).sort((a, b) => a.rating.centerFreq - b.rating.centerFreq);
 
-    return { state, summary, band, bandAps, candidates, own, widths, autoWidth, width, rec, exclude, widthAdvice, mainRows, otherRows, graph: channelGraph(state.aps, band) };
+    return { state, summary, band, bandAps, candidates, own, widths, autoWidth, width, rec, verdict, cardWidth, whatIf, exclude, widthAdvice, mainRows, otherRows, graph: channelGraph(state.aps, band) };
   }
 
   /** Quem chega por um atalho para uma rede precisa ver o gráfico: rola a tela para o começo. */
@@ -766,7 +799,8 @@ export async function mount(root, ctx) {
   }
 
   function recCard(a) {
-    const { rec, own, band } = a;
+    // (o veredito, não a recomendação do ranking: com roteador conhecido, sempre na largura dele)
+    const { verdict: rec, own, band } = a;
     const best = rec.best;
     const current = rec.current;
     const head = (iconName, tone, title) =>
@@ -813,8 +847,8 @@ export async function mount(root, ctx) {
       return h(
         'section.card.ch-rec',
         { key: 'rec', dataset: { verdict: 'general' } },
-        head('target', 'neutral', `Canal mais livre em ${fmtWidth(a.width)}: ${best.channel}${dfsTag(best)}`),
-        h('p.ch-rec__text', null, `Seu roteador está no canal ${own.channel}, que não comporta ${fmtWidth(a.width)}. ${rec.text}`),
+        head('target', 'neutral', `Canal mais livre em ${fmtWidth(a.cardWidth)}: ${best.channel}${dfsTag(best)}`),
+        h('p.ch-rec__text', null, `Seu roteador está no canal ${own.channel}, que não comporta ${fmtWidth(a.cardWidth)}. ${rec.text}`),
         h('div.ch-tiles.ch-tiles--one', null, scoreTile('Mais livre nesta largura', best)),
         ownLine(a),
         caveat,
@@ -878,7 +912,9 @@ export async function mount(root, ctx) {
     const byWidth = new Map(widthAdvice.options.map((o) => [o.widthMHz, o]));
     const pick = (w) => {
       if (!byWidth.has(w)) {
-        toast(own ? `Pela geração do Wi-Fi, o seu roteador não chega a ${fmtWidth(w)}.` : `Não há canais de ${fmtWidth(w)} nesta faixa.`);
+        // o corte vem do que o roteador anuncia no beacon; sem os elementos (Android antigo), da geração
+        const announced = own && own.ie && isNum(own.ie.maxWidthMHz);
+        toast(!own ? `Não há canais de ${fmtWidth(w)} nesta faixa.` : announced ? `O seu roteador não anuncia suporte a ${fmtWidth(w)} nesta faixa.` : `Pela geração do Wi-Fi, o seu roteador não chega a ${fmtWidth(w)}.`);
         return;
       }
       if (w === a.width) return;
@@ -930,6 +966,8 @@ export async function mount(root, ctx) {
       ),
       h('p.ch-advice', null, icon('sparkle', { size: 18 }), h('span', null, widthAdvice.text)),
       own ? h('p.ch-width__now', null, `Seu roteador usa ${fmtWidth(own.widthMHz)} hoje${own.widthMHz === widthAdvice.widthMHz ? ': já é a largura sugerida.' : '.'}`) : null,
+      // "e se": o ranking está numa largura que não é a do roteador; o cartão de cima continua valendo para a dele
+      a.whatIf ? h('p.ch-width__whatif', null, `O ranking abaixo mostra como ficaria em ${fmtWidth(width)}. O cartão “Melhor canal” continua valendo para os ${fmtWidth(a.cardWidth)} que o seu roteador usa hoje.`) : null,
     );
   }
 
@@ -939,7 +977,7 @@ export async function mount(root, ctx) {
     const range = blockRange(r);
     const tags = [];
     if (row.isCurrent) tags.push(badge('Seu canal', { tone: 'accent', icon: 'router' }));
-    if (row.isBest) tags.push(badge(row.isCurrent ? 'Melhor' : 'Recomendado', { tone: 'good', icon: 'check' }));
+    if (row.isBest) tags.push(badge(bestTag(row, last && last.whatIf), { tone: 'good', icon: 'check' }));
     if (r.dfs) tags.push(badge('DFS', { tone: 'warning' }));
     if (r.psc) tags.push(badge('PSC', { outline: true }));
     const facts = crowdParts(r);
@@ -1115,7 +1153,7 @@ export async function mount(root, ctx) {
         const shown = list.slice(0, 8);
         const tags = [];
         if (row.isCurrent) tags.push(badge('Seu canal', { tone: 'accent', icon: 'router' }));
-        if (row.isBest) tags.push(badge(row.isCurrent ? 'Melhor' : 'Recomendado', { tone: 'good', icon: 'check' }));
+        if (row.isBest) tags.push(badge(bestTag(row, last && last.whatIf), { tone: 'good', icon: 'check' }));
         if (r.dfs) tags.push(badge('DFS', { tone: 'warning' }));
         if (r.psc) tags.push(badge('PSC', { outline: true }));
         return [
@@ -1273,10 +1311,10 @@ export async function mount(root, ctx) {
     const conn = state.connection && state.connection.connected ? state.connection : null;
     const gateway = conn && typeof conn.gateway === 'string' && /^[0-9a-f.:]+$/i.test(conn.gateway) ? conn.gateway : null;
     const own = a ? a.own : null;
-    const target = a && a.rec.best && own && a.rec.verdict === 'change' ? a.rec.best : null;
+    const target = a && a.verdict.best && own && a.verdict.verdict === 'change' ? a.verdict.best : null;
     const bandName = a ? fmtBand(a.band) : '';
-    const keepChannel = a && own && a.rec.current && a.rec.verdict === 'keep' ? a.rec.current.channel : null;
-    const freest = a && !own && a.rec.best ? a.rec.best.channel : null;
+    const keepChannel = a && own && a.verdict.current && a.verdict.verdict === 'keep' ? a.verdict.current.channel : null;
+    const freest = a && !own && a.verdict.best ? a.verdict.best.channel : null;
     const panel = sheet({
       title: 'Como mudar o canal do roteador',
       subtitle: 'Vale para quase todas as marcas.',

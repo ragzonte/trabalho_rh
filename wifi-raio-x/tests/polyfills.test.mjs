@@ -115,3 +115,43 @@ test('com o conserto, o laço de buscas retoma depois do congelamento (sem ele f
   assert.equal(loop.getState().paused, null, 'o laço volta a buscar');
   loop.stop();
 });
+
+test('WeakRef e FinalizationRegistry existem para o three.js (no WebView 80 a 83 vêm daqui)', () => {
+  // No Node de hoje são os de verdade; o que importa aqui é o contrato que o three.js usa.
+  const target = { id: 1 };
+  const ref = new globalThis.WeakRef(target);
+  assert.equal(ref.deref(), target);
+  const registry = new globalThis.FinalizationRegistry(() => {});
+  assert.doesNotThrow(() => registry.register(target, 'x', target));
+  assert.doesNotThrow(() => registry.unregister(target));
+});
+
+test('as versões de reserva de WeakRef/FinalizationRegistry: mesmo contrato, sem coletor', async () => {
+  const saved = { WeakRef: globalThis.WeakRef, FinalizationRegistry: globalThis.FinalizationRegistry };
+  try {
+    // como num WebView 83: os dois não existem quando o arquivo é carregado
+    delete globalThis.WeakRef;
+    delete globalThis.FinalizationRegistry;
+    await import(`../app/js/polyfills.js?sem-coleta=${Date.now()}`);
+    assert.equal(typeof globalThis.WeakRef, 'function');
+    assert.equal(typeof globalThis.FinalizationRegistry, 'function');
+    assert.notEqual(globalThis.WeakRef, saved.WeakRef, 'entrou a versão de reserva');
+    const target = { id: 2 };
+    const ref = new globalThis.WeakRef(target);
+    assert.equal(ref.deref(), target);
+    assert.throws(() => new globalThis.WeakRef(1), TypeError);
+    assert.throws(() => new globalThis.FinalizationRegistry(), TypeError);
+    const registry = new globalThis.FinalizationRegistry(() => assert.fail('a limpeza nunca é chamada na versão de reserva'));
+    registry.register(target, 'x', target);
+    assert.equal(registry.unregister(target), false);
+    // o que o three.js faz na partida do WebGLRenderer
+    const map = {};
+    const cleanup = new globalThis.FinalizationRegistry((id) => delete map[id]);
+    map[7] = new globalThis.WeakRef(target);
+    cleanup.register(target, 7, target);
+    assert.equal(map[7].deref(), target);
+  } finally {
+    globalThis.WeakRef = saved.WeakRef;
+    globalThis.FinalizationRegistry = saved.FinalizationRegistry;
+  }
+});

@@ -437,7 +437,9 @@
 /* ------------------------------------------------------------------------ */
 
 .best-filters {
-  flex-wrap: nowrap;
+  /* uma linha em 360 px; com a letra do sistema ampliada "Escolher" desce para a linha de baixo
+     em vez de sair da tela */
+  flex-wrap: wrap;
 }
 
 .best-filters__edit {

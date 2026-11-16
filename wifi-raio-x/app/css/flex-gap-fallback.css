@@ -11,10 +11,6 @@
   margin-right: 2px;
 }
 
-.topbar__status > *:not(:last-child) {
-  margin-right: 6px;
-}
-
 .topbar__actions > *:not(:last-child) {
   margin-right: 0;
 }

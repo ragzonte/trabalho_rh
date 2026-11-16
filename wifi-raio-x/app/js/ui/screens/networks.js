@@ -22,7 +22,7 @@
 // O modo e a ordem escolhidos ficam guardados (prefs 'redes'); filtros e busca valem até fechar o app.
 // A lógica de filtrar, ordenar e agrupar está em ui/networks-logic.js (pura, com testes).
 
-import { h, mount as render, patch, patchList, toast, fmtNum, fmtDbm, fmtAgo, fmtMbps, fmtMeters, fmtBand, fmtWidth, plural, THIN } from '../dom.js';
+import { h, mount as render, patch, patchList, batch, toast, fmtNum, fmtDbm, fmtAgo, fmtMbps, fmtMeters, fmtBand, fmtWidth, plural, THIN } from '../dom.js';
 import { icon } from '../icons.js';
 import { signalBars, badge, bandBadge, securityBadge, standardBadge, chip, segmented, button, iconButton, emptyState, skeletonList, sectionHeader, throttleTip } from '../components.js';
 import { signalLevel } from '../../core/signal.js';
@@ -180,17 +180,18 @@ function pickInsight(list) {
 
 /**
  * Velocidade do link, recebendo e enviando, com a unidade escrita uma vez só ("↓ 287 ↑ 258 Mb/s",
- * "↓ 1,1 ↑ 0,96 Gb/s"): cabe numa linha mesmo em 360 px.
+ * "↓ 1,1 ↑ 0,96 Gb/s"): cabe numa linha mesmo em 360 px (e quebra entre as duas direções se a
+ * letra do sistema estiver ampliada).
  */
 function speedText(view) {
   if (isNum(view.downMbps) && isNum(view.upMbps)) {
     const giga = Math.max(view.downMbps, view.upMbps) >= 995;
     const num = (mbps) => (giga ? fmtNum(mbps / 1000, mbps < 995 ? 2 : 1) : fmtNum(mbps, mbps < 9.95 ? 1 : 0));
+    // dois pedaços que não se partem (seta + número): com a letra do sistema ampliada a linha
+    // quebra ENTRE eles, em vez de invadir a célula da distância
     return [
-      h('span.net-conn__arrow', { role: 'img', 'aria-label': 'recebendo' }, '↓'),
-      num(view.downMbps),
-      h('span.net-conn__arrow', { role: 'img', 'aria-label': 'enviando' }, '↑'),
-      `${num(view.upMbps)}${THIN}${giga ? 'Gb/s' : 'Mb/s'}`,
+      h('span.net-conn__rate', null, h('span.net-conn__arrow', { role: 'img', 'aria-label': 'recebendo' }, '↓'), num(view.downMbps)),
+      h('span.net-conn__rate', null, h('span.net-conn__arrow', { role: 'img', 'aria-label': 'enviando' }, '↑'), `${num(view.upMbps)}${THIN}${giga ? 'Gb/s' : 'Mb/s'}`),
     ];
   }
   if (isNum(view.linkMbps)) return fmtMbps(view.linkMbps);
@@ -355,8 +356,10 @@ export async function mount(root, ctx) {
     memo = controls;
     limit = ROW_PAGE;
     if (persist) ctx.prefs.set(PREFS_KEY, { mode: controls.mode, sort: controls.sort });
-    drawControls();
-    drawList();
+    batch(root, () => {
+      drawControls();
+      drawList();
+    });
   }
 
   function toggleSearch(force) {
@@ -584,7 +587,13 @@ export async function mount(root, ctx) {
     return emptyState({ icon: 'filter', title: 'Nenhuma rede com esses filtros', text: 'Tire um filtro ou veja a lista inteira.', action: { label: 'Limpar filtros', onClick: clearFilters } });
   }
 
+  // A lista mexe em cinco regiões (linhas, vazio, "mostrar mais", resumo, legenda): num lote só,
+  // a rolagem e o foco são guardados e devolvidos uma vez, em vez de uma vez por região.
   function drawList() {
+    batch(root, drawListNow);
+  }
+
+  function drawListNow() {
     const state = store.get();
     const loading = state.scan.seq === 0 && state.aps.length === 0;
     const nothing = !loading && state.aps.length === 0;
@@ -637,12 +646,14 @@ export async function mount(root, ctx) {
 
   // --- o que muda o quê ---
 
+  // uma varredura = uma atualização só da tela (cartão + lista), com um único acerto de rolagem
   store.subscribe(
     (s) => s.aps,
-    () => {
-      drawConnection();
-      drawList();
-    },
+    () =>
+      batch(root, () => {
+        drawConnection();
+        drawList();
+      }),
   );
   store.subscribe((s) => s.connection, drawConnection);
   store.subscribe((s) => s.rssi, drawConnection);

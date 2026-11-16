@@ -6,8 +6,10 @@
 //
 // Resumo do que este arquivo exporta
 //   h(tag, props, ...filhos)   cria um elemento HTML      s(tag, attrs, ...filhos)  cria um elemento SVG
+//   nb(texto)                  filhos para h() em que "Wi-Fi" não quebra no hífen (texto fixo da interface)
 //   mount(raiz, ...filhos)     troca todo o conteúdo      patch(raiz, ...filhos)    atualiza no lugar (sem piscar)
 //   patchList(pai, itens, {key, create, update})          lista viva com chave
+//   batch(raiz, fn)            vários patch()/patchList() dentro de `raiz` como uma atualização só
 //   sheet({title, content, ...})  painel inferior         confirmDialog({...}) -> Promise<boolean>
 //   toast(texto, {action})        aviso rápido            closeTopOverlay()    (botão "voltar")
 //   pushLayer(el, {close})        registra uma camada própria na pilha do "voltar"
@@ -197,6 +199,25 @@ export function s(tag, attrs, ...children) {
   return create(SVG_NS, tag, attrs, children);
 }
 
+/**
+ * Texto fixo da interface em que "Wi-Fi" não pode quebrar no hífen ("Wi-" numa linha, "Fi" na
+ * outra). Devolve os filhos para h(): o mesmo texto, com cada "Wi-Fi" dentro de um
+ * <span class="nb"> (white-space: nowrap). O textContent não muda e o hífen continua o comum:
+ * busca, cópia, leitor de tela e testes veem o texto de sempre.
+ * Só para textos escritos no código (títulos, parágrafos). Nome de rede e rótulo digitado pelo
+ * usuário entram direto em h(), como vieram.
+ *   h('h1.gate__title', null, nb('Vamos ver o Wi-Fi ao seu redor'))
+ * @param {string} text
+ * @returns {string|(string|HTMLElement)[]}
+ */
+export function nb(text) {
+  if (typeof text !== 'string' || !text.includes('Wi-Fi')) return text;
+  return text
+    .split(/(Wi-Fi)/)
+    .filter((part) => part !== '')
+    .map((part) => (part === 'Wi-Fi' ? h('span.nb', null, part) : part));
+}
+
 /** Troca todo o conteúdo de `root` pelos filhos dados. Devolve `root`. */
 export function mount(root, ...children) {
   root.replaceChildren(...flatten(children));
@@ -294,10 +315,18 @@ function moveNode(parent, node, before) {
   parent.insertBefore(node, before);
 }
 
+// Raiz do lote em andamento (veja batch): o que for atualizado dentro dela não guarda nem devolve
+// foco e rolagem por conta própria; o lote faz isso uma vez só.
+let stableRoot = null;
+
 // Roda `work` (que reorganiza os filhos de `root`) e põe de volta o que o navegador mexe por
 // conta própria: o foco e a rolagem — de `root` e de quem rola em volta dele. Numa lista que se
 // reordena sozinha, a tela fica parada onde o usuário a deixou em vez de seguir uma linha.
 function keepStable(root, work) {
+  if (stableRoot && (stableRoot === root || stableRoot.contains(root))) {
+    work(); // o lote que cobre esta raiz já guardou tudo antes da primeira mudança
+    return;
+  }
   const active = document.activeElement;
   const inside = active && active !== document.body && root.contains(active) ? active : null;
   let range = null;
@@ -362,6 +391,39 @@ function morphChildren(parent, nextKids) {
     cursor = cursor.nextSibling;
     parent.removeChild(gone);
   }
+}
+
+/**
+ * Várias atualizações de uma vez: tudo o que `work` fizer com patch()/patchList() DENTRO de
+ * `root` conta como uma atualização só. O foco e a rolagem (de `root` e de quem rola em volta
+ * dele) são guardados antes da primeira mudança e devolvidos uma vez, no fim, ainda antes de a
+ * tela ser pintada.
+ *
+ * Por quê: cada patch() sozinho lê a rolagem antes e depois de mexer, e ler a rolagem com a
+ * página "suja" obriga o navegador a recalcular o layout inteiro na hora. Uma tela que atualiza
+ * cinco regiões a cada varredura pagava isso cinco vezes (num celular modesto, com muitas redes,
+ * a maior parte do tempo que a lista ficava travada).
+ *
+ * Quem rola tem de ser `root` ou estar acima dele (o normal: a área de conteúdo do app). Uma
+ * região de dentro de `root` que role por conta própria e seja refeita no lote não tem a rolagem
+ * devolvida: atualize-a fora do lote.
+ * @template T
+ * @param {Element} root
+ * @param {() => T} work
+ * @returns {T}
+ */
+export function batch(root, work) {
+  let out;
+  keepStable(root, () => {
+    const outer = stableRoot;
+    stableRoot = root;
+    try {
+      out = work();
+    } finally {
+      stableRoot = outer;
+    }
+  });
+  return out;
 }
 
 /**

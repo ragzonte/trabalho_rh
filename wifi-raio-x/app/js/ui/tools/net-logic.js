@@ -416,6 +416,13 @@ export function niceAxis(maxValue, targetTicks = 4) {
 // ---------------------------------------------------------------------------
 
 /** Tipos de aparelho que a tela sabe desenhar, com o nome em português. */
+/**
+ * Versão do Android a partir da qual os apps não enxergam mais o endereço físico (MAC) dos outros
+ * aparelhos da rede (a tabela /proc/net/arp fica fechada do Android 10, API 29, em diante; é o
+ * mesmo corte de ArpTable.java). As telas que explicam essa limitação citam este número.
+ */
+export const MAC_HIDDEN_SINCE_ANDROID = 10;
+
 export const DEVICE_TYPES = Object.freeze({
   router: 'Roteador',
   network: 'Equipamento de rede',

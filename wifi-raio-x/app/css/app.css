@@ -345,7 +345,9 @@ canvas {
   display: flex;
   align-items: center;
   gap: 2px;
-  height: calc(var(--topbar-h) + var(--safe-t));
+  /* altura mínima, não fixa: com a letra do sistema ampliada (tamanho da fonte do Android, que o
+     WebView aplica a todo o texto) o título e a linha de estado crescem e a barra acompanha */
+  min-height: calc(var(--topbar-h) + var(--safe-t));
   /* em telas largas o título e os botões se alinham com a coluna do conteúdo */
   padding: var(--safe-t) max(calc(4px + var(--safe-r)), calc((100% - var(--content-max)) / 2 + 6px)) 0
     max(calc(4px + var(--safe-l)), calc((100% - var(--content-max)) / 2 + 4px));
@@ -390,9 +392,8 @@ canvas {
 }
 
 .topbar__status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  /* bloco, não flex: as reticências só valem para texto num bloco (num flex o texto era cortado seco) */
+  display: block;
   max-width: 100%;
   font-size: var(--fs-xs);
   line-height: 16px;
@@ -518,7 +519,8 @@ canvas {
   grid-area: nav;
   display: flex;
   justify-content: center;
-  height: calc(var(--nav-h) + var(--safe-b));
+  /* altura mínima: com a letra ampliada um rótulo pode ocupar duas linhas */
+  min-height: calc(var(--nav-h) + var(--safe-b));
   padding: 0 var(--safe-r) var(--safe-b) var(--safe-l);
   /* mesma cor do fundo: a barra de navegação do Android (pintada com --bg) continua esta sem emenda */
   background: var(--bg);
@@ -528,23 +530,59 @@ canvas {
 }
 
 /* Cada item tem a largura do próprio rótulo mais uma parte igual da sobra: em 360 px
-   "Melhor Wi-Fi" e "Ferramentas" não cabem em cinco colunas iguais sem encostar um no outro. */
+   "Melhor Wi-Fi" e "Ferramentas" não cabem em cinco colunas iguais sem encostar um no outro.
+   Letra do sistema ampliada: o item nunca fica mais estreito que a maior palavra do rótulo (nem
+   que o ícone, de 56 px), e quem tem duas palavras ("Melhor Wi-Fi", "Mapa 3D") quebra em duas
+   linhas para os outros caberem. Se nem assim couber, a navegação fica compacta (data-compact,
+   posto por main.js): só a aba atual mostra o rótulo. */
 .bottomnav__item {
   flex: 1 1 auto;
-  min-width: 56px;
   max-width: 168px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* a partir de cima (ícone 30 + rótulo 14 dentro de 64 px = 8 px de respiro): os ícones ficam
+     alinhados mesmo quando um rótulo ocupa duas linhas e outro, uma */
+  justify-content: flex-start;
   gap: 4px;
-  padding: 0 4px;
+  padding: 8px 4px 6px;
   color: var(--muted);
   font-size: var(--fs-xs);
   font-weight: 500;
   line-height: 14px;
-  white-space: nowrap;
+  text-align: center;
   transition: color var(--dur) var(--ease);
+}
+
+.bottomnav__label {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bottomnav[data-compact] .bottomnav__item {
+  min-width: 0;
+}
+
+.bottomnav[data-compact] .bottomnav__icon {
+  width: 48px;
+}
+
+/* (escondido só da vista: o link continua com nome para o leitor de tela) */
+.bottomnav[data-compact] .bottomnav__item:not([aria-current='page']) .bottomnav__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Texto que não pode quebrar no meio ("Wi-Fi" partido no hífen, um número longe da unidade). */
+.nb {
+  white-space: nowrap;
 }
 
 .bottomnav__icon {
@@ -980,6 +1018,17 @@ canvas {
 .btn--quiet {
   padding: 0 12px;
   color: var(--accent-text);
+}
+
+/* Botão de texto e botão de largura total nunca saem do cartão: se o rótulo não cabe numa linha
+   (tela estreita, letra do sistema ampliada), quebra em duas. Os botões lado a lado das barras de
+   ação continuam numa linha só. */
+.btn--quiet,
+.btn--danger-quiet,
+.btn--block {
+  max-width: 100%;
+  padding-top: 6px; padding-bottom: 6px;
+  white-space: normal;
 }
 
 .btn--quiet:active {

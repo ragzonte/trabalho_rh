@@ -20,6 +20,7 @@ import { bandOf, freqToChannel } from '../../core/channels.js';
 import { recommendChannel } from '../../core/channel-rating.js';
 import { buildCsv, buildJson, buildReport, networkRecord, exportFileName, utf8Length, formatBytes, previewOf } from './export-format.js';
 import { useToolsCss, copyWithToast } from './conexao.js';
+import { liveConnection, liveSignalKey, LIVE_RSSI_SAMPLES } from '../networks-logic.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 const isText = (x) => typeof x === 'string' && x.trim() !== '';
@@ -51,12 +52,14 @@ const BANDS = ['2.4', '5', '6'];
 /** Módulo opcional: null se não existir ou não carregar. */
 const optional = (load) => load().catch(() => null);
 
-/** Os dados da conexão que o relatório cita. */
-function connectionFacts(state, ap) {
-  const conn = state.connection;
+/**
+ * Os dados da conexão que o relatório cita.
+ * @param {object|null} conn  a conexão com o sinal de agora (liveConnection): o sinal e as
+ *                            velocidades de state.connection são do lugar onde o app abriu
+ */
+function connectionFacts(conn, ap) {
   if (!conn || conn.connected !== true) return null;
-  const sample = state.rssi && (!state.rssi.bssid || lower(state.rssi.bssid) === lower(conn.bssid)) ? state.rssi : null;
-  const rssi = sample && isNum(sample.rssi) ? sample.rssi : conn.rssi;
+  const rssi = conn.rssi;
   const freq = isNum(conn.frequency) && conn.frequency > 0 ? conn.frequency : ap ? ap.freq : null;
   const band = ap && ap.band ? ap.band : bandOf(freq);
   let standard = ap && isText(ap.standardLabel) ? ap.standardLabel : null;
@@ -94,7 +97,7 @@ export async function mount(root, ctx) {
   // --- montagem dos textos ------------------------------------------------------------------
 
   /** As análises do relatório. Cada uma é protegida: a que falhar só fica de fora. */
-  function analyse(state) {
+  function analyse(state, live) {
     const { aps, connection, info, favorites, status } = state;
     const connBssid = connection && connection.connected && isText(connection.bssid) ? lower(connection.bssid) : undefined;
 
@@ -131,7 +134,7 @@ export async function mount(root, ctx) {
     let insights = null;
     if (insightsMod && typeof insightsMod.buildInsights === 'function') {
       try {
-        const list = insightsMod.buildInsights({ aps, connection: connection || undefined, device: info || undefined, status: status || undefined, clone: state.clone || undefined });
+        const list = insightsMod.buildInsights({ aps, connection: live || connection || undefined, device: info || undefined, status: status || undefined, clone: state.clone || undefined });
         insights = (Array.isArray(list) ? list : []).map((i) => ({ severity: i.severity, title: i.title, text: i.text }));
       } catch {
         insights = null;
@@ -147,11 +150,13 @@ export async function mount(root, ctx) {
     const appVersion = state.info && isText(state.info.appVersion) ? state.info.appVersion : '';
     // dados da casa virtual saem com "demonstracao" no nome do arquivo
     const stamp = { demo: state.backend === 'sim', when: now };
+    // a conexão com o sinal e as velocidades de agora (a leitura de cada segundo), não os de quando ela foi informada
+    const live = liveConnection(state, { now, history: store.rssiHistory(LIVE_RSSI_SAMPLES) });
     if (kind === 'csv') {
       return { kind, name: exportFileName('redes', 'csv', stamp), mime: 'text/csv', text: buildCsv(state.aps, { bom: forFile }) };
     }
     if (kind === 'json') {
-      const text = buildJson({ generatedAt: now, appVersion, device: state.info, connection: state.connection, scannedAt: state.scan.dataAt, aps: state.aps });
+      const text = buildJson({ generatedAt: now, appVersion, device: state.info, connection: live, scannedAt: state.scan.dataAt, aps: state.aps });
       return { kind, name: exportFileName('redes', 'json', stamp), mime: 'application/json', text };
     }
     const connAp = store.connectedAp();
@@ -160,8 +165,8 @@ export async function mount(root, ctx) {
       appVersion,
       device: state.info,
       dataAgeMs: isNum(state.scan.dataAt) ? now - state.scan.dataAt : null,
-      connection: connectionFacts(state, connAp),
-      ...analyse(state),
+      connection: connectionFacts(live, connAp),
+      ...analyse(state, live),
       networks: state.networks.map(networkRecord),
       signals: state.aps.length,
     });
@@ -172,7 +177,8 @@ export async function mount(root, ctx) {
   let cache = null;
   function preview() {
     const state = store.get();
-    const key = [format, state.scan.seq, state.aps.length, state.vendorsReady, state.favorites.size, state.connection && state.connection.connected ? state.connection.bssid : ''].join('|');
+    const level = liveSignalKey(state, { history: store.rssiHistory(LIVE_RSSI_SAMPLES) }); // o sinal ao vivo trocou de nível: o diagnóstico da prévia muda
+    const key = [format, state.scan.seq, state.aps.length, state.vendorsReady, state.favorites.size, state.connection && state.connection.connected ? state.connection.bssid : '', level].join('|');
     if (!cache || cache.key !== key) {
       let file;
       try {

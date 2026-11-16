@@ -22,12 +22,12 @@
 
 import { h, s, patch, sheet, toast, confirmDialog, plural } from '../dom.js';
 import { icon } from '../icons.js';
-import { button, iconButton, banner, openThrottleHelp, errorState } from '../components.js';
+import { button, iconButton, banner, openThrottleHelp, throttleCopy, errorState } from '../components.js';
 import { createRecorder, recorderFromJSON, SURVEY_THRESHOLDS } from '../../mapping/recorder.js';
 import { createViewer } from './viewer3d.js';
 import { createMiniPlan } from './mini-plan.js';
 import { actionSheet, defaultOwnSsids } from './library.js';
-import { roomChips, cleanLabel, floorName, clampFloor, FLOOR_MIN, FLOOR_MAX, levelInfo, fmtTimer, pulseInfo, previewDue, ownBssidsFor, rttTargets, finishBlocker, isDemoOrigin, matchesMode } from './map-ui-logic.js';
+import { roomChips, cleanLabel, floorName, clampFloor, FLOOR_MIN, FLOOR_MAX, levelInfo, fmtTimer, pulseInfo, previewDue, ownBssidsFor, rttTargets, finishBlocker, isDemoOrigin, matchesMode, surveyTips, pointByPointNote, radarInfo, spotCounter } from './map-ui-logic.js';
 
 const TICK_MS = 500;
 const AUTOSAVE_MS = 10_000;
@@ -116,18 +116,17 @@ function levelMeter(info) {
   );
 }
 
-function counter(label, value, key) {
-  return h('div.msv-count', { key }, h('span.msv-count__value', null, value), h('span.msv-count__label', null, label));
+/** Um contador; `of` ("de 12") vai ao lado do número, menor (o número sozinho continua em .msv-count__value). */
+function counter(label, value, key, of) {
+  const number = h('span.msv-count__value', null, value);
+  return h('div.msv-count', { key }, of ? h('span.msv-count__top', null, number, h('span.msv-count__of', null, ` ${of}`)) : number, h('span.msv-count__label', null, label));
 }
 
-const TIPS = [
-  ['walk', 'Ande devagar e por todos os cômodos', 'Passe também pelos cantos: é o caminho andado que desenha a área do mapa.'],
-  ['pin', 'Pare e marque cada cômodo com o nome', 'Toque em “Marcar este lugar”, espere parado as leituras chegarem e toque em “Segui andando”.'],
-  ['floor-up', 'Ao trocar de andar, avise', 'Mude o controle “Andar” assim que chegar ao outro piso.'],
-  ['undo', 'Errou? Desfaça', '“Desfazer” tira a última leitura; a pausa serve para atender a porta sem bagunçar o mapa.'],
-];
-
+// As dicas saem de map-ui-logic.js (surveyTips): andando sem parar e ponto a ponto pedem
+// instruções diferentes, e o limite do Android pode ligar ou desligar com a tela aberta.
 function openTips(ctx, throttled) {
+  const lift = throttleCopy(ctx.store);
+  const note = pointByPointNote({ during: true, canLift: lift.canLift });
   const panel = sheet({
     title: 'Como fazer um bom mapa',
     content: h(
@@ -137,15 +136,15 @@ function openTips(ctx, throttled) {
         ? banner({
             tone: 'warning',
             icon: 'clock',
-            title: 'Mapeamento ponto a ponto',
-            text: 'O Android está limitando as buscas: chega uma leitura a cada 30 segundos, mais ou menos. Vá de cômodo em cômodo, marque o lugar e fique parado até a leitura chegar.',
-            actions: [{ label: 'Como liberar buscas rápidas', onClick: () => openThrottleHelp(ctx) }],
+            title: note.title,
+            text: note.text,
+            actions: lift.canLift ? [{ label: 'Como liberar buscas rápidas', onClick: () => openThrottleHelp(ctx) }] : undefined,
           })
         : null,
       h(
         'ol.map-tips',
         null,
-        TIPS.map(([name, title, text]) => h('li.map-tip', null, h('span.map-tip__icon', null, icon(name)), h('div.map-tip__body', null, h('strong', null, title), h('span', null, text)))),
+        surveyTips({ throttled: !!throttled, during: true }, SURVEY_THRESHOLDS).map((tip) => h('li.map-tip', null, h('span.map-tip__icon', null, icon(tip.icon)), h('div.map-tip__body', null, h('strong', null, tip.title), h('span', null, tip.text)))),
       ),
     ),
     footer: [button('Entendi', { variant: 'primary', block: true, onClick: () => panel.close() })],
@@ -223,8 +222,9 @@ export async function mountSurvey(root, env) {
   // --- DOM fixo ------------------------------------------------------------
   root.className = 'screen screen--bleed';
   const viewerBox = h('div.msv-preview__viewer', { hidden: true });
-  const radarText = h('p.msv-radar__text', null, 'A prévia do mapa aparece aqui');
-  const radarSub = h('p.msv-radar__sub', null, 'Depois das primeiras leituras, o desenho vai se formando enquanto você anda.');
+  // (os dois textos do radar são postos por drawRadar(), conforme o ritmo das leituras)
+  const radarText = h('p.msv-radar__text');
+  const radarSub = h('p.msv-radar__sub');
   const radarDotsBox = h('span.msv-radar__dots', { 'aria-hidden': 'true' });
   const radar = h('div.msv-radar', null, h('div.msv-radar__art', { 'aria-hidden': 'true' }, h('span.msv-radar__wave'), h('span.msv-radar__wave'), h('span.msv-radar__wave'), radarDotsBox, h('span.msv-radar__core', null, icon('wifi', { size: 26 }))), radarText, radarSub);
   const tag = h('span.msv-preview__tag', { hidden: true }, 'Prévia · estimativa');
@@ -371,9 +371,19 @@ export async function mountSurvey(root, env) {
     const dot = h('i', { style: { '--a': `${(radarDots * 137.5) % 360}deg`, '--r': `${28 + ((radarDots * 17) % 34)}%` } });
     radarDotsBox.appendChild(dot);
     while (radarDotsBox.childNodes.length > 14) radarDotsBox.firstChild.remove();
-    const scans = rec.stats().scans;
-    radarText.textContent = scans >= PREVIEW_MIN_SCANS ? 'Montando a primeira prévia…' : `${plural(scans, 'leitura recebida', 'leituras recebidas')}`;
-    radarSub.textContent = scans >= PREVIEW_MIN_SCANS ? 'Continue andando.' : `A prévia do mapa aparece com ${PREVIEW_MIN_SCANS} leituras. Continue andando.`;
+    drawRadar();
+  }
+
+  /**
+   * Os textos do radar (enquanto a prévia não aparece). Calculados a cada desenho: o limite do
+   * Android pode ligar ou desligar no meio do levantamento, e "continue andando" não serve para
+   * quem está mapeando ponto a ponto.
+   */
+  function drawRadar(st = rec.stats()) {
+    if (viewer) return;
+    const copy = radarInfo({ scans: st.scans, minScans: PREVIEW_MIN_SCANS, throttled: !!store.get().loop.throttled, spot: !!st.spot && st.state === 'recording', resumed: resumed && preview.lastScans === 0 });
+    if (radarText.textContent !== copy.text) radarText.textContent = copy.text;
+    if (radarSub.textContent !== copy.sub) radarSub.textContent = copy.sub;
   }
 
   function showPreview(model) {
@@ -555,7 +565,8 @@ export async function mountSurvey(root, env) {
       title: 'Mapeamento',
       actions: [
         { icon: 'help', label: 'Como fazer um bom mapa', onClick: () => openTips(ctx, store.get().loop.throttled) },
-        store.get().loop.throttled ? { icon: 'clock', label: 'Liberar buscas mais rápidas', hint: 'O Android está limitando as leituras', onClick: () => openThrottleHelp(ctx) } : null,
+        // (num Android sem a chave do limite não há o que liberar: a explicação fica nas dicas)
+        store.get().loop.throttled && throttleCopy(store).canLift ? { icon: 'clock', label: 'Liberar buscas mais rápidas', hint: 'O Android está limitando as leituras', onClick: () => openThrottleHelp(ctx) } : null,
         { icon: 'trash', label: 'Descartar este mapeamento', danger: true, onClick: discard },
       ],
     });
@@ -708,6 +719,8 @@ export async function mountSurvey(root, env) {
     const level = levelInfo(st.level);
     const piloting = !!(pilot && pilot.running);
     const spot = st.spot;
+    const spotCount = spotCounter({ spots: st.spots, throttled, canFinish: level.canFinish }, SURVEY_THRESHOLDS);
+    drawRadar(st);
 
     // o que a pessoa precisa saber agora, em uma linha
     let title = pulse.title;
@@ -782,7 +795,7 @@ export async function mountSurvey(root, env) {
         'div.msv-counts',
         { key: 'counts' },
         counter(st.scans === 1 ? 'leitura' : 'leituras', String(st.scans), 'c-scans'),
-        counter(st.spots === 1 ? 'lugar marcado' : 'lugares marcados', String(st.spots), 'c-spots'),
+        counter(spotCount.label, spotCount.value, 'c-spots', spotCount.of),
         counter(st.devices === 1 ? 'roteador ouvido' : 'roteadores ouvidos', String(st.devices), 'c-aps'),
         counter('de caminhada', fmtTimer(st.durationS), 'c-time'),
       ),
@@ -944,10 +957,6 @@ export async function mountSurvey(root, env) {
   const timer = setInterval(tick, TICK_MS);
   offs.push(() => clearInterval(timer));
 
-  if (resumed && preview.lastScans === 0 && rec.stats().scans >= PREVIEW_MIN_SCANS) {
-    radarText.textContent = 'Refazendo a prévia…';
-    radarSub.textContent = `${plural(rec.stats().scans, 'leitura guardada', 'leituras guardadas')} do rascunho.`;
-  }
   draw();
   void maybePreview();
   if (wantPilot) void startPilot();

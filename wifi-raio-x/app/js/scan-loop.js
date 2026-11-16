@@ -1,7 +1,7 @@
 // Ritmo das buscas de redes.
 //
 // O Android deixa um app buscar só 4 vezes a cada 2 minutos (a menos que o usuário desligue a
-// "Limitação da busca por Wi-Fi" nas opções do desenvolvedor). O laço se adapta:
+// "Limitar busca por Wi-Fi" nas opções do desenvolvedor). O laço se adapta:
 //   - sem limite:  uma busca a cada ~10 s (ou o intervalo escolhido nos ajustes);
 //   - com limite:  uma a cada 30 s — o ritmo que o Android aceita sempre, em vez de 4 buscas
 //                  seguidas e depois um minuto e meio no escuro (a cada 4 buscas, 1 s a mais de

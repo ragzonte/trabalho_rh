@@ -181,7 +181,10 @@ function gather(input) {
     status: isObj(input.status) ? input.status : null,
     clone: isObj(input.clone) ? input.clone : null,
     name,
-    // O sinal da conexão é lido a cada segundo; o da varredura pode ter meio minuto
+    // O sinal de `connection` vale mais que o da varredura (que pode ter meio minuto) DESDE QUE quem
+    // chama entregue a conexão com a leitura de cada segundo aplicada (liveConnection, em
+    // ui/networks-logic.js): o `rssi` que o Android manda junto da conexão fica parado no valor de
+    // quando ela foi informada, e a pessoa anda.
     rssi: liveRssi ?? (cur ? rssiOf(cur) : null),
     band: cur ? cur.band : conn ? bandOf(conn.frequency) : null,
     /** Contexto de scoreAp, montado só se alguma regra precisar. */
@@ -386,9 +389,14 @@ function channelProblems(f) {
     const inUse = f.cur !== null && f.cur.band === ap.band;
 
     if (ap.band === '2.4' && ap.channel <= 13 && !STANDARD_24.has(ap.channel)) {
+      const hit = rec.current.overlapping > 0 ? ` (${plural(rec.current.overlapping, 'rede', 'redes')} agora)` : '';
+      // 12 e 13 ficam acima do último canal padrão: só encostam no 11 (não há "dois lados")
       const why =
-        `Em 2,4 GHz só os canais 1, 6 e 11 não se sobrepõem. No canal ${ap.channel}, seu roteador atrapalha quem usa os canais dos dois lados ` +
-        `e é atrapalhado por eles${rec.current.overlapping > 0 ? ` (${plural(rec.current.overlapping, 'rede', 'redes')} agora)` : ''}.`;
+        ap.channel > 11
+          ? `Em 2,4 GHz só os canais 1, 6 e 11 não se sobrepõem. No canal ${ap.channel}, acima deles, seu roteador ainda invade o canal 11 ` +
+            `e é atrapalhado por quem está lá${hit}; alguns aparelhos importados nem enxergam esse canal.`
+          : `Em 2,4 GHz só os canais 1, 6 e 11 não se sobrepõem. No canal ${ap.channel}, seu roteador atrapalha quem usa os canais dos dois lados ` +
+            `e é atrapalhado por eles${hit}.`;
       if (rec.verdict === 'change') {
         out.push({
           id: 'nonstandard-channel',

@@ -385,7 +385,7 @@ test('ponto a ponto: com o Android limitando as buscas, o passo inicial explica 
     await shot(page, 'mapa-antes-de-comecar-limitado');
     // a ajuda do limite é a mesma do resto do app
     await page.locator('.map-start .banner .btn').click();
-    await page.waitForSelector('text=Limitação da busca por Wi-Fi');
+    await page.waitForSelector('text=Limitar busca por Wi-Fi');
     await back(page);
     await page.waitForSelector('.map-start');
     assert.match(await text(page, '.sheet__footer .btn--primary'), /ponto a ponto/);

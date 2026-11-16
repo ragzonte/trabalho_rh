@@ -14,7 +14,7 @@ import { h, patch, sheet, toast, fmtNum, fmtMs, fmtAgo, fmtPct, plural } from '.
 import { icon, makeIcon } from '../icons.js';
 import { button, banner, badge, emptyState, kvList, meter, sectionHeader, skeletonList, spinner, ssidLabel } from '../components.js';
 import { loadOui, isLocallyAdministered } from '../../core/oui.js';
-import { guessDeviceType, deviceName, sortDevices, mergeDevice, summarizeDevices } from './net-logic.js';
+import { guessDeviceType, deviceName, sortDevices, mergeDevice, summarizeDevices, MAC_HIDDEN_SINCE_ANDROID } from './net-logic.js';
 
 /** Lista mais velha que isto é refeita ao abrir a tela. */
 const FRESH_MS = 60_000;
@@ -475,7 +475,7 @@ export async function mount(root, ctx) {
           'div.tb-fact',
           null,
           h('span.tb-fact__icon', null, icon('eye-off', { size: 20 })),
-          h('p', null, h('strong', null, 'Por que alguns aparecem só com o endereço? '), 'O Android (do 10 em diante) esconde dos apps o endereço físico dos outros aparelhos, o MAC, que é o que revela o fabricante. O nome só aparece quando o próprio aparelho ou o roteador informa.'),
+          h('p', null, h('strong', null, 'Por que alguns aparecem só com o endereço? '), `O Android (do ${MAC_HIDDEN_SINCE_ANDROID} em diante) esconde dos apps o endereço físico dos outros aparelhos, o MAC, que é o que revela o fabricante. O nome só aparece quando o próprio aparelho ou o roteador informa.`),
         ),
         h(
           'div.tb-fact',

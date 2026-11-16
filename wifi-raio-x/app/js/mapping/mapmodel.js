@@ -2090,7 +2090,7 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     if (P >= 8 && P < 25) notes.push('Poucas leituras: ande por mais cômodos.');
     else if (P >= 25 && P < 50) notes.push('O mapa melhora com mais leituras: ande mais devagar e passe por todos os cômodos.');
     if (usable && often > 2 && strong < 3) notes.push('Só um roteador chega forte aqui: as posições ficam menos precisas.');
-    if (cadence > 10) notes.push('Leituras lentas (o Android limita a uma a cada 30 s): marque mais lugares ou desligue o limite nas opções do desenvolvedor.');
+    if (cadence > 10) notes.push('Leituras lentas (o Android limita a uma a cada 30 s): marque mais lugares ou, se o seu Android deixar (do 10 em diante), desligue o limite nas opções do desenvolvedor.');
     // Tamanho. Na bancada (184 levantamentos) a nuvem de pontos sai em média 11% menor que a casa;
     // com confiança de escala de 0,5 ou mais, metade dos mapas erra o tamanho em mais de 10% e um em
     // cada cinco em mais de 21%; abaixo de 0,5, em mais de 19% e de 29%. O pior caso visto: 40%.

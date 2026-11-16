@@ -84,6 +84,39 @@ if (typeof globalThis.structuredClone !== 'function') {
   globalThis.structuredClone = (value) => clone(value, new Map());
 }
 
+// --- Coleta de lixo observável (Chrome 84) ---------------------------------------
+// O three.js (WebGLRenderer) usa WeakRef e FinalizationRegistry para soltar recursos de vídeo de
+// objetos que o coletor de lixo levou. No WebView 80 a 83 eles não existem e o mapa 3D nem abria
+// ("FinalizationRegistry is not defined", visto num Android 11 de fábrica): caía sempre na planta 2D.
+// As versões abaixo são válidas pela própria regra da linguagem (o coletor nunca é obrigado a agir):
+// a referência "fraca" segura o objeto e o aviso de coleta nunca chega. O custo é memória que só é
+// devolvida quando o visualizador descarta os recursos por conta própria, o que ele já faz ao fechar.
+if (typeof globalThis.WeakRef !== 'function') {
+  globalThis.WeakRef = class {
+    constructor(target) {
+      if (target === null || (typeof target !== 'object' && typeof target !== 'function')) throw new TypeError('WeakRef: o alvo precisa ser um objeto');
+      this.target = target;
+    }
+
+    deref() {
+      return this.target;
+    }
+  };
+}
+if (typeof globalThis.FinalizationRegistry !== 'function') {
+  globalThis.FinalizationRegistry = class {
+    constructor(callback) {
+      if (typeof callback !== 'function') throw new TypeError('FinalizationRegistry: falta a função de limpeza');
+    }
+
+    register() {}
+
+    unregister() {
+      return false;
+    }
+  };
+}
+
 // --- Navegador (não existe dentro do Worker nem no Node) -------------------------
 if (typeof Element !== 'undefined') {
   function replaceChildren(...nodes) {

@@ -479,11 +479,12 @@ test('5 GHz: largura do canal com o conselho, ranking por blocos, DFS explicado'
     await settle(page);
     assert.equal(await page.getAttribute('.ch-widthopt[data-width="20"]', 'aria-checked'), 'true');
 
-    // 160 MHz
-    await page.click('.ch-widthopt[data-width="160"]');
-    await settle(page);
-    assert.match(await page.textContent('.ch-rank__head'), /Ranking dos canais de 160.MHz/);
-    assert.ok((await page.locator('.ch-rank__row').count()) >= 2);
+    // 160 MHz: o roteador do usuário (80 MHz) não anuncia essa largura; o seletor não deixa escolher e diz por quê
+    // (o ranking de 160 MHz, sem roteador conhecido, está em review-ux.e2e.mjs)
+    assert.equal(await page.getAttribute('.ch-widthopt[data-width="160"]', 'aria-disabled'), 'true');
+    await page.click('.ch-widthopt[data-width="160"]', { force: true });
+    await page.locator('.toast', { hasText: 'não anuncia suporte a 160' }).waitFor();
+    assert.equal(await page.getAttribute('.ch-widthopt[data-width="20"]', 'aria-checked'), 'true');
     await page.click('.ch-widthopt[data-width="80"]');
   });
 });

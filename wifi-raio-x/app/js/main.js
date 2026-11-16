@@ -55,7 +55,7 @@ import { createPrefs } from './prefs.js';
 import { createStore } from './store.js';
 import { createScanLoop } from './scan-loop.js';
 import { loadOui } from './core/oui.js';
-import { h, mount as render, sheet, toast, closeTopOverlay, cssVar, fmtAgo } from './ui/dom.js';
+import { h, nb, mount as render, sheet, toast, closeTopOverlay, cssVar, fmtAgo } from './ui/dom.js';
 import { icon } from './ui/icons.js';
 import { button, iconButton, emptyState, errorState, skeletonList, openThrottleHelp } from './ui/components.js';
 import { createGates } from './ui/gates.js';
@@ -233,14 +233,48 @@ function buildShell() {
     'nav.bottomnav',
     { 'aria-label': 'Seções do app' },
     TABS.map((tab) => {
-      const a = h('a.bottomnav__item', { href: `#/${tab.id}`, dataset: { tab: tab.id } }, h('span.bottomnav__icon', null, icon(tab.icon)), h('span', null, tab.title));
+      const a = h('a.bottomnav__item', { href: `#/${tab.id}`, dataset: { tab: tab.id } }, h('span.bottomnav__icon', null, icon(tab.icon)), h('span.bottomnav__label', null, nb(tab.title)));
       links.set(tab.id, a);
       return a;
     }),
   );
 
   render(appEl, topbar, view, nav);
+  watchNavFit(nav);
   ui = { topbar, title, status, back, pill, custom, scanBtn, scanDot, settingsBtn, view, nav, links };
+}
+
+/**
+ * Com a letra do sistema ampliada (o "tamanho da fonte" do Android vale para a página inteira) os
+ * cinco rótulos podem não caber lado a lado, mesmo com os de duas palavras quebrando em duas
+ * linhas. Quando não cabem, a navegação fica compacta (data-compact; veja css/app.css): só a aba
+ * atual mostra o rótulo, e as outras continuam com nome para o leitor de tela.
+ * A conta é refeita quando a barra ou um rótulo muda de tamanho (girar a tela, trocar a fonte com
+ * o app aberto, trocar de aba no modo compacto).
+ */
+function watchNavFit(nav) {
+  if (typeof ResizeObserver !== 'function') return;
+  let queued = false;
+  const check = () => {
+    queued = false;
+    // mede com todos os rótulos à vista; só então decide
+    nav.removeAttribute('data-compact');
+    const box = nav.getBoundingClientRect();
+    let fits = true;
+    for (const item of nav.children) {
+      const r = item.getBoundingClientRect();
+      if (r.left < box.left - 0.5 || r.right > box.right + 0.5 || item.scrollWidth > item.clientWidth + 1) fits = false;
+    }
+    if (!fits) nav.setAttribute('data-compact', '');
+  };
+  // fora da entrega do ResizeObserver (um quadro depois): mexer no tamanho dentro dela gera aviso de laço
+  const observer = new ResizeObserver(() => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(check);
+  });
+  observer.observe(nav);
+  for (const item of nav.children) observer.observe(item.lastElementChild);
 }
 
 function updateChrome(route) {

@@ -581,7 +581,8 @@
   opacity: 0.5;
 }
 
-.ch-width__now {
+.ch-width__now,
+.ch-width__whatif {
   font-size: var(--fs-xs);
   line-height: 17px;
   color: var(--muted);

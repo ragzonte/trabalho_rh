@@ -261,7 +261,7 @@ export function finishBlocker(stats, limits = {}) {
   if (needUseful === 0 || needSpots === 0) return 'Para concluir, ande por mais cômodos: até aqui o sinal quase não mudou.';
   const lugares = needSpots === 1 ? 'falta 1 lugar marcado' : `faltam ${needSpots} lugares marcados`;
   // (uma casa de 4 a 6 cômodos não chega ao mínimo com um lugar por cômodo: a frase diz que vale repetir)
-  if (st.throttled) return `Para concluir, ${lugares} (uma leitura em cada). Vale mais de um lugar no mesmo cômodo, em cantos diferentes.`;
+  if (st.throttled) return `Para concluir, ${lugares} (uma leitura em cada; vale mais de um por cômodo).`;
   const leituras = needUseful === 1 ? 'falta 1 leitura' : `faltam ${needUseful} leituras`;
   return `Para concluir, ${leituras} andando pela casa (ou ${needSpots === 1 ? '1 lugar marcado' : `${needSpots} lugares marcados`}).`;
 }
@@ -293,7 +293,7 @@ const spotLimits = (limits = {}) => {
 export function surveyTimeText(throttled, limits = {}) {
   if (!throttled) return 'Leva de 3 a 10 minutos, conforme o tamanho da casa.';
   const l = spotLimits(limits);
-  return `Leva de ${l.minMinutes} a ${l.goodMinutes} minutos: uma leitura a cada ${THROTTLED_GAP_S} segundos, em pelo menos ${l.minSpots} lugares.`;
+  return `Leva de ${l.minMinutes} a ${l.goodMinutes} minutos: são pelo menos ${l.minSpots} lugares marcados.`;
 }
 
 /**
@@ -313,8 +313,8 @@ export function surveyTips({ throttled = false, during = false } = {}, limits = 
         icon: 'pin',
         title: `Marque pelo menos ${l.minSpots} lugares`,
         text: during
-          ? `Marque ${SPOTS_PER_ROOM}: são os lugares marcados que desenham a área do mapa.`
-          : `Marque ${SPOTS_PER_ROOM}, e dê o nome do cômodo. Leva uns ${l.minMinutes} minutos; quanto mais lugares, melhor o mapa.`,
+          ? `São ${SPOTS_PER_ROOM}. Os lugares marcados é que desenham a área do mapa.`
+          : `São ${SPOTS_PER_ROOM}; dê a cada um o nome do cômodo. Leva uns ${l.minMinutes} minutos, e quanto mais lugares, melhor o mapa.`,
       },
       {
         icon: 'clock',
@@ -350,9 +350,8 @@ export function surveyTips({ throttled = false, during = false } = {}, limits = 
  */
 export function pointByPointNote({ during = false, canLift = true } = {}) {
   const why = `O Android está limitando as buscas: chega uma leitura a cada ${THROTTLED_GAP_S} segundos, mais ou menos.`;
-  const how = during
-    ? `Marque um lugar de cada vez (${SPOTS_PER_ROOM}) e fique parado até a leitura chegar.`
-    : `Em vez de andar sem parar, você marca um lugar de cada vez (${SPOTS_PER_ROOM}) e espera parado a leitura chegar.`;
+  // (quantos lugares e como espalhá-los está na primeira dica, logo abaixo do aviso)
+  const how = during ? 'Marque um lugar de cada vez e fique parado até a leitura chegar.' : 'Em vez de andar sem parar, você marca um lugar de cada vez e espera parado a leitura chegar.';
   const lift = canLift ? (during ? '' : ' Dá para liberar buscas rápidas nas opções do desenvolvedor.') : ' Nesta versão do Android não dá para desligar esse limite.';
   return { title: during ? 'Mapeamento ponto a ponto' : 'O mapa será feito ponto a ponto', text: `${why} ${how}${lift}` };
 }

@@ -846,7 +846,7 @@ test('com o limite do Android: dica dispensável com o caminho para liberar', T,
     await shot(page, 'redes-limitado');
     await tip.getByRole('button', { name: 'Como liberar' }).click();
     await page.locator('.sheet').waitFor();
-    assert.match(await page.textContent('.sheet__body'), /Limitação da busca por Wi-Fi/);
+    assert.match(await page.textContent('.sheet__body'), /Limitar busca por Wi-Fi/);
     await back(page);
     await page.locator('.sheet').waitFor({ state: 'detached' });
     await tip.getByRole('button', { name: 'Dispensar' }).click();

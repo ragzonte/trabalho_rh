@@ -923,6 +923,23 @@
   color: var(--muted);
 }
 
+/* "5 de 12": o que falta para liberar "Concluir" no mapeamento ponto a ponto */
+.msv-count__top {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.msv-count__of {
+  font-size: var(--fs-xs);
+  line-height: 24px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: pre;
+}
+
 /* Andar */
 .msv-floor {
   display: flex;

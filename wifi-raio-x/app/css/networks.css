@@ -135,7 +135,7 @@
 .net-conn__stats {
   display: grid;
   /* a distância é curta ("≈ 6 m"): a velocidade fica com o resto da largura */
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto);
   border-top: 1px solid var(--line);
 }
 
@@ -159,6 +159,9 @@
 
 .net-conn__stat-value {
   display: flex;
+  /* com a letra do sistema ampliada "↓ 287 ↑ 287 Mb/s" não cabe numa linha: quebra entre os
+     pedaços em vez de invadir a célula ao lado */
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 0 5px;
   font-size: var(--fs-md);
@@ -168,13 +171,18 @@
   white-space: nowrap;
 }
 
-.net-conn__arrow {
-  color: var(--muted);
-  font-weight: 500;
+.net-conn__rate {
+  white-space: nowrap;
 }
 
-.net-conn__arrow:not(:first-child) {
+.net-conn__rate + .net-conn__rate {
   margin-left: 4px;
+}
+
+.net-conn__arrow {
+  margin-right: 5px;
+  color: var(--muted);
+  font-weight: 500;
 }
 
 /* o aviso mais importante do diagnóstico: uma linha que leva a "Melhor Wi-Fi" */

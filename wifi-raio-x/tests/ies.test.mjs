@@ -1215,6 +1215,7 @@ test('resumo de um beacon Wi-Fi 6 de 5 GHz montado só com vetores escritos à m
     gen: 6,
     nss: 4, //  do HE (a geração mais nova que informou)
     maxMcs: 11,
+    maxWidthMHz: 160, // HE com o bit de 160 MHz
     stations: 7,
     utilization: 128 / 255,
     roaming: { k: true, v: true, r: true },
@@ -1260,10 +1261,18 @@ test('resumo: geração pela presença de HT/VHT/HE/EHT e campos vazios', () => 
   assert.equal(ht.nss, 2);
   assert.equal(ht.maxMcs, 7);
 
+  // maior largura anunciada: VHT obriga 80 MHz; 160 e 320 têm bit próprio
+  assert.equal(vht.maxWidthMHz, 80);
+  assert.equal(summarizeIes(parseIes([ie(45, HT_CAP_2SS), ie(191, VHT_CAP_4SS_160)])).maxWidthMHz, 160);
+  assert.equal(summarizeIes(parseIes([ie(255, HE_CAP_24, 35), ie(255, EHT_CAP_320, 108)])).maxWidthMHz, 320);
+  assert.ok([20, 40].includes(ht.maxWidthMHz));
+  assert.equal(summarizeIes(one(61, HT_OP_36_ABOVE)).maxWidthMHz, null, 'só o elemento de operação não diz o que o AP sabe fazer');
+
   assert.deepEqual(summarizeIes(parseIes([])), {
     gen: null,
     nss: null,
     maxMcs: null,
+    maxWidthMHz: null,
     stations: null,
     utilization: null,
     roaming: { k: false, v: false, r: false },

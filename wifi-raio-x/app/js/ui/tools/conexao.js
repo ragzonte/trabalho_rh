@@ -19,6 +19,7 @@ import { signalLevel, qualityPct, indoorDistance } from '../../core/signal.js';
 import { standardInfo, usableMbps } from '../../core/phy.js';
 import { securityTypeLabel } from '../../core/security.js';
 import { bandOf, freqToChannel } from '../../core/channels.js';
+import { liveConnection } from '../networks-logic.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 const isText = (x) => typeof x === 'string' && x.trim() !== '';
@@ -370,15 +371,8 @@ export async function mount(root, ctx) {
     if (!conn || conn.connected !== true) return null;
     if (polled && polled.connected === false) return null;
     if (polled && polled.connected && lower(polled.bssid) === lower(conn.bssid)) conn = { ...conn, ...polled };
-    const s = state.rssi;
-    if (s && isNum(s.rssi) && (!s.bssid || !conn.bssid || lower(s.bssid) === lower(conn.bssid))) {
-      conn = { ...conn, rssi: s.rssi };
-      if (isNum(s.linkSpeed)) conn.linkSpeed = s.linkSpeed;
-      if (isNum(s.txSpeed)) conn.txSpeed = s.txSpeed;
-      if (isNum(s.rxSpeed)) conn.rxSpeed = s.rxSpeed;
-      if (isNum(s.frequency) && s.frequency > 0) conn.frequency = s.frequency;
-    }
-    return conn;
+    // o sinal e as velocidades da leitura de cada segundo por cima (a mesma regra do diagnóstico e do exportar)
+    return liveConnection({ connection: conn, rssi: state.rssi });
   }
 
   async function openWifi() {

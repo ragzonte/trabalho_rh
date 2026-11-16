@@ -2,7 +2,7 @@
 
 import { h, patch, toast, confirmDialog, plural, THIN } from '../dom.js';
 import { icon } from '../icons.js';
-import { button, listRow, sectionHeader, segmented, select, switchRow, spinner, openThrottleHelp } from '../components.js';
+import { button, listRow, sectionHeader, segmented, select, switchRow, spinner, openThrottleHelp, throttleCopy } from '../components.js';
 
 const THEME_OPTIONS = [
   { value: 'system', label: 'Sistema', icon: 'contrast' },
@@ -108,7 +108,8 @@ export function mount(root, ctx) {
             ? 'O Android está limitando as buscas a 4 a cada 2 minutos; por isso, abaixo de 30 segundos o intervalo não tem efeito.'
             : 'No automático o app busca a cada 10 segundos, e passa para 30 quando o Android limita as buscas.',
         ),
-        button('Como liberar buscas mais rápidas', { variant: 'quiet', icon: 'bolt', small: true, onClick: () => openThrottleHelp(ctx), style: { marginLeft: '-12px' } }),
+        // (num Android sem a chave do limite o painel só explica: o botão não promete "liberar")
+        button(throttleCopy(store).canLift ? 'Como liberar buscas mais rápidas' : 'Por que o Android limita as buscas', { variant: 'quiet', icon: 'bolt', small: true, onClick: () => openThrottleHelp(ctx), style: { marginLeft: '-12px' } }),
       ),
 
       sectionHeader('Demonstração'),

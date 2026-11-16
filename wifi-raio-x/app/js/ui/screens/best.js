@@ -27,7 +27,7 @@
 
 import { h, s, mount as render, patch, sheet, toast, fmtDbm, fmtMbps, fmtAgo, fmtPct, plural, NO_VALUE } from '../dom.js';
 import { icon } from '../icons.js';
-import { badge, bandBadge, securityBadge, standardBadge, signalBars, ssidLabel, displaySsid, button, switchRow, sectionHeader, banner, tipBanner, emptyState, skeletonList, meter, openThrottleHelp } from '../components.js';
+import { badge, bandBadge, securityBadge, standardBadge, signalBars, ssidLabel, displaySsid, button, switchRow, sectionHeader, banner, tipBanner, emptyState, skeletonList, meter, openThrottleHelp, throttleCopy } from '../components.js';
 import { signalLevel } from '../../core/signal.js';
 import { rankNetworks, advise, speedScore, isInsecure, formatGain, INSECURE_FACTOR, WEAK_SECURITY_FACTOR, WPA3_BONUS, SPEED_GOOD_MBPS, SPEED_GOOD_SCORE, SPEED_TOP_MBPS } from '../../core/best-network.js';
 import { buildInsights } from '../../core/insights.js';
@@ -724,7 +724,8 @@ function insightActions(insight, on) {
     out.push(button(action.label, { variant: 'secondary', small: true, icon: ACTION_ICON[action.kind], dataset: { action: action.kind }, onClick: () => on.runAction(insight) }));
   }
   // o aviso do limite de buscas não traz atalho; o passo a passo ilustrado mora aqui
-  if (insight.id === 'scan-throttled') out.push(button('Como liberar', { variant: 'secondary', small: true, icon: 'help', dataset: { action: 'throttle-help' }, onClick: on.openThrottle }));
+  // (num Android sem a chave do limite o próprio texto diz que não há como desligar: sem botão)
+  if (insight.id === 'scan-throttled' && on.throttleAction) out.push(button(on.throttleAction, { variant: 'secondary', small: true, icon: 'help', dataset: { action: 'throttle-help' }, onClick: on.openThrottle }));
   return out;
 }
 
@@ -1189,7 +1190,16 @@ export async function mount(root, ctx) {
 
   const heroHandlers = { openRow, openWifi, scanNow, markMine, jumpToDiag: () => scrollTo(el.diag) };
   const rankHandlers = { openRow, openPicker, openHow, scanNow, setMineOnly, setExpanded };
-  const diagHandlers = { runAction, toggleNote, openThrottle: () => openThrottleHelp(ctx), hasRanking: () => !!data && data.ranking.length > 0 };
+  const diagHandlers = {
+    runAction,
+    toggleNote,
+    openThrottle: () => openThrottleHelp(ctx),
+    // "Como liberar", ou null quando esta versão do Android não deixa desligar o limite
+    get throttleAction() {
+      return throttleCopy(ctx.store).action;
+    },
+    hasRanking: () => !!data && data.ranking.length > 0,
+  };
 
   function drawHero() {
     const state = store.get();

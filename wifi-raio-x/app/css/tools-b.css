@@ -417,9 +417,11 @@
 }
 
 /* Segunda linha de uma lista feita de itens separados por "·", numa linha só: os itens ficam
-   inteiros e só o que vem de fora (nome de rede, fabricante) encolhe com reticências. */
+   inteiros e só o que vem de fora (nome de rede, fabricante) encolhe com reticências.
+   Com a letra do sistema ampliada pode não sobrar lugar para o último item (o tipo do aparelho
+   virava só "…"): quando restam menos de 5em na linha, ele desce para a de baixo. */
 .tb-sub {
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 0;
   white-space: nowrap;
 }
@@ -437,7 +439,7 @@
 .tb-sub > .ssid,
 .tb-sub > .tb-sub__flex {
   flex: 0 1 auto;
-  min-width: 0;
+  min-width: min(5em, 100%);
   overflow: hidden;
   text-overflow: ellipsis;
 }

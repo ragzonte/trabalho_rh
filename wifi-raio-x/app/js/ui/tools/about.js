@@ -4,6 +4,7 @@
 import { h, mount as render, sheet, fmtBand } from '../dom.js';
 import { icon } from '../icons.js';
 import { button, kvList, sectionHeader, spinner } from '../components.js';
+import { MAC_HIDDEN_SINCE_ANDROID } from './net-logic.js';
 
 const p = (...kids) => h('p', null, kids);
 const b = (text) => h('strong', null, text);
@@ -80,11 +81,11 @@ export function mount(root, ctx) {
       h(
         'ul.prose',
         null,
-        li(b('O Android limita as buscas. '), 'Cada app pode procurar redes 4 vezes a cada 2 minutos. Por isso a lista às vezes demora a atualizar; o app sempre mostra a idade dos dados. Dá para desligar o limite nas opções do desenvolvedor.'),
+        li(b('O Android limita as buscas. '), 'Cada app pode procurar redes 4 vezes a cada 2 minutos. Por isso a lista às vezes demora a atualizar; o app sempre mostra a idade dos dados. A partir do Android 10 dá para desligar o limite nas opções do desenvolvedor.'),
         li(b('Distância e velocidade são estimativas. '), 'São calculadas a partir da força do sinal; paredes, móveis e até pessoas mudam o resultado. Onde há estimativa, aparece “≈” ou “cerca de”.'),
         li(b('O app só enxerga Wi-Fi. '), 'Micro-ondas, babás eletrônicas e Bluetooth também atrapalham o sinal, mas não aparecem na lista.'),
         li(b('Nem todo celular informa tudo. '), 'Detalhes como a geração do Wi-Fi e a ocupação do canal dependem da versão do Android e do que cada roteador anuncia.'),
-        li(b('Aparelhos na rede: '), 'o Android 11 ou mais novo esconde o endereço físico (MAC) dos outros aparelhos, então nem sempre dá para dizer o fabricante.'),
+        li(b('Aparelhos na rede: '), `o Android ${MAC_HIDDEN_SINCE_ANDROID} ou mais novo esconde o endereço físico (MAC) dos outros aparelhos, então nem sempre dá para dizer o fabricante.`),
       ),
     ),
 

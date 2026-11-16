@@ -920,7 +920,12 @@ describe('recommendWidth', () => {
     const empty = recommendWidth([], '5');
     assert.equal(empty.widthMHz, 160);
     assert.deepEqual(empty.options.map((o) => o.widthMHz), [160, 80, 40, 20]);
-    assert.equal(empty.text, 'Use 160 MHz: o bloco do canal 36 está livre o bastante (nota 100 de 100). Esse bloco usa canais DFS.');
+    // (sem saber qual é o roteador, 160 MHz é uma possibilidade, não uma ordem; e o DFS vem com a consequência)
+    assert.equal(
+      empty.text,
+      'Há espaço para 160 MHz: o bloco do canal 36 está livre o bastante (nota 100 de 100). Só vale se o roteador e os aparelhos aceitarem essa largura. ' +
+        'Esse bloco usa canais DFS, divididos com radares: o roteador pode demorar a entrar no ar ou trocar de canal sozinho.',
+    );
     // todos os blocos de 160 MHz com 30% de ocupação medida no primário: nota 70 < 80, cai para 80 MHz
     const busy160 = [n5(36, -60, CW.W160, 50, { ies: load(f5(36), 3, 0.3) }), n5(100, -60, CW.W160, 114, { ies: load(f5(100), 3, 0.3) })];
     const r80 = recommendWidth(busy160, '5');

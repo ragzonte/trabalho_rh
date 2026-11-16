@@ -89,6 +89,11 @@ for (const band of ['2.4', '5', '6']) {
 
 const NOTE_OFF_STANDARD =
   'Fora do trio 1, 6 e 11: um roteador aqui atrapalha (e é atrapalhado por) dois canais padrão ao mesmo tempo';
+// 12, 13 (e 14) não ficam "entre" dois canais padrão: estão acima do último e só encostam no 11.
+// (Que alguns aparelhos importados não os enxergam já está na nota do próprio canal, em channels.js.)
+const NOTE_ABOVE_STANDARD = 'Fora do trio 1, 6 e 11, acima dele: um roteador aqui ainda invade o canal 11 (e é atrapalhado por quem está nele)';
+/** Último canal padrão de 2,4 GHz: acima dele não há "dois lados". */
+const LAST_STANDARD_24 = 11;
 const NOTE_40_IN_24 = 'Em 2,4 GHz, 40 MHz ocupam cerca de metade da faixa: só vale a pena sem vizinhos por perto';
 const NOTE_DFS_BLOCK =
   'Parte deste bloco usa canais DFS (divididos com radares): o roteador pode demorar a entrar no ar ou mudar de canal sozinho';
@@ -348,7 +353,7 @@ function notesFor(band, block, primary, result) {
     if (text && !notes.includes(text)) notes.push(text);
   };
   if (band === '2.4') {
-    if (!STANDARD_24.has(primary)) add(NOTE_OFF_STANDARD);
+    if (!STANDARD_24.has(primary)) add(primary > LAST_STANDARD_24 ? NOTE_ABOVE_STANDARD : NOTE_OFF_STANDARD);
     if (block.widthMHz >= 40) add(NOTE_40_IN_24);
   }
   add(CHANNEL_NOTE[band].get(primary));
@@ -655,18 +660,35 @@ export function recommendChannel(aps, options, more) {
   if (advantage < KEEP_MARGIN) {
     // Só chega aqui quem está fora do trio 1/6/11 sem ganhar nada com isso
     const text =
-      `Seu roteador está no canal ${current.channel}, que fica entre os canais padrão: ali ele atrapalha, ` +
-      `e é atrapalhado por, quem usa os canais dos dois lados. Prefira o canal ${best.channel}.`;
+      current.channel > LAST_STANDARD_24
+        ? `Seu roteador está no canal ${current.channel}, acima dos canais padrão: ali ele ainda invade o canal ${LAST_STANDARD_24} ` +
+          `e alguns aparelhos importados não o enxergam. Prefira o canal ${best.channel}.`
+        : `Seu roteador está no canal ${current.channel}, que fica entre os canais padrão: ali ele atrapalha, ` +
+          `e é atrapalhado por, quem usa os canais dos dois lados. Prefira o canal ${best.channel}.`;
     return { best, current, ranking: top, gain, verdict: 'change', text };
   }
   const better = gain >= 25 ? 'bem mais livre' : 'mais livre';
   return { best, current, ranking: top, gain, verdict: 'change', text: `${where} O ${channelName(best, true)} está ${better}.` };
 }
 
-/** Maior largura que um roteador da geração dada consegue usar na faixa. */
+/** A maior largura que o roteador anuncia saber usar (IeSummary.maxWidthMHz); null quando o celular não entrega os elementos. */
+function announcedWidth(own) {
+  return own && isObj(own.ie) && isNum(own.ie.maxWidthMHz) ? own.ie.maxWidthMHz : null;
+}
+
+/**
+ * Maior largura que o roteador consegue usar na faixa.
+ * Em 5 e 6 GHz vale o que ele anuncia no beacon (nunca menos do que já usa): a geração sozinha
+ * promete demais — a maioria dos roteadores Wi-Fi 5/6 de operadora só vai até 80 MHz. Sem os
+ * elementos do beacon (Android antigo), e em 2,4 GHz (onde 40 MHz quase nunca é recomendado e o
+ * bit de 40 MHz costuma só refletir a configuração), fica o teto da geração.
+ */
 function widthCap(band, own) {
   const top = band === '2.4' ? 40 : band === '5' ? 160 : 320;
-  if (!own || !isNum(own.gen)) return top;
+  if (!own) return top;
+  const announced = band === '2.4' ? null : announcedWidth(own);
+  if (announced !== null) return Math.min(top, Math.max(announced, isNum(own.widthMHz) ? own.widthMHz : 0, 20));
+  if (!isNum(own.gen)) return top;
   if (own.gen <= 4) return Math.min(top, 40);
   if (own.gen <= 6) return Math.min(top, 160);
   return top;
@@ -683,12 +705,14 @@ const BAND_NAME = { '2.4': '2,4 GHz', 5: '5 GHz', 6: '6 GHz' };
  * @param {import('./model.js').Ap[]} aps
  * @param {'2.4'|'5'|'6'} band
  * @param {{own?: import('./model.js').Ap|null, devices?: object[]}} [options]  own = o roteador do
- *        usuário nesta faixa: sai da conta da interferência e limita a largura ao que a geração
- *        dele alcança; devices = groupByDevice(aps) já calculado para esta mesma lista
+ *        usuário nesta faixa: sai da conta da interferência e limita a largura ao que ele anuncia
+ *        saber usar (sem os elementos do beacon, ao que a geração dele alcança); devices =
+ *        groupByDevice(aps) já calculado para esta mesma lista
  *        (também vale recommendWidth(aps, { band, own, devices }), como nas outras funções)
  * @returns {{widthMHz: number|null, text: string,
  *            options: {widthMHz:number, score:number, channel:number, dfs:boolean}[]}}
- *          `options` = o melhor bloco de cada largura, da maior para a menor
+ *          `options` = o melhor bloco de cada largura, da maior para a menor. O texto só manda
+ *          ("Use N MHz") manter ou estreitar a largura de hoje; mais largo vem como possibilidade.
  */
 export function recommendWidth(aps, band, options) {
   const o = withBand(band, options);
@@ -720,9 +744,22 @@ export function recommendWidth(aps, band, options) {
   if (b === '2.4') {
     return { widthMHz: 40, text: 'A faixa de 2,4 GHz está praticamente vazia aqui: dá para usar 40 MHz.', options: table };
   }
-  const dfs = pick.dfs ? ' Esse bloco usa canais DFS.' : '';
-  const text = `Use ${pick.widthMHz} MHz: o bloco do canal ${pick.channel} está livre o bastante (nota ${Math.round(pick.score)} de 100).${dfs}`;
-  return { widthMHz: pick.widthMHz, text, options: table };
+  // DFS com a consequência dita: não é só uma sigla
+  const dfs = pick.dfs ? ' Esse bloco usa canais DFS, divididos com radares: o roteador pode demorar a entrar no ar ou trocar de canal sozinho.' : '';
+  const block = `o bloco do canal ${pick.channel} está livre o bastante (nota ${Math.round(pick.score)} de 100)`;
+  // "Use N MHz" é uma ordem: só vale para manter ou estreitar a largura de hoje. Mais largo do que
+  // o roteador usa (ou, sem saber qual é o roteador, mais do que os 80 MHz que todo roteador de
+  // 5/6 GHz tem) é uma possibilidade, e depende de o roteador e os aparelhos aceitarem.
+  const usedNow = ownHere && isNum(ownHere.widthMHz) ? ownHere.widthMHz : DEFAULT_WIDTH[b];
+  if (pick.widthMHz > usedNow) {
+    const announced = announcedWidth(ownHere);
+    const condition =
+      announced !== null && announced >= pick.widthMHz
+        ? 'O seu roteador anuncia essa largura; para aproveitar, os aparelhos também precisam aceitar.'
+        : 'Só vale se o roteador e os aparelhos aceitarem essa largura.';
+    return { widthMHz: pick.widthMHz, text: `Há espaço para ${pick.widthMHz} MHz: ${block}. ${condition}${dfs}`, options: table };
+  }
+  return { widthMHz: pick.widthMHz, text: `Use ${pick.widthMHz} MHz: ${block}.${dfs}`, options: table };
 }
 
 // ---------------------------------------------------------------------------
