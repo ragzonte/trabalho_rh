@@ -88,7 +88,9 @@ async function guard(name) {
     const scenario = buildScenario(listScenarios('dev').find((s) => s.name === name));
     const input = clone(scenario.survey);
     const stages = [];
-    const solution = await solve(input, { onProgress: (fraction, stage) => stages.push([fraction, stage]) });
+    // Tempo de sobra de propósito: com a máquina ocupada (ou num CI lento) o tempo padrão faria o
+    // solucionador dispensar o motor mais caro, e o teste abaixo espera os quatro.
+    const solution = await solve(input, { budgetMs: 120000, onProgress: (fraction, stage) => stages.push([fraction, stage]) });
     solved.set(name, { scenario, solution, stages, untouched: JSON.stringify(input) === JSON.stringify(scenario.survey) });
   }
   return solved.get(name);

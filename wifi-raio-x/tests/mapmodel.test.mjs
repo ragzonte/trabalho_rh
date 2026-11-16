@@ -1258,7 +1258,8 @@ test('buildMap: o custo cresce em linha com o número de BSSIDs diferentes, não
     const [survey, solution] = flood(scans, per);
     let best = Infinity;
     let model = null;
-    for (let round = 0; round < 2; round++) {
+    // o melhor de quatro: numa máquina ocupada uma medida só engana
+    for (let round = 0; round < 4; round++) {
       const t0 = performance.now();
       model = build(survey, solution, { own: [] });
       best = Math.min(best, performance.now() - t0);
