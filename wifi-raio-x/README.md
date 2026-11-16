@@ -131,6 +131,7 @@ Sem etapa de build na interface: são arquivos estáticos.
 ```bash
 cd wifi-raio-x
 npm start                    # http://localhost:8090  (abre no modo demonstração)
+npm install                  # só para os testes (analisador usado na conferência de compatibilidade)
 npm test                     # testes de unidade (Node 22+)
 npm run test:e2e             # testes ponta a ponta no Chromium (precisa do Playwright)
 ```
@@ -173,8 +174,25 @@ tools/               servidor de desenvolvimento e geradores (ícones, OUI, thre
 
 - O Android não deixa apps comuns trocar o canal do roteador nem conectar em redes por você:
   o app recomenda, quem muda é você.
-- Android 11 ou mais novo esconde o endereço MAC dos aparelhos da rede local: na lista de
-  dispositivos, alguns aparecem só com o IP.
+- Android 10 ou mais novo esconde o endereço MAC dos aparelhos da rede local: na lista de
+  dispositivos, eles aparecem só com o IP (e o nome, quando a rede informa).
 - Velocidades e distâncias são **estimativas** calculadas a partir do sinal.
 - Medição de distância real por Wi-Fi (RTT) só funciona quando o celular e o roteador
   suportam 802.11mc.
+
+## O que foi testado (e o que não foi)
+
+- **Interface e análise**: cerca de 1.500 testes de unidade e 240 testes ponta a ponta no
+  Chromium, contra a casa virtual (incluindo nomes de rede maliciosos, listas enormes,
+  permissões negadas, limite de varreduras do Android e armazenamento indisponível).
+- **Lado Android**: mais de 2.000 testes Robolectric, que rodam o código nativo contra as
+  classes de verdade do Android 7 ao 14, e o lint sem erros.
+- **Num Android de verdade**: o APK (inclusive o de lançamento) foi exercitado de ponta a ponta
+  num emulador Android 11 com um WebView antigo (83): permissões, varredura, conexão, ping,
+  aparelhos na rede, exportar, rotação, modo escuro, volta do segundo plano, morte do processo
+  e o mapa 3D na demonstração. Foi assim que apareceram (e foram corrigidos) dez defeitos que
+  só existem no aparelho.
+- **Não testado**: nenhum celular físico; Android 12 a 15 só pelos testes Robolectric (o
+  emulador disponível não roda o WebView dessas versões); o teste de velocidade contra a
+  internet de verdade (roda só no GitHub Actions); redes de 5/6 GHz, RTT e um mapa de uma casa
+  real. Os números do mapa 3D vêm todos de casas simuladas.

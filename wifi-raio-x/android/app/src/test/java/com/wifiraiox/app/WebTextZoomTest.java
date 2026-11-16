@@ -29,7 +29,10 @@ public class WebTextZoomTest extends AllSdks {
         assertEquals(100, WebTextZoom.percentFor(scale(1f)));
         assertEquals(130, WebTextZoom.percentFor(scale(1.3f)));
         assertEquals(85, WebTextZoom.percentFor(scale(0.85f)));
-        assertEquals(200, WebTextZoom.percentFor(scale(2f)));
+        assertEquals(115, WebTextZoom.percentFor(scale(1.15f)));
+        // acima do teto conferido (130%), fica no teto
+        assertEquals(130, WebTextZoom.percentFor(scale(1.5f)));
+        assertEquals(130, WebTextZoom.percentFor(scale(2f)));
     }
 
     @Test

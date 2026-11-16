@@ -155,10 +155,16 @@ function boxFactory(rng) {
 
   // Base do MAC de um aparelho: os rádios dele só mudam os últimos dígitos.
   function macBase(vendor) {
-    for (;;) {
+    for (let tries = 0; ; tries++) {
       const oui = rng.pick(OUI[vendor]);
-      const mid = `${rng.hex(2)}:${rng.hex(2)}`.toLowerCase();
+      let mid = `${rng.hex(2)}:${rng.hex(2)}`.toLowerCase();
       const last = rng.int(0, 15) * 16; // termina em x0: sobra espaço para os outros rádios
+      if (tries >= 200) {
+        // Sorteio que não sai do lugar (já visto num WebView com aritmética defeituosa): em vez de
+        // girar para sempre e travar a demonstração, o meio do endereço passa a ser um contador.
+        const n = usedMac.size + tries;
+        mid = `${((n >> 8) & 255).toString(16).padStart(2, '0')}:${(n & 255).toString(16).padStart(2, '0')}`;
+      }
       const key = `${oui}:${mid}:${last}`;
       if (usedMac.has(key)) continue;
       usedMac.add(key);

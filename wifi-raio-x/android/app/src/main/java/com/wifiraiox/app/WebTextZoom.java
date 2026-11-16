@@ -14,13 +14,18 @@ import android.webkit.WebSettings;
  */
 final class WebTextZoom {
 
-    /** Fora desta faixa o valor do sistema é tratado como defeito (o Android vai de 0,85 a 2,0). */
+    /** Abaixo disto o valor do sistema é tratado como defeito (o Android vai de 0,85 a 2,0). */
     static final int MIN_PERCENT = 50;
-    static final int MAX_PERCENT = 200;
+    /**
+     * Teto de 130%: é até onde as telas foram conferidas sem texto cortado ou sobreposto (no aparelho
+     * e nos testes da interface). Acima disso, com a fonte do sistema em 150% ou 200%, só a navegação
+     * se ajusta e o conteúdo quebra; melhor crescer até 130% do que ficar ilegível.
+     */
+    static final int MAX_PERCENT = 130;
 
     private WebTextZoom() {}
 
-    /** 1,0 -> 100; 1,3 -> 130. Valores ausentes ou absurdos viram 100. */
+    /** 1,0 -> 100; 1,3 -> 130; 2,0 -> 130 (o teto). Valores ausentes ou absurdos viram 100. */
     static int percentFor(Configuration config) {
         float scale = config == null ? 1f : config.fontScale;
         if (Float.isNaN(scale) || scale <= 0f) return 100;

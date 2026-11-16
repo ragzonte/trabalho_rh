@@ -300,6 +300,13 @@ test('lista com centenas de redes falsas: desenha uma janela com "mostrar mais" 
     const seq = await page.evaluate(() => window.__wrx.app.store.get().scan.seq);
     await page.evaluate(() => window.__wrx.app.scanLoop.scanNow());
     await page.waitForFunction((n) => window.__wrx.app.store.get().scan.seq > n && window.__wrx.app.store.get().aps.length > 500, seq);
+    // A partir daqui a lista fica parada: outra varredura no meio das conferências (o laço pede uma a
+    // cada ~10 s) trocaria as 500 falsas por outras 500 e as contas abaixo comparariam listas diferentes.
+    await page.evaluate(() => {
+      const { store } = window.__wrx.app;
+      window.__flood = store.ingestScan;
+      store.ingestScan = function () {};
+    });
     await settle(page);
 
     // a lista inteira continua valendo para a contagem, o filtro e a busca...
@@ -357,6 +364,9 @@ test('lista com centenas de redes falsas: desenha uma janela com "mostrar mais" 
     assert.match(await page.textContent('.net-more'), /Mostrando 1\d\d de/);
 
     // a busca seguinte troca as 500 falsas por outras 500: a tela continua do mesmo tamanho
+    await page.evaluate(() => {
+      window.__wrx.app.store.ingestScan = window.__flood; // a lista volta a receber varreduras
+    });
     const seq2 = await page.evaluate(() => window.__wrx.app.store.get().scan.seq);
     await page.evaluate(() => window.__wrx.app.scanLoop.scanNow());
     await page.waitForFunction((n) => window.__wrx.app.store.get().scan.seq > n, seq2, { timeout: 30_000 });
@@ -548,10 +558,21 @@ test('BSSID do roteador clonado e rede aberta com o nome da minha: o app não fa
       const c = window.__wrx.app.store.get().connection;
       return { ssid: c.ssid, bssid: c.bssid };
     });
+    // Espera uma lista NOVA de verdade. Um pedido pode ser recusado ("ocupado") e o que chega em
+    // seguida ser a lista guardada, com as mesmas leituras de antes: o rastreador ignora leitura
+    // repetida, e o teste concluiria coisas sobre uma varredura que não aconteceu.
     const scanOnce = async () => {
-      const seq = await page.evaluate(() => window.__wrx.app.store.get().scan.seq);
-      await page.evaluate(() => window.__wrx.app.scanLoop.scanNow());
-      await page.waitForFunction((n) => window.__wrx.app.store.get().scan.seq > n, seq, { timeout: 30_000 });
+      const before = await page.evaluate(() => window.__wrx.app.store.get().scan.freshAt || 0);
+      await page.waitForFunction(
+        (t0) => {
+          const { store, scanLoop } = window.__wrx.app;
+          if ((store.get().scan.freshAt || 0) > t0) return true;
+          Promise.resolve(scanLoop.scanNow()).catch(() => {});
+          return false;
+        },
+        before,
+        { timeout: 30_000, polling: 500 },
+      );
       await settle(page);
     };
 
@@ -565,6 +586,19 @@ test('BSSID do roteador clonado e rede aberta com o nome da minha: o app não fa
       };
     }, conn.bssid);
     await scanOnce();
+    // O simulador perde um ou outro beacon, como um celular: se o roteador não foi ouvido nesta
+    // varredura, o rastreador mantém a leitura anterior. Insiste até o estado esperado aparecer.
+    await page.waitForFunction(
+      () => {
+        const { store, scanLoop } = window.__wrx.app;
+        if (store.get().clone) return true;
+        Promise.resolve(scanLoop.scanNow()).catch(() => {});
+        return false;
+      },
+      null,
+      { timeout: 40_000, polling: 700 },
+    );
+    await settle(page);
     let state = await page.evaluate(() => {
       const { store } = window.__wrx.app;
       return { connected: store.connectedAp() && store.connectedAp().ssid, names: store.get().aps.map((a) => a.ssid), clone: store.get().clone };
@@ -595,6 +629,17 @@ test('BSSID do roteador clonado e rede aberta com o nome da minha: o app não fa
     }, conn.ssid);
     await goto(page, '/redes');
     await scanOnce();
+    await page.waitForFunction(
+      () => {
+        const { store, scanLoop } = window.__wrx.app;
+        if (!store.get().clone && store.apById('02:13:37:00:00:01')) return true;
+        Promise.resolve(scanLoop.scanNow()).catch(() => {});
+        return false;
+      },
+      null,
+      { timeout: 40_000, polling: 700 },
+    );
+    await settle(page);
     state = await page.evaluate(() => {
       const { store } = window.__wrx.app;
       const twin = store.apById('02:13:37:00:00:01');
