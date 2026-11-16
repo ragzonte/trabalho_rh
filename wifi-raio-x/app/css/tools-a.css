@@ -760,6 +760,8 @@
 .exp-preview__name {
   flex: 1;
   min-width: 0;
+  /* (.mono encolhe a letra para 0,94em: aqui já é o menor tamanho do app, não pode cair abaixo de 12 px) */
+  font-size: var(--fs-xs);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

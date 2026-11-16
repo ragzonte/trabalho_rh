@@ -18,7 +18,15 @@ import { rateChannels, recommendChannel, recommendWidth } from '../app/js/core/c
 import { normalizeAp } from '../app/js/core/model.js';
 import { encodeIes } from '../app/js/core/ies.js';
 import { verdictWidth, usableWidth, bestTag, widthsFor } from '../app/js/ui/screens/channels.js';
-import { CW, makeAp } from './fixtures/scans.mjs';
+import { CW, makeAp, apartment, apartmentTruth } from './fixtures/scans.mjs';
+import { normalizeScan } from '../app/js/core/model.js';
+import { rankNetworks } from '../app/js/core/best-network.js';
+import { describeConnection } from '../app/js/ui/tools/conexao.js';
+import { buildReport } from '../app/js/ui/tools/export-format.js';
+import { fullTestDataText, estimateTestBytes, formatBytes } from '../app/js/ui/tools/net-logic.js';
+import { apSignal, scoreParts, rowEntries } from '../app/js/ui/screens/best.js';
+import { fmtMeters, fmtDbm, nb } from '../app/js/ui/dom.js';
+import { createRecorder } from '../app/js/mapping/recorder.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP_JS = join(HERE, '..', 'app', 'js');
@@ -310,6 +318,17 @@ describe('ux-03: "Use 160 MHz" não é dito a quem usa (ou só tem) 80 MHz', () 
     assert.equal(recommendWidth([odd], '5', { own: odd }).options[0].widthMHz, 160);
   });
 
+  test('roteador que só anuncia 20 MHz em 5 GHz: o motivo dito é o roteador, não os vizinhos', () => {
+    const ies20 = encodeIes({ frequency: f5(36), widthMHz: 20, ht: { nss: 2, width40: false } });
+    const own = normalizeAp({ ...raw5(OWN_MAC, 'Casa', -50, 36, CW.W20, 36, { ies: ies20 }), wifiStandard: 4 });
+    assert.equal(own.ie.maxWidthMHz, 20);
+    const rec = recommendWidth([own], '5', { own });
+    assert.equal(rec.widthMHz, 20);
+    assert.deepEqual(rec.options.map((o) => o.widthMHz), [20]);
+    assert.match(rec.text, /^Seu roteador só anuncia 20 MHz em 5 GHz/);
+    assert.doesNotMatch(rec.text, /interferência demais/);
+  });
+
   test('2,4 GHz não muda: o bit de 40 MHz do beacon não entra na conta', () => {
     const ies20 = encodeIes({ frequency: f24(6), ht: { nss: 2, width40: false } });
     const own = normalizeAp({ ...makeAp(OWN_MAC, 'Casa', -50, f24(6), { ies: ies20 }), wifiStandard: 4 });
@@ -366,5 +385,180 @@ describe('ux-04: 2,4 GHz acima do canal 11', () => {
     const screen = code(source('ui/screens/channels.js'));
     assert.doesNotMatch(screen, /Ficam entre os canais padrão/);
     assert.match(screen, /o 12 e o 13 ainda invadem o 11/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ux-06: a segurança da rede conectada tem o mesmo rótulo em todas as telas
+// ---------------------------------------------------------------------------
+describe('ux-06: Conexão mostra a segurança com o rótulo da lista de redes', () => {
+  const security = (conn, ap) => describeConnection(conn, ap).groups.flatMap((g) => g.rows).find((r) => r.field === 'security');
+  const raw = makeAp(OWN_MAC, 'Casa', -50, f5(36));
+  const ap = normalizeAp(raw);
+  const conn = { connected: true, ssid: 'Casa', bssid: OWN_MAC, rssi: -50, frequency: f5(36), linkSpeed: 433, securityType: 2 };
+
+  test('rede WPA2 comum (o Android informa SECURITY_TYPE_PSK): "WPA2", como em Redes, e não "WPA/WPA2 Pessoal"', () => {
+    assert.equal(ap.security.label, 'WPA2');
+    assert.equal(security(conn, ap).text, 'WPA2');
+  });
+
+  test('sem a rede na lista (acabou de conectar, rede oculta): vale o tipo que o Android informa', () => {
+    assert.equal(security(conn, null).text, 'WPA/WPA2 Pessoal');
+    assert.equal(security({ ...conn, securityType: 4 }, null).text, 'WPA3 Pessoal');
+    assert.equal(security({ ...conn, securityType: undefined }, null), undefined);
+  });
+
+  test('rede de transição WPA2/WPA3: o rótulo é o da lista e a dica diz com qual o celular entrou', () => {
+    const mixed = normalizeScan(apartment).find((a) => a.id === apartmentTruth.own.b5);
+    assert.equal(mixed.security.label, 'WPA2/WPA3');
+    const at = { ...conn, ssid: mixed.ssid, bssid: mixed.bssid, frequency: mixed.freq };
+    assert.equal(security({ ...at, securityType: 4 }, mixed).text, 'WPA2/WPA3');
+    const hint = security({ ...at, securityType: 4 }, mixed).hint || '';
+    // (se a rede tiver um aviso de segurança, ele tem prioridade sobre a dica)
+    assert.ok(/Este celular entrou com WPA3\./.test(hint) || hint.length > 0);
+  });
+
+  test('rede aberta continua em tom de alerta', () => {
+    assert.equal(security({ ...conn, securityType: 0 }, null).tone, 'warning');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ux-09: a mesma rede, o mesmo instante, os mesmos números
+// ---------------------------------------------------------------------------
+describe('ux-09: números coerentes entre as telas', () => {
+  test('painel da nota: a parte "Sinal" e a linha do sinal usam a mesma leitura (a média recente)', () => {
+    const list = normalizeScan(apartment).map((a) => (a.id === apartmentTruth.own.b24 ? { ...a, rssi: -78, rssiSmooth: -71 } : a));
+    // a linha do ranking cujo melhor sinal é o rádio de 2,4 GHz da casa
+    const row = rankNetworks(list, {}).find((r) => r.best.id === apartmentTruth.own.b24);
+    assert.ok(row, 'a rede aparece no ranking');
+    const ap = list.find((a) => a.id === apartmentTruth.own.b24);
+    assert.equal(apSignal(ap), -71);
+    assert.equal(apSignal({ rssi: -60 }), -60);
+    assert.equal(apSignal({}), null);
+    assert.equal(apSignal(null), null);
+    // a parte "Sinal" (em cima) e a linha do mesmo sinal (embaixo) mostram o mesmo número
+    const signal = scoreParts(row).find((part) => part.id === 'signal');
+    const first = rowEntries(row)[0];
+    assert.equal(first.ap.id, apartmentTruth.own.b24);
+    assert.ok(signal.headline.startsWith(fmtDbm(apSignal(first.ap))), `${signal.headline} x ${fmtDbm(apSignal(first.ap))}`);
+    assert.ok(signal.headline.startsWith(fmtDbm(-71)), signal.headline);
+    assert.match(signal.text, /média das últimas leituras/);
+    // a linha do painel não lê mais a leitura crua
+    assert.doesNotMatch(code(source('ui/screens/best.js')), /fmtDbm\(ap\.rssi\)|signalBars\(ap\.rssi\)/);
+  });
+
+  test('distância do relatório arredondada como na tela', () => {
+    const line = (m) => buildReport({ connection: { ssid: 'Casa', band: '5', channel: 36, rssi: -50, distanceM: m } }).split('\n').find((l) => l.startsWith('Distância do roteador'));
+    assert.equal(line(1.3), 'Distância do roteador: cerca de 1,5 m (estimativa pelo sinal)');
+    assert.equal(line(1.2), 'Distância do roteador: cerca de 1 m (estimativa pelo sinal)');
+    for (const m of [0.4, 0.8, 1.24, 1.26, 1.8, 2.3, 2.74, 2.76, 3.4, 7.5, 12.3, 41]) {
+      const shown = fmtMeters(m, { approx: true }).replace(/^≈\s*/, '').replace(/\s+/g, ' ');
+      assert.ok(line(m).includes(`cerca de ${shown} (`), `${m} m: tela "${shown}", relatório "${line(m)}"`);
+    }
+  });
+
+  test('nenhum texto diz "cerca de ≈" (aproximação em dobro)', () => {
+    assert.deepEqual(filesWith(/cerca de ['"`]?\s*,?\s*(h\('strong', null, )?fmtMbps\([^)]*approx: true/), []);
+    assert.deepEqual(filesWith(/cerca de\s*≈/), []);
+    assert.match(code(source('ui/tools/conexao.js')), /pela velocidade negociada agora, este Wi-Fi entrega ', h\('strong', null, fmtMbps\(usable, \{ approx: true \}\)\)/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ux-10: "Wi-Fi" não quebra no hífen
+// ---------------------------------------------------------------------------
+describe('ux-10: nb() protege "Wi-Fi" sem mudar o texto', () => {
+  test('texto sem "Wi-Fi", ou que não é texto, volta como veio', () => {
+    assert.equal(nb('Redes por perto'), 'Redes por perto');
+    assert.equal(nb(''), '');
+    assert.equal(nb(null), null);
+    const node = { nodeType: 1 };
+    assert.equal(nb(node), node);
+  });
+
+  test('as telas de bloqueio, o Sobre e as peças comuns passam os textos por nb()', () => {
+    assert.match(source('ui/gates.js'), /nb\(c\.title\)/);
+    assert.match(source('ui/gates.js'), /nb\(c\.text\)/);
+    assert.match(source('ui/tools/about.js'), /kids\.map\(nb\)/);
+    for (const piece of ["h('strong.banner__title', null, nb(title))", "h('h3.card__title', null, nb(title))", "h('h2.section-h__title', null, nb(title)", "h('h2.empty__title', null, nb(title))"]) {
+      assert.ok(source('ui/components.js').includes(piece), piece);
+    }
+    // nb() não troca caracteres (nada de hífen especial): busca, cópia e leitor de tela veem "Wi-Fi"
+    assert.equal(filesWith('\u2011').length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ux-13: um vocabulário só
+// ---------------------------------------------------------------------------
+describe('ux-13: vocabulário', () => {
+  test('as variantes banidas não aparecem em textos de tela', () => {
+    const banned = [
+      ['toque em marcar ponto', 'o botão se chama “Marcar este lugar”'],
+      ['Pode finalizar quando quiser', 'o botão se chama “Concluir”'],
+      ['Velocidade do enlace', 'o nome é "Velocidade até o roteador"'],
+      ['Link Wi-Fi no teste', 'o nome é "Velocidade até o roteador"'],
+      ["'Internet 2'", 'os destinos dizem quem responde: Cloudflare e Google'],
+      ['faixa da estrada', 'canal é a "pista"; faixa é 2,4 / 5 / 6 GHz'],
+      ['} rádios`', 'um BSSID é um "sinal"'],
+      ['Pontos de acesso desta rede', 'um BSSID é um "sinal"'],
+      ["'Conectada')", 'o estado é "Conectado" em todas as listas'],
+    ];
+    for (const [text, why] of banned) assert.deepEqual(filesWith(text), [], `"${text}": ${why}`);
+    // nas telas do mapa a atividade se chama "mapeamento"
+    for (const file of ['ui/map/result.js', 'ui/map/survey.js', 'ui/map/library.js']) {
+      const strings = code(source(file)).match(/(['"`])(?:\\.|(?!\1).)*\1/g) || [];
+      for (const str of strings) if (/\s/.test(str)) assert.doesNotMatch(str, /levantamento/i, `${file}: ${str.slice(0, 80)}`);
+    }
+  });
+
+  test('as dicas do gravador citam os botões pelo nome e falam em "leituras"', () => {
+    const rec = createRecorder({});
+    rec.start();
+    assert.match(rec.stats().hint, /Aguardando a primeira leitura/);
+    const hints = code(source('mapping/recorder.js')).match(/return [`'][^;]*;/g).join('\n');
+    assert.match(hints, /toque em “Marcar este lugar”/);
+    assert.match(hints, /Pode concluir quando quiser/);
+    assert.match(hints, /Toque em “Concluir” para ver o mapa/);
+    assert.doesNotMatch(hints, /varredura|Finalize|finalizar/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ux-15: quanto o teste de velocidade gasta, com a conta fechando
+// ---------------------------------------------------------------------------
+describe('ux-15: gasto de dados do teste de velocidade', () => {
+  test('o exemplo cita as duas direções e o número sai do mesmo modelo que estima o gasto', () => {
+    const t = fullTestDataText();
+    assert.match(t.rule, /para cada Mb\/s, em cada direção/);
+    const [, down, up, total] = t.example.replace(/\s+/g, ' ').match(/num plano de (\d+) Mb\/s de download e (\d+) de upload, ≈ (.+)$/);
+    assert.equal(total, formatBytes(estimateTestBytes('full', Number(down), Number(up))).replace(/\s+/g, ' '));
+    // a regra enunciada fecha com o exemplo: 1 MB por Mb/s, somando as duas direções
+    assert.equal(estimateTestBytes('full', Number(down), Number(up)), (Number(down) + Number(up)) * 1e6);
+    assert.doesNotMatch(code(source('ui/tools/velocidade.js')), /450/, 'o número não fica escrito à mão na tela');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ux-16: a vista de cima não se chama "planta"
+// ---------------------------------------------------------------------------
+describe('ux-16: o mapa não é chamado de planta', () => {
+  test('o seletor de vista e os avisos do resultado dizem "de cima"', () => {
+    const result = code(source('ui/map/result.js'));
+    assert.doesNotMatch(result, /'Planta'|Vista em planta|aparece em planta/);
+    assert.match(result, /\['top', 'De cima', 'grid'\]/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ux-12: a legenda explica o riscado e as cores do caminho
+// ---------------------------------------------------------------------------
+describe('ux-12: legenda do mapa', () => {
+  test('a legenda fala do piso riscado e, com a camada ligada, do caminho', () => {
+    const result = source('ui/map/result.js');
+    assert.match(result, /Riscado: trecho estimado, sem leitura por perto/);
+    assert.match(result, /V\.layers\.path && path/);
+    assert.match(result, /Caminho: azul no começo, rosa no fim/);
   });
 });

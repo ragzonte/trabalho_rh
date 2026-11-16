@@ -463,7 +463,11 @@ test('rede que não apareceu na última busca fica apagada e mostra a idade', T,
     assert.match(await row.getAttribute('class'), /row--stale/);
     assert.match(await row.locator('.net-row__age').textContent(), /visto há 1\d\s*s/);
     assert.equal(await page.locator('.net-row.row--stale').count(), 1);
-    assert.ok(Number(await row.locator('.row__body').evaluate((el) => getComputedStyle(el).opacity)) < 1);
+    // "apagada" é o desenho (barras, gráfico) e o nome na cor secundária; o texto não perde contraste
+    // (opacidade 0,6 na linha toda deixava "visto há 15 s" abaixo de 4,5:1: veja review-ux.e2e.mjs)
+    assert.ok(Number(await row.locator('.row__lead').evaluate((el) => getComputedStyle(el).opacity)) < 1);
+    assert.equal(Number(await row.locator('.row__body').evaluate((el) => getComputedStyle(el).opacity)), 1);
+    assert.notEqual(await row.locator('.row__title').evaluate((el) => getComputedStyle(el).color), await page.locator('.net-row:not(.row--stale) .row__title').first().evaluate((el) => getComputedStyle(el).color));
     // no painel de detalhes a mesma coisa é dita com palavras
     await row.click();
     await page.locator('.ap-sheet').waitFor();

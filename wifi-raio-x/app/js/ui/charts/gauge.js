@@ -41,7 +41,7 @@ const STYLE = `
 .gauge__readout{position:absolute;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;max-width:100%;text-align:center;pointer-events:none}
 .gauge__value{display:flex;align-items:baseline;justify-content:center;gap:5px;color:var(--text);font-weight:600;line-height:1;letter-spacing:-0.02em;font-variant-numeric:tabular-nums;white-space:nowrap}
 .gauge__unit{font-size:16px;font-weight:500;letter-spacing:0;color:var(--muted)}
-.no-flex-gap .gauge__value>*+*{margin-left:5px}
+.no-flex-gap .gauge__value>.gauge__unit{margin-left:5px}
 .gauge__label{min-height:22px;margin-top:6px;font-size:16px;font-weight:600;line-height:22px;color:var(--gauge-color);white-space:nowrap}
 .gauge__label:empty{display:none}
 .gauge--empty .gauge__number{color:var(--muted);font-weight:300;opacity:.7}

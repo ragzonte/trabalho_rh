@@ -15,6 +15,8 @@
 //   heatChoices(model) · hasRooms(model) · roomsInvite(model) · roomSignal(model, andar, ambiente, campo)
 //   signalWordAt(dbm) · ACCURACY (os números de precisão que as telas citam)
 //   spotDistance(model, a, b) · parseMeters(texto) · withKnownDistance(survey, a, b, metros)
+//   scalePairs(model, survey) · scaleSpan(model) · scalePreview(model, a, b, metros)
+//   cloudRatio(antes, depois) · scaleOutcome({...})      (o "Ajustar a escala", antes e depois)
 //   renameRoom(survey, model, andar, idDoAmbiente, nome) · spotOptions(model)
 // Biblioteca e arquivos
 //   mapMeta(model, survey) · metaLine(meta) · defaultMapName(quando, usados) · fileSlug(nome)
@@ -24,6 +26,8 @@
 // sempre que o número vem do mapa, e nunca chamam o resultado de planta.
 
 import { fmtNum, fmtDbm, fmtMeters, THIN } from '../dom.js';
+// (módulo pequeno e sem dependências: não traz os motores do solucionador para a página)
+import { fuseScale, mapSpan } from '../../mapping/solver-scale.js';
 
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -517,6 +521,17 @@ export const ACCURACY = Object.freeze({
   /** folga do tamanho: confiança de escala normal (>= 0,5) e baixa */
   scalePct: 25,
   scaleLowPct: 40,
+  /**
+   * "Ajustar a escala" com a distância entre os dois lugares marcados mais distantes DE VERDADE
+   * (140 levantamentos simulados com lugares marcados, a distância exata): o erro médio do tamanho
+   * cai de 17% para 6%, e em 8 de cada 10 mapas fica abaixo de 10%. Com o par que a tela propõe (o
+   * mais distante NO MAPA) cai de 17% para 13%: os mapas que crescem continuam, em média, 14%
+   * pequenos, porque o par proposto mede só 3/4 da maior distância da casa. Com um par qualquer,
+   * 17% -> 16%; com um par curto, nada muda. (Antes desta regra, com o par proposto: 17% -> 17%.)
+   */
+  scaleBestPct: 10,
+  /** um passo largo de adulto, em metros: a régua de quem não tem trena */
+  stepM: 0.8,
   /** leituras que caem no cômodo certo: casa térrea; casa de dois andares */
   rightRoom: [4, 5],
   rightRoomTwoFloors: [3, 5],
@@ -755,6 +770,149 @@ export function spotDistance(model, a, b) {
   const pb = spots.find((s) => s.id === b);
   if (!pa || !pb || pa === pb) return null;
   return Math.hypot(pa.x - pb.x, pa.y - pb.y, (isNum(pa.z) ? pa.z : 0) - (isNum(pb.z) ? pb.z : 0));
+}
+
+// --- "Ajustar a escala" -----------------------------------------------------
+// A régua é o mapa INTEIRO, não a distância entre os dois lugares no mapa (as medidas da bancada e
+// a conta estão em mapping/solver-scale.js): a distância que o usuário mede tem de caber no mapa
+// de ponta a ponta. Se não cabe, o mapa cresce até caber; se cabe, o tamanho não muda. Por isso o
+// par que mais ajuda é o dos dois lugares mais distantes DE VERDADE — e só o usuário sabe qual é.
+
+/** Erro esperado (m) em que a confiança de um ponto vale 0,5: a régua do solucionador (CONF_HALF_M em solver.js). */
+const CONF_HALF_M = 1.5;
+
+/**
+ * O par de lugares marcados que a tela propõe em "Ajustar a escala" e um segundo par, para quem
+ * quiser medir mais uma distância.
+ *
+ * O que se quer é o par mais distante de verdade; a tela só tem o mapa. Propõe o par do mesmo
+ * andar com a maior distância no mapa depois de descontado o que o erro das duas posições infla
+ * (d² − e_a² − e_b², com o erro esperado de cada lugar tirado da confiança das suas varreduras):
+ * base longa em relação à incerteza das pontas. Empate: o par com mais varreduras. Medido na
+ * bancada (140 levantamentos com lugares marcados), nenhuma regra feita só com o mapa acha o par
+ * certo melhor do que esta (o par proposto mede, em média, 3/4 da maior distância que havia para
+ * medir; em menos da metade das vezes passa de 80% dela) — daí o texto da tela pedir ao usuário
+ * que troque pelos dois lugares que ele sabe serem os mais distantes.
+ *
+ * O segundo par é o melhor entre os que não repetem nenhum lugar do primeiro (outra chance de
+ * pegar a maior distância da casa: das medidas, vale a mais comprida).
+ *
+ * @param {import('../../mapping/types.js').MapModel|null} model
+ * @param {import('../../mapping/types.js').Survey|null} [survey]  sem ele, vale só a distância no mapa
+ * @returns {{a:number, b:number, second:{a:number, b:number}|null}|null}  ids dos lugares; null com menos de dois
+ */
+export function scalePairs(model, survey) {
+  const spots = (model && Array.isArray(model.spots) ? model.spots : []).filter((s) => s && isNum(s.x) && isNum(s.y));
+  if (spots.length < 2) return null;
+  const scans = survey && Array.isArray(survey.scans) ? survey.scans : [];
+  const confOf = new Map(); // lugar -> soma e quantidade das confianças das varreduras feitas ali
+  for (const p of model && Array.isArray(model.path) ? model.path : []) {
+    const s = p ? scans[p.i] : null;
+    if (!s || s.spot === null || s.spot === undefined || !isNum(p.conf)) continue;
+    const e = confOf.get(s.spot) || { sum: 0, n: 0 };
+    e.sum += p.conf;
+    e.n += 1;
+    confOf.set(s.spot, e);
+  }
+  const err2 = (spot) => {
+    const e = confOf.get(spot.id);
+    return e && e.n ? CONF_HALF_M * CONF_HALF_M * (1 / clamp(e.sum / e.n, 0.02, 1) - 1) : 0;
+  };
+  const pairs = [];
+  for (let i = 0; i < spots.length; i++) {
+    for (let j = i + 1; j < spots.length; j++) {
+      const a = spots[i];
+      const b = spots[j];
+      const d2 = (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y);
+      pairs.push({ a: a.id, b: b.id, same: a.floor === b.floor, score: d2 - err2(a) - err2(b), scans: (isNum(a.scans) ? a.scans : 0) + (isNum(b.scans) ? b.scans : 0) });
+    }
+  }
+  // mesmo andar primeiro (a medida entre andares mistura a altura); depois a base, depois as varreduras
+  const better = (p, q) => (p.same !== q.same ? p.same : p.score !== q.score ? p.score > q.score : p.scans > q.scans);
+  const top = (list) => list.reduce((best, p) => (best === null || better(p, best) ? p : best), null);
+  const first = top(pairs);
+  const second = top(pairs.filter((p) => p.a !== first.a && p.a !== first.b && p.b !== first.a && p.b !== first.b));
+  return { a: first.a, b: first.b, second: second ? { a: second.a, b: second.b } : null };
+}
+
+/** Quanto cabe no mapa de ponta a ponta (m): é com isto que o solucionador compara a distância medida. null sem mapa. */
+export function scaleSpan(model) {
+  const path = model && Array.isArray(model.path) ? model.path : [];
+  const src = path.length ? path : model && Array.isArray(model.spots) ? model.spots : [];
+  const { span } = mapSpan(
+    src.map((p) => (p ? p.x : NaN)),
+    src.map((p) => (p ? p.y : NaN)),
+  );
+  return span > 0 ? span : null;
+}
+
+/**
+ * O que uma distância medida entre dois lugares faria com o mapa de hoje, para a tela dizer ANTES
+ * de refazer o mapa (a mesma conta do solucionador: fuseScale). Vale para um mapa ainda sem
+ * ajuste; num mapa já ajustado o solucionador recomeça do mapa original com todas as medidas.
+ *
+ * @returns {{kind:'none'|'grow'|'fits'|'toolong', pct:number, text:string}}
+ *          grow: o mapa cresce `pct`%; fits: cabe, nada muda; toolong: contradiz o mapa, seria ignorada
+ */
+export function scalePreview(model, a, b, meters) {
+  const none = { kind: 'none', pct: 0, text: '' };
+  const spots = model && Array.isArray(model.spots) ? model.spots : [];
+  const pa = spots.find((s) => s.id === a);
+  const pb = spots.find((s) => s.id === b);
+  const span = scaleSpan(model);
+  if (!isNum(meters) || !(meters > 0) || !pa || !pb || pa === pb || span === null) return none;
+  // a medida é no espaço; no mapa conta a parte horizontal (como no solucionador)
+  const dz = (isNum(pa.z) ? pa.z : 0) - (isNum(pb.z) ? pb.z : 0);
+  const flat = Math.sqrt(Math.max(0, meters * meters - dz * dz));
+  if (!(flat > 0.05)) return none;
+  const whole = `${approxMetersText(span)} de ponta a ponta`;
+  const fused = fuseScale(span, [flat]);
+  if (!fused.used) return { kind: 'toolong', pct: 0, text: `É mais que o dobro do que cabe no mapa de hoje (${whole}). Confira a medida: assim ela seria ignorada.` };
+  if (fused.factor > 1) {
+    const pct = Math.max(1, Math.round((fused.factor - 1) * 100));
+    return { kind: 'grow', pct, text: `Com essa distância, o mapa cresce uns ${pct}%.` };
+  }
+  return { kind: 'fits', pct: 0, text: `Essa distância cabe no mapa de hoje (${whole}): o tamanho não mudaria. O ajuste só age quando a distância medida é maior do que o mapa comporta.` };
+}
+
+/** Tamanho do mapa depois / antes de uma mudança: razão entre os raios (quadráticos médios) das duas nuvens de pontos. NaN se não der. */
+export function cloudRatio(before, after) {
+  const radius = (solution) => {
+    const pts = (solution && Array.isArray(solution.points) ? solution.points : []).filter((p) => p && isNum(p.x) && isNum(p.y));
+    if (!pts.length) return NaN;
+    const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+    const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+    return Math.sqrt(pts.reduce((s, p) => s + (p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy), 0) / pts.length);
+  };
+  const r0 = radius(before);
+  const r1 = radius(after);
+  return r0 > 1e-9 && isNum(r1) ? r1 / r0 : NaN;
+}
+
+/**
+ * O que o ajuste de escala fez, em palavras, para dizer DEPOIS de refazer o mapa.
+ *
+ * @param {Object} info
+ * @param {{applied:boolean, factor:number, weight:number, used:number, ignored:number}|null} [info.adjust]
+ *        o resumo do solucionador (solution.debug.scaleAdjust)
+ * @param {number} [info.ratio]       tamanho do mapa depois / antes (cloudRatio)
+ * @param {boolean} [info.hadAdjust]  o mapa de antes já tinha uma distância medida (aí o que o
+ *        usuário vê mudar é `ratio`, não o fator do solucionador, que conta a partir do mapa original)
+ * @param {number} [info.areaBefore]
+ * @param {number} [info.areaAfter]
+ * @returns {{kind:'ignored'|'grew'|'shrank'|'same', pct:number, text:string}}
+ */
+export function scaleOutcome({ adjust = null, ratio = NaN, hadAdjust = false, areaBefore = NaN, areaAfter = NaN } = {}) {
+  const info = adjust && typeof adjust === 'object' ? adjust : null;
+  if (info && info.used === 0) return { kind: 'ignored', pct: 0, text: 'A distância informada passa do dobro do que cabe neste mapa de ponta a ponta. Confira a medida: o mapa não foi alterado.' };
+  const area = isNum(areaBefore) && isNum(areaAfter) && Math.round(areaBefore) !== Math.round(areaAfter) ? ` Área estimada: de ≈${THIN}${fmtNum(areaBefore)} para ≈${THIN}${fmtNum(areaAfter)}${THIN}m².` : '';
+  const dropped = info && info.ignored > 0 ? ' Uma das distâncias foi ignorada: passa do dobro do que cabe no mapa.' : '';
+  // sem ajuste anterior, vale o fator exato do solucionador (acertar o par mexe um pouco no raio da nuvem)
+  const change = info && !hadAdjust && isNum(info.factor) ? info.factor : isNum(ratio) && ratio > 0 ? ratio : 1;
+  const pct = Math.round(Math.abs(change - 1) * 100);
+  if (change > 1 && pct >= 1 && (!hadAdjust || pct >= 4)) return { kind: 'grew', pct, text: `O mapa cresceu ${pct}%: a distância medida não cabia nele.${area}${dropped}` };
+  if (hadAdjust && change < 1 && pct >= 4) return { kind: 'shrank', pct, text: `O mapa ficou ${pct}% menor: a distância de antes saiu, e a de agora cabe nele.${area}${dropped}` };
+  return { kind: 'same', pct: 0, text: `O tamanho do mapa não mudou: a distância medida cabe nele, e por isso não mostra se ele está pequeno. Só os dois lugares foram acertados.${dropped}` };
 }
 
 /** "3,5", "3.5 m", " 12 metros " -> metros; fora de 0,5 a 200 m (ou texto que não é número) -> null. */

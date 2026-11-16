@@ -166,7 +166,9 @@
   --critical: #b91c1c;
   --warning: #a84d08;
   --info: #0369a1;
-  --good: #047857;
+  /* um passo mais escuro que o verde do sinal (#047857): num selo, sobre o fundo verde claro em
+     cima de --surface-2, aquele ficava em 4,4:1; este fica em 5,2:1 */
+  --good: #046c4e;
   --critical-soft: rgba(220, 38, 38, 0.08);
   --warning-soft: rgba(245, 158, 11, 0.14);
   --info-soft: rgba(2, 132, 199, 0.08);
@@ -299,7 +301,11 @@ canvas {
   display: none !important;
 }
 
-:focus {
+/* O contorno de foco é o do app (:focus-visible) e só aparece para quem navega pelo teclado.
+   Escrito assim, e não como `:focus { outline: none }`: um WebView anterior ao 86 não conhece
+   :focus-visible, descarta esta regra inteira e a de baixo, e fica com o contorno de foco padrão
+   do navegador. Com `:focus { outline: none }` ele ficava sem contorno nenhum. */
+:focus:not(:focus-visible) {
   outline: none;
 }
 
@@ -308,7 +314,15 @@ canvas {
   outline-offset: 2px;
 }
 
-/* recebem o foco por programa (ao abrir); o contorno ali só confunde */
+/* recebem o foco por programa (ao abrir); o contorno ali só confunde
+   (as duas formas, em regras separadas: a de :focus vale também onde :focus-visible não existe) */
+.sheet:focus,
+.dialog:focus,
+.gate:focus,
+.view:focus {
+  outline: none;
+}
+
 .sheet:focus-visible,
 .dialog:focus-visible,
 .gate:focus-visible,
@@ -905,11 +919,17 @@ canvas {
   margin-right: 1px;
 }
 
-/* rede que não apareceu na última busca */
+/* Rede que não apareceu na última busca: só o desenho esmaece (barras, ícone, gráfico); o texto
+   continua com contraste de leitura, com o nome na cor secundária. (Opacidade 0,6 na linha toda
+   derrubava o texto para menos de 4,5:1, justo onde está escrito "visto há 10 s".) */
 .row--stale > .row__lead,
-.row--stale > .row__body,
-.row--stale > .row__trail {
+.row--stale > .row__trail svg,
+.row--stale > .row__trail .bars {
   opacity: 0.6;
+}
+
+.row--stale > .row__body > .row__title {
+  color: var(--muted);
 }
 
 .row__trail {
@@ -2274,6 +2294,11 @@ canvas {
   cursor: pointer;
 }
 
+/* a borda de destaque vale com :focus puro (um WebView sem :focus-visible descarta a regra de baixo) */
+.select > select:focus {
+  border-color: var(--accent);
+}
+
 .select > select:focus-visible {
   outline-offset: 0;
   border-color: var(--accent);
@@ -2381,6 +2406,10 @@ canvas {
 
 .input::placeholder {
   color: var(--faint);
+}
+
+.input:focus {
+  border-color: var(--accent);
 }
 
 .input:focus-visible {

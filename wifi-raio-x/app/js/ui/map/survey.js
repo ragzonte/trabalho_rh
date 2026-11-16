@@ -201,6 +201,7 @@ export async function mountSurvey(root, env) {
   // --- estado da tela ------------------------------------------------------
   let dead = false;
   let switched = false; // o app trocou de modo (demonstração <-> Wi-Fi de verdade) com o levantamento aberto
+  let held = false; // o gravador está em pausa porque o APP o segurou (fora da tela, bloqueio): veja syncHold
   let mode = 'survey'; // 'survey' | 'processing' | 'error'
   let viewer = null;
   let miniPlan = null;
@@ -521,8 +522,42 @@ export async function mountSurvey(root, env) {
     draw();
   }
 
+  // --- espera automática -----------------------------------------------------
+  // O laço de buscas para quando o app sai da tela (celular no bolso, outro app na frente) e enquanto
+  // há um bloqueio (Wi-Fi ou Localização desligados): nenhuma leitura chega. O relógio de caminhada
+  // tem de parar junto, senão conta minutos em que nada foi lido e a leitura seguinte entra no MESMO
+  // trecho, como se a pessoa tivesse andado esse tempo todo. A espera é a pausa de sempre do gravador
+  // (fecha o lugar marcado; a retomada dá o salto de 30 s e abre um trecho novo). Só a pausa que o
+  // app fez sozinho é desfeita sozinha: a que o usuário pediu fica até ele retomar.
+  const mustHold = () => document.hidden || store.get().loop.paused === 'hidden' || store.get().loop.paused === 'gate';
+
+  function syncHold() {
+    if (dead || mode !== 'survey' || switched) return;
+    if (mustHold()) {
+      if (rec.state === 'recording') {
+        rec.pause();
+        held = true;
+        draw();
+      }
+    } else if (held) {
+      held = false;
+      if (rec.state === 'paused') {
+        rec.resume();
+        lastScanAt = null;
+        gaps = [];
+      }
+      draw();
+    }
+  }
+
   function togglePause() {
-    if (rec.state === 'recording') {
+    if (held) {
+      // o app estava em espera por conta própria e o usuário pediu a pausa: agora ela é dele
+      held = false;
+      scanLoop.setMode(prevLoopMode === 'mapping' ? 'normal' : prevLoopMode);
+      void saveDraft();
+      draw();
+    } else if (rec.state === 'recording') {
       rec.pause();
       scanLoop.setMode(prevLoopMode === 'mapping' ? 'normal' : prevLoopMode);
       void saveDraft();
@@ -711,11 +746,13 @@ export async function mountSurvey(root, env) {
     if (dead || mode !== 'survey') return;
     const st = rec.stats();
     const loop = store.get().loop;
-    const paused = st.state !== 'recording';
+    // em espera automática (app fora da tela, bloqueio) o gravador está em pausa, mas a tela não
+    // oferece "Retomar": ele volta sozinho, e o aviso é o de "em espera" / "sem acesso ao Wi-Fi"
+    const paused = st.state !== 'recording' && !held;
     // o limite que o usuário sente é o do relógio de parede (o do laço de buscas); o do gravador
     // conta tempo de caminhada, que na demonstração acelerada corre mais depressa
     const throttled = !!loop.throttled;
-    const pulse = pulseInfo({ now: Date.now(), lastScanAt, gaps, loop, state: st.state === 'recording' ? 'recording' : 'paused' });
+    const pulse = pulseInfo({ now: Date.now(), lastScanAt, gaps, loop, state: paused ? 'paused' : 'recording' });
     const level = levelInfo(st.level);
     const piloting = !!(pilot && pilot.running);
     const spot = st.spot;
@@ -924,9 +961,14 @@ export async function mountSurvey(root, env) {
       },
     ),
   );
+  // Na hora em que a página some (os temporizadores ficam lentos com ela escondida: se a pausa
+  // esperasse o próximo quadro, o tempo fora da tela já teria sido contado). Primeiro para o
+  // relógio de caminhada, depois grava o rascunho.
   const onHide = () => {
+    syncHold();
     if (document.hidden && rec.stats().scans) void saveDraft();
   };
+  offs.push(store.subscribe((st) => st.loop.paused, syncHold));
   document.addEventListener('visibilitychange', onHide);
   window.addEventListener('pagehide', onHide);
   offs.push(() => document.removeEventListener('visibilitychange', onHide));
@@ -958,6 +1000,7 @@ export async function mountSurvey(root, env) {
   offs.push(() => clearInterval(timer));
 
   draw();
+  syncHold(); // o levantamento pode abrir já com um bloqueio na tela
   void maybePreview();
   if (wantPilot) void startPilot();
   else if (resumed) toast('Mapeamento retomado de onde você parou.');

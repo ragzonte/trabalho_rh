@@ -528,12 +528,15 @@
   background: var(--accent);
 }
 
-.best-row--stale > .best-row__ring,
-.best-row--stale > .best-row__name,
-.best-row--stale > .best-row__speed,
-.best-row--stale > .best-row__where,
-.best-row--stale > .best-row__notes {
+/* não ouvida na última busca: esmaece o desenho (o anel da nota) e o nome vai para a cor
+   secundária; o texto não perde contraste */
+.best-row--stale > .best-row__ring {
   opacity: 0.6;
+}
+
+.best-row--stale > .best-row__name,
+.best-row--stale > .best-row__speed {
+  color: var(--muted);
 }
 
 /* Pró, contra ou aviso: ícone + frase curta (o ícone muda de forma, não só de cor). */

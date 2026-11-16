@@ -11,7 +11,10 @@
 //                  (Status.canScan === false) ou no modo 'paused'.
 //
 // Como ele sabe do limite: Status.throttled === true, ou um pedido recusado com
-// reason 'throttled' (ou uma busca aceita que volta só com a lista velha). Como ele sabe que o
+// reason 'throttled' (ou uma busca aceita que volta só com a lista velha). No Android 9 e no 10 o
+// limite existe e o celular não sabe informar (Status.throttled === null): ali o laço já COMEÇA
+// devagar, em vez de gastar as 4 buscas em meio minuto e ficar quase dois minutos sem lista nova
+// (no 9 o limite nem pode ser desligado; no 10, se foi, a sonda abaixo descobre). Como ele sabe que o
 // limite acabou: Status.throttled passa a false; ou, quando o celular não informa, depois de
 // algumas buscas aceitas no ritmo lento ele arrisca um pedido no ritmo rápido — se for aceito,
 // volta a acelerar; se for recusado, continua devagar e espera mais antes de arriscar de novo.
@@ -66,6 +69,10 @@ export const SCAN_DEFAULTS = Object.freeze({
    * milissegundos adiantado é recusado (medido num Android 11: uma recusa a cada 2 min e meio).
    */
   throttleSlackMs: 1_000,
+  /** Android 9: o limite existe, não pode ser desligado e o celular não o informa */
+  fixedLimitSdk: 28,
+  /** Android 10: o limite existe e pode ser desligado, mas o celular não informa se está ligado */
+  silentLimitSdk: 29,
 });
 
 export const SCAN_MODES = Object.freeze(['normal', 'mapping', 'paused']);
@@ -118,6 +125,18 @@ export function createScanLoop({ bridge, store, now = Date.now, setTimer = (fn, 
   const status = () => store.get().status || null;
   const statusSaysThrottled = () => status()?.throttled === true;
   const isThrottled = () => statusSaysThrottled() || backoff;
+
+  // O limite de 4 buscas a cada 2 minutos existe a partir do Android 9 (SDK 28), mas o celular só
+  // sabe dizer se ele está ligado a partir do 11 (SDK 30). No 9 ele não pode ser desligado; no 10
+  // pode (opções do desenvolvedor), só que não dá para perguntar.
+  const androidSdk = () => {
+    const info = store.get().info;
+    return info && info.platform === 'android' && typeof info.sdk === 'number' ? info.sdk : 0;
+  };
+  /** O celular não informa o limite, mas nesta versão do Android ele existe: parte-se do ritmo lento. */
+  const limitAssumed = () => status()?.throttled == null && (androidSdk() === cfg.fixedLimitSdk || androidSdk() === cfg.silentLimitSdk);
+  /** Nesta versão o limite não pode ser desligado: arriscar o ritmo rápido só renderia uma recusa. */
+  const limitIsFixed = () => androidSdk() === cfg.fixedLimitSdk;
 
   function unthrottledMs() {
     if (mode === 'mapping') return cfg.mappingMs;
@@ -202,8 +221,8 @@ export function createScanLoop({ bridge, store, now = Date.now, setTimer = (fn, 
     }
     if (phase !== 'idle') return; // o fim da busca em andamento agenda a seguinte
     let wait = intervalMs();
-    // hora de testar se o limite ainda existe? (não quando o celular afirma que sim)
-    probing = backoff && !statusSaysThrottled() && okStreak >= probeAfter;
+    // hora de testar se o limite ainda existe? (não quando o celular afirma que sim, nem onde ele é fixo)
+    probing = backoff && !statusSaysThrottled() && !limitIsFixed() && okStreak >= probeAfter;
     if (probing) wait = unthrottledMs();
     const t = now();
     const due = anchorAt === null ? t : anchorAt + wait;
@@ -337,6 +356,7 @@ export function createScanLoop({ bridge, store, now = Date.now, setTimer = (fn, 
     running = true;
     generation += 1;
     hidden = !!(doc && doc.hidden);
+    if (limitAssumed()) backoff = true;
     unbind = [
       bridge.on('scan', onScan),
       store.subscribe((s) => s.status, onStatus),
@@ -387,6 +407,7 @@ export function createScanLoop({ bridge, store, now = Date.now, setTimer = (fn, 
     generation += 1;
     phase = 'idle';
     clearBackoff();
+    if (limitAssumed()) backoff = true; // o outro lado (celular ou simulador) pode ser um Android 9/10
     acceptedAt = [];
     anchorAt = null;
     lastRequestAt = null;

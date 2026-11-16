@@ -190,6 +190,30 @@ async function setDemo(on, { world } = {}) {
   if (reconnecting) await reconnecting.catch(() => {});
 }
 
+/**
+ * Relê a conexão do celular. Além de ao voltar para o app, é preciso quando o Status muda: sem a
+ * permissão ou com a Localização desligada o Android entrega a conexão SEM o nome e o BSSID da
+ * rede, e não avisa quando volta a mostrá-los (ligar a Localização pela cortina de notificações
+ * não passa por "voltar ao app"). Sem reler, o bloqueio sumia e o app seguia sem saber em que rede
+ * está: "Conectado a (rede oculta)", nenhuma rede marcada como a sua.
+ */
+function rereadConnection() {
+  const kind = bridge.kind();
+  bridge
+    .connection()
+    .then((conn) => {
+      // a resposta de um lado (celular) não serve depois de trocar para o outro (demonstração)
+      if (conn && bridge.kind() === kind) store.setConnection(conn);
+    })
+    .catch(() => {});
+}
+
+/** O que decide se o Android mostra a identidade da conexão mudou entre um Status e outro? */
+function identityMayHaveChanged(before, after) {
+  if (!before || !after) return false; // a partida e a troca de modo leem a conexão por conta própria
+  return before.canScan !== after.canScan || before.permission !== after.permission || before.locationEnabled !== after.locationEnabled;
+}
+
 function wireBridge() {
   bridge.on('status', (status) => store.setStatus(status));
   bridge.on('connection', (conn) => store.setConnection(conn));
@@ -341,7 +365,7 @@ function openDemoSheet() {
       'div.prose',
       null,
       h('p', null, 'Você está vendo uma ', h('strong', null, 'casa virtual'), ': as redes, os sinais e os aparelhos são simulados, com uma pessoa andando pelos cômodos. Serve para conhecer o app sem depender do Wi-Fi de verdade.'),
-      h('p', null, canLeave ? 'Para analisar o seu Wi-Fi, desligue a demonstração.' : 'Neste navegador o app não tem acesso ao Wi-Fi do aparelho; no celular, com o app instalado, ele analisa as redes de verdade.'),
+      h('p', null, nb(canLeave ? 'Para analisar o seu Wi-Fi, desligue a demonstração.' : 'Neste navegador o app não tem acesso ao Wi-Fi do aparelho; no celular, com o app instalado, ele analisa as redes de verdade.')),
     ),
     footer: [
       button('Escolher outra casa', {
@@ -721,8 +745,15 @@ async function boot() {
     updateStatusLine();
     // ao voltar das configurações do Android, confere de novo o que mudou
     gates.refresh();
-    bridge.connection().then((conn) => store.setConnection(conn)).catch(() => {});
+    rereadConnection();
   });
+  // qualquer caminho que mude o Status (evento do celular, "Permitir" no bloqueio, releitura ao voltar)
+  store.subscribe(
+    (s) => s.status,
+    (status, before) => {
+      if (identityMayHaveChanged(before, status)) rereadConnection();
+    },
+  );
 
   scanLoop.start();
 

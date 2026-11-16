@@ -12,6 +12,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { SOLVER_INFO, solve, solveQuick } from '../app/js/mapping/solver.js';
+import { fuseScale, mapSpan } from '../app/js/mapping/solver-scale.js';
 import { FLOOR_HEIGHT } from '../app/js/mapping/types.js';
 import { presetSpec } from '../app/js/sim/presets.js';
 import { planWalk, simulateSurvey } from '../app/js/sim/walk.js';
@@ -292,9 +293,16 @@ test('levantamento enorme (1500 varreduras) é resolvido em blocos, dentro do te
 // Distância medida pelo usuário
 // ---------------------------------------------------------------------------
 
-test('knownDistances: o par medido sai exato e a escala acompanha a medida', async () => {
+// A regra mudou (a conta e as medidas da bancada estão em app/js/mapping/solver-scale.js). Antes o
+// mapa esticava ou encolhia na direção de medida / distância do par no mapa. Medido em 140
+// levantamentos, essa régua não reduzia o erro de tamanho (0,168 -> 0,165 com o par que a tela
+// propunha): a distância entre dois pontos do mapa erra ±30% e é enviesada pela escolha do par.
+// Agora a medida é um TETO para o mapa inteiro — ela tem de caber nele de ponta a ponta — e por
+// isso só faz o mapa crescer; uma medida que cabe (ou menor que a do mapa) acerta só o par.
+test('knownDistances: a medida que não cabe no mapa faz o mapa crescer; a que cabe só acerta o par', async () => {
   const survey = SPOTS.survey;
   const base = await solve(survey);
+  assert.equal(base.debug.scaleAdjust, undefined, 'sem medida, nada sobre ajuste de escala');
   // Os dois pontos marcados mais afastados do mapa.
   let a = 0;
   let b = 1;
@@ -303,36 +311,78 @@ test('knownDistances: o par medido sai exato e a escala acompanha a medida', asy
   }
   const d0 = dist(base.points[a], base.points[b]);
   assert.ok(d0 > 3, 'há uma base de alguns metros no mapa');
+  // Quanto cabe no mapa de ponta a ponta: é com isto que a medida é comparada.
+  const { span } = mapSpan(
+    base.points.map((p) => p.x),
+    base.points.map((p) => p.y),
+  );
+  assert.ok(span >= d0 && span < 1.6 * d0, `o comprimento do mapa (${span.toFixed(1)} m) é da ordem da maior distância entre dois pontos (${d0.toFixed(1)} m)`);
   const withKnown = (meters) => solve({ ...survey, knownDistances: [{ a, b, meters }] });
-
-  const bigger = await withKnown(1.3 * d0);
-  assertContract(bigger, survey, 'medida maior');
-  assert.ok(Math.abs(dist(bigger.points[a], bigger.points[b]) - 1.3 * d0) < 1e-6, 'o par medido sai com a distância pedida');
-  const grow = radius(bigger.points) / radius(base.points);
-  assert.ok(grow > 1.02 && grow < 1.3, `o mapa cresce na direção da medida, sem passar dela (${grow.toFixed(3)}x)`);
-  assert.ok(bigger.scaleConf >= base.scaleConf, 'a confiança na escala não cai');
-
-  const smaller = await withKnown(0.75 * d0);
-  assert.ok(Math.abs(dist(smaller.points[a], smaller.points[b]) - 0.75 * d0) < 1e-6);
-  assert.ok(radius(smaller.points) < 0.99 * radius(base.points), 'medida menor encolhe o mapa');
-
-  // Medida que discorda do mapa por mais que um erro de escala plausível: o par sai exato, mas o
-  // resto do mapa não é esticado junto.
-  const absurd = await withKnown(4 * d0);
-  assert.ok(Math.abs(dist(absurd.points[a], absurd.points[b]) - 4 * d0) < 1e-6);
   const others = survey.scans.map((s, i) => i).filter((i) => survey.scans[i].spot !== survey.scans[a].spot && survey.scans[i].spot !== survey.scans[b].spot);
   const pick = (solution) => others.map((i) => solution.points[i]);
-  assert.ok(radius(pick(absurd)) < 1.15 * radius(pick(base)), 'o resto do mapa mantém o tamanho');
-  // As varreduras do mesmo ponto marcado continuam juntas depois do ajuste.
-  assertContract(absurd, survey, 'medida absurda');
+
+  // Medida maior que o mapa inteiro: o mapa cresce até ela caber, pelo fator que fuseScale() dá.
+  const meters = 1.25 * span;
+  const expected = fuseScale(span, [meters]);
+  assert.ok(expected.factor > 1.25 && expected.factor < 1.45, `fator esperado: ${expected.factor}`);
+  const bigger = await withKnown(meters);
+  assertContract(bigger, survey, 'medida maior');
+  assert.ok(Math.abs(dist(bigger.points[a], bigger.points[b]) - meters) < 1e-6, 'o par medido sai com a distância pedida');
+  const grow = radius(pick(bigger)) / radius(pick(base));
+  assert.ok(Math.abs(grow / expected.factor - 1) < 1e-6, `o resto do mapa cresce pelo fator da fusão (${grow.toFixed(4)}x, esperado ${expected.factor.toFixed(4)}x)`);
+  assert.deepEqual(
+    { ...bigger.debug.scaleAdjust, spanM: null },
+    { applied: true, factor: Math.round(expected.factor * 1000) / 1000, weight: Math.round(expected.weight * 100) / 100, used: 1, ignored: 0, spanM: null, longestM: Math.round(meters * 100) / 100 },
+    'o resumo do ajuste diz quanto o mapa cresceu e o quanto a medida mandou',
+  );
+  assert.ok(Math.abs(bigger.debug.scaleAdjust.spanM - span) < 0.01);
+  assert.ok(bigger.scaleConf >= 0.6 && bigger.scaleConf > base.scaleConf, `a confiança na escala sobe (${base.scaleConf} -> ${bigger.scaleConf})`);
+
+  // Medida que cabe no mapa: o tamanho não muda (o resto do mapa fica onde estava), só o par é acertado.
+  for (const fits of [0.7 * span, 0.5 * d0]) {
+    const same = await withKnown(fits);
+    assert.ok(Math.abs(dist(same.points[a], same.points[b]) - fits) < 1e-6, 'o par sai com a distância pedida');
+    assert.ok(Math.abs(radius(pick(same)) / radius(pick(base)) - 1) < 1e-9, 'medida que cabe (ou menor que a do mapa) não muda o tamanho: o ajuste nunca encolhe o mapa');
+    assert.equal(same.debug.scaleAdjust.applied, false);
+    assert.equal(same.debug.scaleAdjust.factor, 1);
+    assert.equal(same.debug.scaleAdjust.used, 1);
+    assert.ok(same.scaleConf >= base.scaleConf, 'a confiança na escala não cai');
+    assertContract(same, survey, 'medida que cabe');
+  }
+
+  // Medida que pede um mapa mais de 2 vezes maior contradiz o mapa (erro de digitação, lugares
+  // trocados): é ignorada por inteiro. (Antes o par saía exato — dois pontos jogados para fora da
+  // casa — e só o resto do mapa era poupado.)
+  const absurd = await withKnown(2.2 * span);
+  assert.deepEqual(absurd.points, base.points, 'medida que contradiz o mapa não mexe em nada');
+  assert.equal(absurd.scaleConf, base.scaleConf);
+  assert.deepEqual({ ...absurd.debug.scaleAdjust, spanM: null }, { applied: false, factor: 1, weight: 0, used: 0, ignored: 1, spanM: null, longestM: 0 });
+
+  // Várias medidas: manda a mais comprida; a absurda fica de fora sem estragar as outras.
+  const c = others[0];
+  const e = others.find((i) => survey.scans[i].spot !== survey.scans[c].spot);
+  const many = await solve({ ...survey, knownDistances: [{ a, b, meters }, { a: c, b: e, meters: 0.3 * span }, { a: c, b, meters: 2.5 * span }, { a: c, b, meters: 1e6 }] });
+  assert.equal(many.debug.scaleAdjust.factor, bigger.debug.scaleAdjust.factor);
+  assert.equal(many.debug.scaleAdjust.used, 2);
+  assert.equal(many.debug.scaleAdjust.ignored, 2, 'a que contradiz o mapa e a absurda');
+  assert.ok(Math.abs(dist(many.points[a], many.points[b]) - meters) < 0.05 && Math.abs(dist(many.points[c], many.points[e]) - 0.3 * span) < 0.05, 'os pares aceitos saem com as distâncias pedidas');
+  assertContract(many, survey, 'várias medidas');
 
   // Entradas inválidas são ignoradas.
   const ignored = await solve({ ...survey, knownDistances: [{ a, b: a, meters: 5 }, { a: -1, b, meters: 5 }, { a, b: 1e6, meters: 5 }, { a, b, meters: 0 }] });
   assert.deepEqual(ignored.points, base.points);
+  assert.deepEqual({ ...ignored.debug.scaleAdjust, spanM: null }, { applied: false, factor: 1, weight: 0, used: 0, ignored: 4, spanM: null, longestM: 0 }, 'e o resumo diz que nenhuma valeu');
 
   // A prévia honra a medida do mesmo jeito.
-  const quick = solveQuick({ ...survey, knownDistances: [{ a, b, meters: 1.3 * d0 }] });
-  assert.ok(Math.abs(dist(quick.points[a], quick.points[b]) - 1.3 * d0) < 1e-6);
+  const quickBase = solveQuick(survey);
+  const quickSpan = mapSpan(
+    quickBase.points.map((p) => p.x),
+    quickBase.points.map((p) => p.y),
+  ).span;
+  const quick = solveQuick({ ...survey, knownDistances: [{ a, b, meters: 1.25 * quickSpan }] });
+  assert.ok(Math.abs(dist(quick.points[a], quick.points[b]) - 1.25 * quickSpan) < 1e-6);
+  assert.ok(Math.abs(radius(pick(quick)) / radius(pick(quickBase)) / fuseScale(quickSpan, [1.25 * quickSpan]).factor - 1) < 1e-6, 'a prévia cresce pelo mesmo fator');
+  assert.equal(quick.debug.scaleAdjust.applied, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -457,7 +507,8 @@ test('solve: com options.previous a solução final sai no referencial da últim
 
 test('arquivos do solucionador: sem sorteio, sem relógio de parede, sem nada de fora de mapping/', () => {
   const files = fs.readdirSync(MAPPING).filter((f) => /^solver(-[a-z]+)?\.js$/.test(f));
-  assert.deepEqual(files.sort(), ['solver-chain.js', 'solver-common.js', 'solver-fields.js', 'solver-isomap.js', 'solver-range.js', 'solver.js']);
+  // solver-scale.js: a conta do "Ajustar a escala", num módulo à parte porque a tela de resultado também a usa
+  assert.deepEqual(files.sort(), ['solver-chain.js', 'solver-common.js', 'solver-fields.js', 'solver-isomap.js', 'solver-range.js', 'solver-scale.js', 'solver.js']);
   for (const file of files) {
     const source = fs.readFileSync(path.join(MAPPING, file), 'utf8');
     // Sem os comentários, que podem citar os nomes proibidos.
@@ -468,7 +519,9 @@ test('arquivos do solucionador: sem sorteio, sem relógio de parede, sem nada de
     assert.ok(!/\b(document|window|localStorage)\s*\./.test(code), `${file}: usa a página (roda num Worker)`);
     const imports = [...code.matchAll(/\b(?:import|export)\s+(?:[\w*{}\s,$]+\s+from\s*)?['"]([^'"]+)['"]/g)].map((m) => m[1]);
     for (const spec of imports) assert.match(spec, /^\.\/(types|solver-[a-z]+)\.js$/, `${file}: importa ${spec}`);
-    if (file !== 'solver-common.js') assert.ok(imports.length >= 1, `${file}: importa as peças comuns`);
+    // (solver-scale.js não importa nada de propósito: a página o carrega sem trazer os motores junto)
+    if (file === 'solver-scale.js') assert.equal(imports.length, 0, `${file}: não depende de mais nada`);
+    else if (file !== 'solver-common.js') assert.ok(imports.length >= 1, `${file}: importa as peças comuns`);
   }
   // O torneio acabou: os candidatos não vão dentro do app.
   assert.ok(!fs.existsSync(path.join(MAPPING, 'candidates')), 'app/js/mapping/candidates foi removida');

@@ -19,7 +19,7 @@
 // As funções exportadas além de mount() são a lógica pura da tela (sem DOM), testadas em
 // tests/channel-graph-layout.test.mjs.
 
-import { h, s, patch, sheet, toast, fmtDbm, fmtBand, fmtWidth, fmtFreq, fmtNum, fmtPct, fmtAgo, plural } from '../dom.js';
+import { h, nb, s, patch, sheet, toast, fmtDbm, fmtBand, fmtWidth, fmtFreq, fmtNum, fmtPct, fmtAgo, plural } from '../dom.js';
 import { icon } from '../icons.js';
 import { button, iconButton, badge, signalBars, signalBadge, signalWord, ssidLabel, displaySsid, listRow, emptyState, spinner, throttleTip, kvList, securityBadge } from '../components.js';
 import { rateChannels, recommendChannel, recommendWidth, channelGraph } from '../../core/channel-rating.js';
@@ -1334,7 +1334,7 @@ export async function mount(root, ctx) {
               ' No navegador, digite o endereço dele na barra de endereços',
               gateway ? [': ', h('strong.mono', null, gateway), '. Esse é o endereço que a sua conexão informa; costuma estar também numa etiqueta embaixo do aparelho.'] : ' (os mais comuns são 192.168.0.1, 192.168.1.1 e 192.168.15.1; ele costuma estar numa etiqueta embaixo do aparelho).',
             ),
-            h('li', null, h('strong', null, 'Entre com o usuário e a senha do roteador.'), ' Também ficam na etiqueta. Não é a senha do Wi-Fi.'),
+            h('li', null, h('strong', null, 'Entre com o usuário e a senha do roteador.'), nb(' Também ficam na etiqueta. Não é a senha do Wi-Fi.')),
             h(
               'li',
               null,

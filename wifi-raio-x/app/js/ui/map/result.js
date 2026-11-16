@@ -53,6 +53,10 @@ import {
   spotDistance,
   parseMeters,
   withKnownDistance,
+  scalePairs,
+  scalePreview,
+  scaleOutcome,
+  cloudRatio,
   renameRoom,
   ownBssidsFor,
   mapMeta,
@@ -566,18 +570,32 @@ export async function mountResult(root, env, { id }) {
 
   function openScale() {
     const spots = spotOptions(S.model);
+    const hadAdjust = Array.isArray(S.survey.knownDistances) && S.survey.knownDistances.length > 0;
+    // (medido na bancada, mapping/solver-scale.js: a distância medida é comparada com o mapa inteiro,
+    // de ponta a ponta. Se não cabe, o mapa cresce até caber; se cabe, nada muda. Com o par que a tela
+    // propõe o erro de tamanho cai de 17% para 13%; com os dois lugares mais distantes de verdade, para 6%)
     const why = h(
       'div.prose',
       null,
-      h('p', null, `Só com o Wi-Fi, as distâncias do mapa costumam sair um pouco menores que as da casa (uns ${ACCURACY.shrinkPct}%, em média) e podem errar ${ACCURACY.scalePct}% ou mais. Se você informar a `, h('strong', null, 'distância real'), ' entre dois lugares marcados, o mapa inteiro é reajustado por ela.'),
-      h('p', null, 'Escolha dois lugares bem distantes um do outro e meça com uma trena, ou conte passos largos (um passo largo ≈ 1 m).'),
-      // (medido na bancada: uma distância só não conserta o tamanho de uma casa pequena; ajuda onde o mapa saiu bem menor e a base é longa)
-      h('p', null, 'O ajuste ajuda mais quando o mapa saiu bem menor que o lugar e a distância medida é grande (10 m ou mais). Com uma distância curta, numa casa pequena, o tamanho muda pouco e pode não ficar mais certo.'),
+      h(
+        'p',
+        null,
+        `Só com o Wi-Fi, o mapa costuma sair menor que a casa (uns ${ACCURACY.shrinkPct}%, em média; em lugares grandes, bem mais). Uma `,
+        h('strong', null, 'distância real'),
+        ' entre dois lugares marcados mostra o tamanho mínimo que a casa tem: se ela não couber no mapa, o mapa inteiro cresce até caber.',
+      ),
+      h('p', null, `Escolha dois lugares distantes, de preferência os dois mais afastados da casa e com uma linha reta entre eles, e meça com uma trena ou conte passos largos (um passo largo ≈ ${fmtNum(ACCURACY.stepM, 1)} m).`),
+      h(
+        'p',
+        null,
+        `Vale a pena quando o mapa saiu visivelmente pequeno ou o lugar é grande. O ajuste só aumenta o mapa, nunca diminui: se a distância couber nele do jeito que está, o tamanho não muda, e uma distância curta não diz nada. Com os dois lugares mais distantes de verdade, o tamanho costuma ficar a menos de ${ACCURACY.scaleBestPct}% do real; com outro par, o mapa pode continuar pequeno.`,
+      ),
+      hadAdjust ? h('p', null, 'Este mapa já tem uma distância medida. Outra medida para os mesmos dois lugares substitui a anterior; entre pares diferentes, vale a mais comprida.') : null,
     );
     if (spots.length < 2) {
       const panel = sheet({
         title: 'Ajustar a escala',
-        content: [why, banner({ tone: 'info', title: 'Faltam lugares marcados', text: 'O ajuste precisa de dois lugares marcados no mapa. Use “Continuar mapeando”, marque dois lugares (por exemplo, as duas pontas do corredor) e volte aqui.' })],
+        content: [why, banner({ tone: 'info', title: 'Faltam lugares marcados', text: 'O ajuste precisa de dois lugares marcados no mapa. Use “Continuar mapeando”, marque dois lugares bem distantes (por exemplo, as duas pontas da casa) e volte aqui.' })],
         footer: [
           button('Agora não', { variant: 'secondary', onClick: () => panel.close() }),
           button('Continuar mapeando', {
@@ -591,71 +609,107 @@ export async function mountResult(root, env, { id }) {
       });
       return;
     }
-    // começa pelo par mais distante: quanto maior a distância medida, melhor o ajuste
-    let a = spots[0].id;
-    let b = spots[1].id;
-    let far = -1;
-    for (let i = 0; i < spots.length; i++) {
-      for (let j = i + 1; j < spots.length; j++) {
-        const d = spotDistance(S.model, spots[i].id, spots[j].id);
-        if (d !== null && d > far) {
-          far = d;
-          a = spots[i].id;
-          b = spots[j].id;
-        }
-      }
-    }
-    const estimate = h('p.mrs-scale__now', { 'aria-live': 'polite' });
-    const error = h('span.field__error', { hidden: true, role: 'alert' });
-    const input = h('input.input', { type: 'text', inputmode: 'decimal', placeholder: 'Ex.: 4,5', maxlength: 8, autocomplete: 'off', 'aria-label': 'Distância real em metros' });
-    const refresh = () => {
-      const d = a === b ? null : spotDistance(S.model, a, b);
-      estimate.textContent = a === b ? 'Escolha dois lugares diferentes.' : d === null ? '' : `Hoje o mapa estima ${approxMetersText(d)} entre eles.`;
-    };
+    // O par proposto: a base mais longa do mapa em relação à incerteza das duas pontas, no mesmo andar
+    // (scalePairs). O que mais ajuda é o par mais distante DE VERDADE, e isso só o usuário sabe: o
+    // texto acima pede para trocar.
+    const proposal = scalePairs(S.model, S.survey) || { a: spots[0].id, b: spots[1].id, second: null };
     const options = spots.map((sp) => ({ value: sp.id, label: sp.label }));
-    const submit = async () => {
-      const meters = parseMeters(input.value);
-      const problem = a === b ? 'Escolha dois lugares diferentes.' : meters === null ? 'Digite a distância em metros, entre 0,5 e 200 (ex.: 4,5).' : null;
-      if (problem) {
-        error.textContent = problem;
-        error.hidden = false;
-        if (a !== b) input.focus();
-        return;
+    let submit = async () => {};
+    /** Um bloco "de / até / distância". `ordinal`: '' no primeiro, 'outra ' no segundo. */
+    const measure = (pair, ordinal) => {
+      let a = pair.a;
+      let b = pair.b;
+      const estimate = h('p.mrs-scale__now', { 'aria-live': 'polite' });
+      const hint = h('span.field__hint', { 'aria-live': 'polite', hidden: true });
+      const error = h('span.field__error', { hidden: true, role: 'alert' });
+      const input = h('input.input', { type: 'text', inputmode: 'decimal', placeholder: 'Ex.: 4,5', maxlength: 8, autocomplete: 'off', 'aria-label': `Distância real em metros${ordinal ? ' (segunda medida)' : ''}` });
+      const refresh = () => {
+        const d = a === b ? null : spotDistance(S.model, a, b);
+        estimate.textContent = a === b ? 'Escolha dois lugares diferentes.' : d === null ? '' : `Hoje o mapa estima ${approxMetersText(d)} entre eles.`;
+        // antes de refazer o mapa: o que esta distância faria com ele (num mapa já ajustado a conta
+        // recomeça do mapa original com todas as medidas, e a prévia não valeria)
+        const preview = hadAdjust || a === b ? null : scalePreview(S.model, a, b, parseMeters(input.value));
+        hint.textContent = preview ? preview.text : '';
+        hint.hidden = !hint.textContent;
+        if (preview) hint.dataset.kind = preview.kind;
+      };
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          void submit();
+        }
+      });
+      input.addEventListener('input', () => {
+        error.hidden = true;
+        refresh();
+      });
+      refresh();
+      return {
+        nodes: [
+          h('label.field', null, h('span.field__label', null, ordinal ? 'Outra medida: de' : 'De'), select(options, a, (v) => ((a = v), refresh()), { label: ordinal ? 'Primeiro lugar da segunda medida' : 'Primeiro lugar', block: true })),
+          h('label.field', null, h('span.field__label', null, 'Até'), select(options, b, (v) => ((b = v), refresh()), { label: ordinal ? 'Segundo lugar da segunda medida' : 'Segundo lugar', block: true })),
+          estimate,
+          h('label.field', null, h('span.field__label', null, 'Distância real entre os dois (em metros)'), input, hint, error),
+        ],
+        read: () => ({ a, b, text: input.value, meters: parseMeters(input.value) }),
+        fail: (message, focus) => {
+          error.textContent = message;
+          error.hidden = false;
+          if (focus) input.focus();
+        },
+      };
+    };
+    const blocks = [measure(proposal, '')];
+    submit = async () => {
+      let next = S.survey;
+      for (let k = 0; k < blocks.length; k++) {
+        const v = blocks[k].read();
+        if (k > 0 && !v.text.trim()) continue; // segunda medida em branco: não entra
+        const problem = v.a === v.b ? 'Escolha dois lugares diferentes.' : v.meters === null ? 'Digite a distância em metros, entre 0,5 e 200 (ex.: 4,5).' : null;
+        if (problem) {
+          blocks[k].fail(problem, v.a !== v.b);
+          return;
+        }
+        const added = withKnownDistance(next, v.a, v.b, v.meters);
+        if (!added) {
+          blocks[k].fail('Não foi possível usar estes dois lugares. Escolha outros.', false);
+          return;
+        }
+        next = added;
       }
-      const next = withKnownDistance(S.survey, a, b, meters);
-      if (!next) {
-        error.textContent = 'Não foi possível usar estes dois lugares. Escolha outros.';
-        error.hidden = false;
-        return;
-      }
-      const areaBefore = mapMeta(S.model, S.survey).areaM2;
+      const before = { solution: S.solution, areaM2: mapMeta(S.model, S.survey).areaM2 };
       panel.close();
       const ok = await rebuildAfterSurveyEdit(next, { resolve: true, title: 'Ajustando a escala…' });
       if (ok && !dead) {
-        const areaAfter = mapMeta(S.model, S.survey).areaM2;
-        toast(`Escala ajustada. Área estimada: de ≈${THIN}${fmtNum(areaBefore)} para ≈${THIN}${fmtNum(areaAfter)}${THIN}m².`);
+        // o que a medida fez com o mapa, nas palavras de scaleOutcome: cresceu X%, não mudou, foi ignorada
+        const adjust = S.solution && S.solution.debug ? S.solution.debug.scaleAdjust : null;
+        toast(scaleOutcome({ adjust, ratio: cloudRatio(before.solution, S.solution), hadAdjust, areaBefore: before.areaM2, areaAfter: mapMeta(S.model, S.survey).areaM2 }).text);
       }
     };
-    input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') {
-        ev.preventDefault();
-        void submit();
-      }
-    });
-    input.addEventListener('input', () => {
-      error.hidden = true;
-    });
-    const known = Array.isArray(S.survey.knownDistances) ? S.survey.knownDistances.length : 0;
+    const known = hadAdjust ? S.survey.knownDistances.length : 0;
+    // segunda medida (opcional): outra chance de pegar a maior distância da casa
+    const more =
+      spots.length >= 3
+        ? button('Medir mais uma distância', {
+            variant: 'quiet',
+            icon: 'ruler',
+            onClick: () => {
+              const other = proposal.second || { a: proposal.a, b: (spots.find((sp) => sp.id !== proposal.a && sp.id !== proposal.b) || spots[0]).id };
+              const block = measure(other, 'outra ');
+              blocks.push(block);
+              more.before(...block.nodes);
+              more.hidden = true;
+            },
+          })
+        : null;
     const panel = sheet({
       title: 'Ajustar a escala',
       content: h(
         'div.mrs-scale',
         null,
         why,
-        h('label.field', null, h('span.field__label', null, 'De'), select(options, a, (v) => ((a = v), refresh()), { label: 'Primeiro lugar', block: true })),
-        h('label.field', null, h('span.field__label', null, 'Até'), select(options, b, (v) => ((b = v), refresh()), { label: 'Segundo lugar', block: true })),
-        estimate,
-        h('label.field', null, h('span.field__label', null, 'Distância real entre os dois (em metros)'), input, error),
+        blocks[0].nodes,
+        more,
         known
           ? button(known === 1 ? 'Remover o ajuste já feito' : `Remover os ${known} ajustes já feitos`, {
               variant: 'quiet',
@@ -669,7 +723,6 @@ export async function mountResult(root, env, { id }) {
       ),
       footer: [button('Cancelar', { variant: 'secondary', onClick: () => panel.close() }), button('Ajustar', { variant: 'primary', icon: 'ruler', onClick: () => void submit() })],
     });
-    refresh();
   }
 
   async function continueSurvey() {

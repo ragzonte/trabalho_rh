@@ -32,9 +32,11 @@
 // solucionador acha, com o erro que a bancada mostra. Cada medida d multiplica essa crença pela
 // chance de d caber na casa: Φ((ln(span / d) − s) / SPAN_EDGE), onde span é o comprimento do mapa
 // de ponta a ponta e SPAN_EDGE a incerteza desse comprimento mais o erro de quem mede. A resposta é
-// o s mais provável (a moda): 0 enquanto as medidas cabem, logo abaixo do teto quando não cabem.
-// Várias medidas se combinam sozinhas (manda a mais comprida). `weight` é a parte da incerteza de
-// antes que as medidas tiraram (0 = nenhuma, perto de 1 = o tamanho passou a vir da medida).
+// o s mais provável (a moda): 0 enquanto a medida cabe, logo abaixo do teto quando não cabe. Com
+// várias medidas manda a mais comprida: a incerteza do teto é a do comprimento do mapa, a mesma
+// para todas, e multiplicar uma chance por medida contaria essa incerteza várias vezes (medido: com
+// as duas maiores distâncias da casa o mapa passava 3% do ponto). `weight` é a parte da incerteza
+// de antes que a medida tirou (0 = nenhuma, perto de 1 = o tamanho passou a vir da medida).
 //
 // Resultado na bancada (erro médio do tamanho, |mapa/real − 1|; antes -> depois, uma distância
 // exata): par proposto pela tela 0,17 -> 0,12 a 0,13; os dois lugares mais distantes de verdade
@@ -151,23 +153,24 @@ export function fuseScale(span, meters, options) {
   const eps = opts.edge > 0 ? opts.edge : SPAN_EDGE;
   const maxFactor = opts.maxFactor > 1 ? opts.maxFactor : SCALE_MAX_FACTOR;
   const list = Array.isArray(meters) ? meters : [];
-  const tops = []; // teto de s que cada medida impõe: ln(span / d)
+  let longest = 0; // a maior medida aceita: é ela que dá o teto
+  let used = 0;
   let ignored = 0;
   if (isNum(span) && span > 0) {
     for (const d of list) {
       if (!isNum(d) || !(d > 0) || d > maxFactor * span) ignored++;
-      else tops.push(Math.log(span / d));
+      else {
+        used++;
+        if (d > longest) longest = d;
+      }
     }
   } else ignored = list.length;
-  if (!tops.length) return { factor: 1, weight: 0, sd: tau, used: 0, ignored };
+  if (!used) return { factor: 1, weight: 0, sd: tau, used: 0, ignored };
+  const top = Math.log(span / longest); // teto de s: a medida não pode ser maior que a casa
 
   // O s mais provável: a derivada do ln da crença só desce (a crença é log-côncava), então é uma
-  // bisseção. Em s = 0 ela já é negativa (qualquer teto empurra para baixo, nem que seja um nada).
-  const slope = (s) => {
-    let d = -s / (tau * tau);
-    for (const top of tops) d -= pushOf((top - s) / eps) / eps;
-    return d;
-  };
+  // bisseção. Em s = 0 ela já é negativa (o teto sempre empurra para baixo, nem que seja um nada).
+  const slope = (s) => -s / (tau * tau) - pushOf((top - s) / eps) / eps;
   let lo = -Math.log(maxFactor) - 6 * eps;
   let hi = 0;
   for (let it = 0; it < 60; it++) {
@@ -183,9 +186,9 @@ export function fuseScale(span, meters, options) {
   const step = 0.01;
   let peak = -Infinity;
   const logs = [];
-  for (let s = -1.6; s <= 0.8 + 1e-9; s += step) {
-    let v = (-s * s) / (2 * tau * tau);
-    for (const top of tops) v += logPhi((top - s) / eps);
+  for (let i = 0; i <= 240; i++) {
+    const s = -1.6 + i * step;
+    const v = (-s * s) / (2 * tau * tau) + logPhi((top - s) / eps);
     logs.push(v);
     if (v > peak) peak = v;
   }
@@ -202,5 +205,5 @@ export function fuseScale(span, meters, options) {
   const mean = m1 / z;
   const sd = Math.sqrt(Math.max(0, m2 / z - mean * mean));
   const weight = Math.min(1, Math.max(0, 1 - (sd * sd) / (tau * tau)));
-  return { factor, weight, sd, used: tops.length, ignored };
+  return { factor, weight, sd, used, ignored };
 }

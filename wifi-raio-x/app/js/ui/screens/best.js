@@ -25,7 +25,7 @@
 //
 // Nomes de rede são texto hostil: tudo entra por h() (textContent), nunca por HTML.
 
-import { h, s, mount as render, patch, sheet, toast, fmtDbm, fmtMbps, fmtAgo, fmtPct, plural, NO_VALUE } from '../dom.js';
+import { h, nb, s, mount as render, patch, sheet, toast, fmtDbm, fmtMbps, fmtAgo, fmtPct, plural, NO_VALUE } from '../dom.js';
 import { icon } from '../icons.js';
 import { badge, bandBadge, securityBadge, standardBadge, signalBars, ssidLabel, displaySsid, button, switchRow, sectionHeader, banner, tipBanner, emptyState, skeletonList, meter, openThrottleHelp, throttleCopy } from '../components.js';
 import { signalLevel } from '../../core/signal.js';
@@ -567,7 +567,7 @@ function heroCard(view, on) {
         'div.best-hero__top',
         null,
         h('span.best-hero__icon', null, icon(look.icon, { size: 26 })),
-        h('div.best-hero__titles', null, h('span.best-hero__eyebrow', null, 'Recomendação neste ponto'), h('h2.best-hero__headline', null, advice.headline)),
+        h('div.best-hero__titles', null, h('span.best-hero__eyebrow', null, 'Recomendação neste ponto'), h('h2.best-hero__headline', null, nb(advice.headline))),
         okLook
           ? h(
               'button.best-hero__score',
@@ -577,7 +577,7 @@ function heroCard(view, on) {
             )
           : null,
       ),
-      h('p.best-hero__text', null, advice.text),
+      h('p.best-hero__text', null, nb(advice.text)),
       extra,
       actions.length ? h('div.best-hero__actions', { key: 'actions' }, actions) : null,
       stale
@@ -751,9 +751,9 @@ function diagCard(insight, on) {
       'div.best-diag__head',
       null,
       h('span.best-diag__icon', null, icon(look.icon, { size: 22 })),
-      h('div.best-diag__titles', null, look.kind ? h('span.best-diag__kind', null, look.kind) : null, h('h3.best-diag__title', null, insight.title)),
+      h('div.best-diag__titles', null, look.kind ? h('span.best-diag__kind', null, look.kind) : null, h('h3.best-diag__title', null, nb(insight.title))),
     ),
-    h('p.best-diag__text', null, insight.text),
+    h('p.best-diag__text', null, nb(insight.text)),
     actions.length ? h('div.best-diag__actions', null, actions) : null,
   );
 }
@@ -768,10 +768,10 @@ function noteRow(insight, open, on) {
       'button.row.row--tappable.best-fold__head',
       { type: 'button', 'aria-expanded': !!open, 'aria-controls': bodyId, onClick: () => on.toggleNote(insight.id) },
       h('span.row__lead.best-fold__icon', null, icon('info', { size: 20 })),
-      h('span.row__body', null, h('span.best-fold__title', null, insight.title)),
+      h('span.row__body', null, h('span.best-fold__title', null, nb(insight.title))),
       h('span.row__trail', null, icon(open ? 'chevron-up' : 'chevron-down', { size: 20 })),
     ),
-    h('div.best-fold__body', { id: bodyId, hidden: !open }, h('p.best-fold__text', null, insight.text), actions.length ? h('div.best-diag__actions', null, actions) : null),
+    h('div.best-fold__body', { id: bodyId, hidden: !open }, h('p.best-fold__text', null, nb(insight.text)), actions.length ? h('div.best-diag__actions', null, actions) : null),
   );
 }
 
@@ -796,7 +796,7 @@ function diagSection(view, on) {
             h('span.best-diag__icon', null, icon('info', { size: 22 })),
             h('div.best-diag__titles', null, h('h3.best-diag__title', null, 'Sem diagnóstico por enquanto')),
           ),
-          h('p.best-diag__text', null, connected ? 'A rede em uso ainda não apareceu nas buscas. O diagnóstico chega com a próxima busca.' : 'O diagnóstico aparece quando o celular está conectado a uma rede Wi-Fi.'),
+          h('p.best-diag__text', null, nb(connected ? 'A rede em uso ainda não apareceu nas buscas. O diagnóstico chega com a próxima busca.' : 'O diagnóstico aparece quando o celular está conectado a uma rede Wi-Fi.')),
         ),
       );
     }

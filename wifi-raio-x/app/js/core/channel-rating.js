@@ -735,6 +735,8 @@ export function recommendWidth(aps, band, options) {
   const pick = table.find((t) => t.widthMHz > 20 && t.score >= (b === '2.4' ? NEARLY_EMPTY_SCORE : GOOD_SCORE[t.widthMHz]));
 
   if (!pick) {
+    // roteador que só anuncia 20 MHz: o motivo é ele, não os vizinhos
+    if (b !== '2.4' && cap <= 20) return { widthMHz: 20, text: `Seu roteador só anuncia 20 MHz em ${BAND_NAME[b]}: não há largura maior para sugerir.`, options: table };
     const text =
       b === '2.4'
         ? `Use 20 MHz: ${crowd} em 2,4 GHz e um canal de 40 MHz ocuparia cerca de metade da faixa.`

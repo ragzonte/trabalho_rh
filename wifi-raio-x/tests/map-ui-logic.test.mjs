@@ -434,6 +434,190 @@ test('withKnownDistance: usa a varredura do meio de cada ponto e substitui a med
   assert.equal(L.withKnownDistance(survey, 0, 1, NaN), null);
 });
 
+// --- "Ajustar a escala": o par proposto, a prévia e o que dizer depois -------
+
+/** Mapa de mentira para o ajuste de escala: lugares marcados com posição, andar e confiança escolhidos. */
+function scaleFixture(places) {
+  const scans = [];
+  const path = [];
+  const spots = [];
+  places.forEach((p, id) => {
+    const n = p.scans || 1;
+    for (let k = 0; k < n; k++) {
+      path.push({ i: scans.length, x: p.x, y: p.y, z: (p.floor || 0) * 2.8, floor: p.floor || 0, conf: p.conf ?? 0.8, still: true });
+      scans.push({ t: scans.length, floor: p.floor || 0, still: true, spot: id, readings: [] });
+    }
+    spots.push({ id, label: p.label || '', x: p.x, y: p.y, z: (p.floor || 0) * 2.8, floor: p.floor || 0, scans: n });
+  });
+  return { model: { floors: [...new Set(places.map((p) => p.floor || 0))].map(() => ({})), spots, path }, survey: { version: 1, scans, aps: {}, knownDistances: [] } };
+}
+
+test('scalePairs: propõe a base mais longa em relação à incerteza das pontas, no mesmo andar, e um segundo par sem lugar repetido', () => {
+  // quatro cantos de um retângulo 8 x 3, todos confiáveis: a diagonal
+  const box = scaleFixture([
+    { x: 0, y: 0 },
+    { x: 8, y: 0 },
+    { x: 8, y: 3 },
+    { x: 0, y: 3 },
+  ]);
+  const first = L.scalePairs(box.model, box.survey);
+  assert.deepEqual([first.a, first.b].sort(), [0, 2], 'uma diagonal');
+  assert.deepEqual([first.second.a, first.second.b].sort(), [1, 3], 'a outra diagonal: nenhum lugar repetido');
+
+  // o ponto mais distante no mapa é pouco confiável (0,15: erro esperado de 3,6 m): a distância até
+  // ele está inflada pelo erro, e a base confiável um pouco mais curta ganha
+  const noisy = scaleFixture([
+    { x: 0, y: 0, conf: 0.85 },
+    { x: 9, y: 0, conf: 0.85 },
+    { x: 9.4, y: 1, conf: 0.15 },
+    { x: 4, y: 2, conf: 0.85 },
+  ]);
+  const pick = L.scalePairs(noisy.model, noisy.survey);
+  assert.deepEqual([pick.a, pick.b].sort(), [0, 1], 'não é simplesmente o par mais distante no mapa');
+  // sem o levantamento não há confiança por lugar: vale a distância do mapa
+  const plain = L.scalePairs(noisy.model, null);
+  assert.deepEqual([plain.a, plain.b].sort(), [0, 2]);
+  // com a mesma confiança em todos, é o par mais distante
+  const even = scaleFixture([
+    { x: 0, y: 0 },
+    { x: 9, y: 0 },
+    { x: 9.4, y: 1 },
+    { x: 4, y: 2 },
+  ]);
+  const far = L.scalePairs(even.model, even.survey);
+  assert.deepEqual([far.a, far.b].sort(), [0, 2]);
+
+  // mesmo andar primeiro: o par mais distante no desenho está em andares diferentes e não é proposto
+  const floors = scaleFixture([
+    { x: 0, y: 0, floor: 0 },
+    { x: 5, y: 0, floor: 0 },
+    { x: 12, y: 0, floor: 1 },
+    { x: 9, y: 1, floor: 1 },
+  ]);
+  const same = L.scalePairs(floors.model, floors.survey);
+  assert.deepEqual([same.a, same.b].sort(), [0, 1]);
+  assert.deepEqual([same.second.a, same.second.b].sort(), [2, 3]);
+  // só um lugar por andar: sobra o par entre andares
+  const stairs = scaleFixture([
+    { x: 0, y: 0, floor: 0 },
+    { x: 6, y: 0, floor: 1 },
+  ]);
+  assert.deepEqual(L.scalePairs(stairs.model, stairs.survey), { a: 0, b: 1, second: null });
+
+  // empate na base: ganha o par com mais varreduras
+  const tie = scaleFixture([
+    { x: 0, y: 0, scans: 1 },
+    { x: 6, y: 0, scans: 1 },
+    { x: 0, y: 6, scans: 3 },
+    { x: 6, y: 6, scans: 3 },
+  ]);
+  // (as duas diagonais empatam em tudo; entre os lados de 6 m... as diagonais vêm antes)
+  const diag = L.scalePairs(tie.model, tie.survey);
+  assert.ok(Math.abs(Math.hypot(tie.model.spots[diag.a].x - tie.model.spots[diag.b].x, tie.model.spots[diag.a].y - tie.model.spots[diag.b].y) - Math.hypot(6, 6)) < 1e-9);
+  const tie2 = scaleFixture([
+    { x: 0, y: 0, scans: 1 },
+    { x: 6, y: 0, scans: 1 },
+    { x: 20, y: 0.001, scans: 4 },
+    { x: 26, y: 0.001, scans: 4 },
+  ]);
+  tie2.model.spots.splice(2, 2); // ficam só os dois primeiros no modelo: par único
+  assert.deepEqual(L.scalePairs(tie2.model, tie2.survey), { a: 0, b: 1, second: null });
+
+  // menos de dois lugares, ou modelo vazio: nada a propor
+  assert.equal(L.scalePairs({ spots: [{ id: 0, x: 0, y: 0, floor: 0 }] }, null), null);
+  assert.equal(L.scalePairs(null, null), null);
+  assert.equal(L.scalePairs({}, {}), null);
+  // três lugares: há par proposto, mas não um segundo sem lugar repetido
+  const three = scaleFixture([{ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 2, y: 3 }]);
+  assert.equal(L.scalePairs(three.model, three.survey).second, null);
+
+  // num mapa de verdade: dois lugares diferentes do mesmo andar, e é determinístico
+  const { model, survey } = makeMap('sobrado');
+  const real = L.scalePairs(model, survey);
+  const byId = new Map(model.spots.map((sp) => [sp.id, sp]));
+  assert.notEqual(real.a, real.b);
+  assert.equal(byId.get(real.a).floor, byId.get(real.b).floor);
+  assert.ok(real.second && new Set([real.a, real.b, real.second.a, real.second.b]).size === 4);
+  assert.deepEqual(L.scalePairs(model, survey), real);
+});
+
+test('scaleSpan / scalePreview: dizem, antes de refazer o mapa, se a distância vai mudar alguma coisa', () => {
+  // mapa de 10 m de ponta a ponta (dois lugares nas pontas e o caminho entre eles)
+  const fx = scaleFixture([
+    { x: 0, y: 0, label: 'Sala' },
+    { x: 10, y: 0, label: 'Quarto' },
+    { x: 5, y: 0.5, label: 'Corredor' },
+  ]);
+  const span = L.scaleSpan(fx.model);
+  assert.ok(span >= 10 && span < 16, `comprimento do mapa: ${span}`);
+  assert.equal(L.scaleSpan(null), null);
+  assert.equal(L.scaleSpan({ path: [], spots: [] }), null);
+
+  const fits = L.scalePreview(fx.model, 0, 1, 0.6 * span);
+  assert.equal(fits.kind, 'fits');
+  assert.match(fits.text, /cabe no mapa de hoje \(≈.\d+.m de ponta a ponta\): o tamanho não mudaria/);
+  const grow = L.scalePreview(fx.model, 0, 1, 1.3 * span);
+  assert.equal(grow.kind, 'grow');
+  assert.ok(grow.pct >= 30 && grow.pct <= 45, `cresce ${grow.pct}%`);
+  assert.equal(grow.text, `Com essa distância, o mapa cresce uns ${grow.pct}%.`);
+  // quanto maior a distância, mais cresce
+  assert.ok(L.scalePreview(fx.model, 0, 1, 1.6 * span).pct > grow.pct);
+  const absurd = L.scalePreview(fx.model, 0, 1, 2.5 * span);
+  assert.equal(absurd.kind, 'toolong');
+  assert.match(absurd.text, /mais que o dobro do que cabe no mapa de hoje .* Confira a medida/);
+  // nada digitado, lugar que não existe ou o mesmo lugar duas vezes: sem prévia
+  for (const none of [L.scalePreview(fx.model, 0, 1, null), L.scalePreview(fx.model, 0, 1, NaN), L.scalePreview(fx.model, 0, 0, 5), L.scalePreview(fx.model, 0, 9, 5), L.scalePreview(null, 0, 1, 5)]) {
+    assert.deepEqual(none, { kind: 'none', pct: 0, text: '' });
+  }
+  // entre andares conta a parte horizontal da medida (como no solucionador)
+  const two = scaleFixture([
+    { x: 0, y: 0, floor: 0 },
+    { x: 10, y: 0, floor: 1 },
+    { x: 5, y: 0, floor: 0 },
+  ]);
+  const spanTwo = L.scaleSpan(two.model);
+  assert.equal(L.scalePreview(two.model, 0, 1, Math.hypot(1.3 * spanTwo, 2.8)).pct, L.scalePreview(two.model, 0, 2, 1.3 * spanTwo).pct);
+  assert.equal(L.scalePreview(two.model, 0, 1, 2).kind, 'none', 'menor que a altura entre os andares');
+});
+
+test('cloudRatio / scaleOutcome: depois do ajuste a tela diz quanto o mapa mudou', () => {
+  const cloud = (k) => ({ points: [{ x: 0, y: 0 }, { x: 4 * k, y: 0 }, { x: 4 * k, y: 3 * k }, { x: 0, y: 3 * k }] });
+  assert.ok(Math.abs(L.cloudRatio(cloud(1), cloud(1.25)) - 1.25) < 1e-12);
+  assert.ok(Number.isNaN(L.cloudRatio(null, cloud(1))));
+  assert.ok(Number.isNaN(L.cloudRatio({ points: [{ x: 1, y: 1 }] }, cloud(1))), 'nuvem sem tamanho');
+
+  const grew = L.scaleOutcome({ adjust: { applied: true, factor: 1.124, weight: 0.6, used: 1, ignored: 0 }, ratio: 1.11, areaBefore: 48.2, areaAfter: 60.4 });
+  assert.equal(grew.kind, 'grew');
+  assert.equal(grew.pct, 12, 'sem ajuste anterior vale o fator do solucionador');
+  assert.equal(grew.text, `O mapa cresceu 12%: a distância medida não cabia nele. Área estimada: de ≈${THIN}48 para ≈${THIN}60${THIN}m².`);
+
+  const same = L.scaleOutcome({ adjust: { applied: false, factor: 1, weight: 0.1, used: 1, ignored: 0 }, ratio: 0.97, areaBefore: 48, areaAfter: 47.6 });
+  assert.equal(same.kind, 'same');
+  assert.match(same.text, /^O tamanho do mapa não mudou: a distância medida cabe nele, e por isso não mostra se ele está pequeno\. Só os dois lugares foram acertados\.$/);
+
+  const ignored = L.scaleOutcome({ adjust: { applied: false, factor: 1, weight: 0, used: 0, ignored: 1 }, ratio: 1 });
+  assert.equal(ignored.kind, 'ignored');
+  assert.match(ignored.text, /passa do dobro do que cabe neste mapa de ponta a ponta\. Confira a medida: o mapa não foi alterado\./);
+
+  // uma das duas medidas ignorada
+  assert.match(L.scaleOutcome({ adjust: { applied: true, factor: 1.2, weight: 0.6, used: 1, ignored: 1 } }).text, /O mapa cresceu 20%.*Uma das distâncias foi ignorada/);
+
+  // mapa que já tinha uma medida: o que o usuário vê mudar é a razão entre os dois mapas
+  const more = L.scaleOutcome({ adjust: { applied: true, factor: 1.3, used: 2, ignored: 0 }, ratio: 1.08, hadAdjust: true });
+  assert.equal(more.kind, 'grew');
+  assert.equal(more.pct, 8);
+  const less = L.scaleOutcome({ adjust: { applied: false, factor: 1, used: 1, ignored: 0 }, ratio: 0.85, hadAdjust: true, areaBefore: 70, areaAfter: 52 });
+  assert.equal(less.kind, 'shrank');
+  assert.match(less.text, /^O mapa ficou 15% menor: a distância de antes saiu, e a de agora cabe nele\. Área estimada: de ≈.70 para ≈.52.m²\.$/);
+  assert.equal(L.scaleOutcome({ adjust: { applied: true, factor: 1.3, used: 1, ignored: 0 }, ratio: 1.02, hadAdjust: true }).kind, 'same', 'mudança de 2% (o acerto do par) não é notícia');
+
+  // sem resumo do solucionador (motor antigo): vale a razão; sem nada: não mudou
+  assert.equal(L.scaleOutcome({ ratio: 1.3 }).kind, 'grew');
+  assert.equal(L.scaleOutcome({ ratio: 1.3 }).pct, 30);
+  assert.equal(L.scaleOutcome().kind, 'same');
+  assert.equal(L.scaleOutcome({ adjust: 'lixo', ratio: NaN }).kind, 'same');
+});
+
 test('renameRoom: ambiente com nome -> os pontos marcados com aquele nome mudam; o resultado passa pelo conferidor do gravador', () => {
   const { survey, solution, own, model } = makeMap('apartamento');
   const floor = model.floors[0];

@@ -563,6 +563,7 @@ export function createSimBackend(options = {}) {
   function applyState(patch, force = false) {
     const old = statusNow();
     const wifiBefore = state.wifi;
+    const sawIdentity = seesIdentity();
     if (patch.wifi !== undefined) state.wifi = toBool(patch.wifi, state.wifi);
     if (patch.location !== undefined) state.location = toBool(patch.location, state.location);
     if (patch.throttle !== undefined) state.throttle = toBool(patch.throttle, state.throttle);
@@ -577,8 +578,19 @@ export function createSimBackend(options = {}) {
     if (state.wifi !== wifiBefore) {
       if (state.wifi) wifiUp();
       else wifiDown();
+    } else {
+      announceIdentity(sawIdentity);
     }
     return now;
+  }
+
+  /**
+   * O nome e o BSSID da rede conectada passaram a aparecer (a Localização foi ligada, a permissão
+   * foi concedida) ou deixaram de aparecer: como no Android, a conexão é reenviada. Sem isto o app
+   * ficava com a conexão "sem identidade" lida durante o bloqueio até a próxima troca de rádio.
+   */
+  function announceIdentity(sawBefore) {
+    if (seesIdentity() !== sawBefore && state.wifi && link) emit('connection', connectionAt(simT));
   }
 
   function wifiDown() {
@@ -1178,6 +1190,7 @@ export function createSimBackend(options = {}) {
       };
       // Negada em definitivo: o Android nem mostra a janela e responde na hora.
       op.timer = after(state.permission === 'blocked' ? 0.05 : 0.9, () => {
+        const sawIdentity = seesIdentity();
         if (state.permission === 'denied') {
           let next = state.permissionReply;
           if (next === 'denied') {
@@ -1188,6 +1201,8 @@ export function createSimBackend(options = {}) {
         }
         op.finish();
         announce();
+        // com a permissão o Android passa a dizer em que rede o celular está: reenvia a conexão
+        after(0, () => announceIdentity(sawIdentity));
       });
       ops.add(op);
     });

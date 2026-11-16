@@ -22,7 +22,7 @@
 // O modo e a ordem escolhidos ficam guardados (prefs 'redes'); filtros e busca valem até fechar o app.
 // A lógica de filtrar, ordenar e agrupar está em ui/networks-logic.js (pura, com testes).
 
-import { h, mount as render, patch, patchList, batch, toast, fmtNum, fmtDbm, fmtAgo, fmtMbps, fmtMeters, fmtBand, fmtWidth, plural, THIN } from '../dom.js';
+import { h, nb, mount as render, patch, patchList, batch, toast, fmtNum, fmtDbm, fmtAgo, fmtMbps, fmtMeters, fmtBand, fmtWidth, plural, THIN } from '../dom.js';
 import { icon } from '../icons.js';
 import { signalBars, badge, bandBadge, securityBadge, standardBadge, chip, segmented, button, iconButton, emptyState, skeletonList, sectionHeader, throttleTip } from '../components.js';
 import { signalLevel } from '../../core/signal.js';
@@ -207,7 +207,7 @@ function connectionCard(view, { insight, extraInsights, history, now, onOpen, on
       h(
         'div.net-conn__off-body',
         null,
-        h('h2.net-conn__off-title', null, 'Você não está conectado a um Wi-Fi'),
+        h('h2.net-conn__off-title', null, nb('Você não está conectado a um Wi-Fi')),
         h('p.net-conn__off-text', null, 'As redes por perto continuam aparecendo aqui embaixo.'),
         button('Abrir o Wi-Fi do celular', { variant: 'secondary', small: true, icon: 'external', onClick: onWifi }),
       ),
@@ -269,7 +269,7 @@ function connectionCard(view, { insight, extraInsights, history, now, onOpen, on
           'button',
           { type: 'button', class: ['net-insight', `net-insight--${look.tone}`], dataset: { insight: insight.id }, onClick: onInsight },
           h('span.net-insight__icon', null, icon(look.icon, { size: 20 })),
-          h('span.net-insight__text', null, insight.title),
+          h('span.net-insight__text', null, nb(insight.title)),
           extraInsights > 0 ? h('span.net-insight__more', { title: 'Outros pontos no diagnóstico' }, `+${extraInsights}`) : null,
           icon('chevron-right', { size: 18 }),
         )

@@ -475,6 +475,16 @@ export function createStore({ prefs = null, now = Date.now, onError } = {}) {
     /** @param {import('./bridge.js').ScanEvent} ev */
     ingestScan(ev) {
       if (!ev || typeof ev !== 'object' || !Array.isArray(ev.aps)) return;
+      // Lista guardada pelo Android (não veio de uma busca nova) em que TODAS as leituras já passaram
+      // da idade em que um BSSID sai da lista: se nada chegou antes dela, não conta como "uma busca".
+      // Senão, ao abrir o app com o celular parado há alguns minutos, as telas afirmavam "Nenhuma rede
+      // por perto" (a lista ficava vazia, com seq = 1) enquanto a primeira busca de verdade ainda rodava.
+      // Com seq = 0 elas seguem em "Procurando redes por perto…" até chegar uma lista que valha.
+      // Leitura sem idade não é tratada como velha; lista nova, mesmo vazia, sempre conta.
+      if (ev.fresh === false && state.scan.seq === 0 && ev.aps.length > 0) {
+        const usable = (ap) => !!ap && typeof ap === 'object' && !(typeof ap.ageMs === 'number' && ap.ageMs > MAX_AP_AGE_MS);
+        if (!ev.aps.some(usable)) return;
+      }
       const t = now();
       if (!tracker) tracker = new ApTracker({ sdk: state.info && typeof state.info.sdk === 'number' ? state.info.sdk : undefined });
       droppedClone = null;

@@ -16,7 +16,7 @@
 //
 // Todo nome que vem de fora (mapa, rede, lugar) entra na página como texto, via h().
 
-import { h, patch, sheet, toast, confirmDialog, fmtDateTime, fmtAgo, plural } from '../dom.js';
+import { h, nb, patch, sheet, toast, confirmDialog, fmtDateTime, fmtAgo, plural } from '../dom.js';
 import { icon } from '../icons.js';
 import { button, iconButton, badge, banner, sectionHeader, ssidLabel, signalBars, openThrottleHelp, throttleCopy, spinner } from '../components.js';
 import { SURVEY_THRESHOLDS } from '../../mapping/recorder.js';
@@ -482,7 +482,7 @@ export function mountLibrary(root, env) {
         'section.card.mlib-hero',
         { key: 'hero' },
         stepsArt(),
-        h('h2.mlib-hero__title', null, 'O mapa da sua casa, feito só com o Wi-Fi'),
+        h('h2.mlib-hero__title', null, nb('O mapa da sua casa, feito só com o Wi-Fi')),
         h(
           'p.mlib-hero__text',
           null,

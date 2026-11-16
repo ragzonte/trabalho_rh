@@ -83,11 +83,14 @@ function coreView(page) {
   return page.evaluate(async () => {
     const { rankNetworks, advise } = await import('./js/core/best-network.js');
     const { buildInsights } = await import('./js/core/insights.js');
+    const { liveConnection, LIVE_RSSI_SAMPLES } = await import('./js/ui/networks-logic.js');
     const s = window.__wrx.app.store.get();
     const bssid = s.connection && s.connection.connected ? s.connection.bssid : '';
     const ranking = rankNetworks(s.aps, { device: s.info || undefined, connectionBssid: bssid, favorites: s.favorites });
     const advice = advise(ranking, { connectionBssid: bssid, favorites: s.favorites });
-    const insights = buildInsights({ aps: s.aps, connection: s.connection || undefined, device: s.info || undefined, status: s.status || undefined });
+    // o diagnóstico da tela olha a conexão com o sinal de agora (a leitura de cada segundo), não o de quando ela foi informada
+    const connection = liveConnection(s, { history: window.__wrx.app.store.rssiHistory(LIVE_RSSI_SAMPLES) });
+    const insights = buildInsights({ aps: s.aps, connection: connection || undefined, device: s.info || undefined, status: s.status || undefined });
     return {
       keys: ranking.map((r) => r.key),
       scores: ranking.map((r) => Math.round(r.score)),
@@ -831,17 +834,33 @@ test('uma análise por varredura: leituras de sinal e a conexão reenviada não 
       for (const region of document.querySelectorAll('.best-region')) window.__observer.observe(region, { subtree: true, childList: true, characterData: true, attributes: true });
     });
     const before = await page.textContent('.best-hero__text');
-    // dez leituras do sinal (uma por segundo, na vida real) e a conexão reenviada com outro sinal
+    // dez leituras do sinal (uma por segundo, na vida real) e a conexão reenviada com outro sinal.
+    // As leituras ficam todas no mesmo nível de sinal ("excelente", de −46 a −49 dBm): é a troca de
+    // nível do sinal ao vivo que refaz a análise (logo abaixo), não cada leitura.
     await page.evaluate((conn) => {
       const { store } = window.__wrx.app;
       for (let i = 0; i < 10; i++) {
-        store.setRssi({ ts: Date.now() + i, rssi: -50 - i, bssid: conn.bssid, frequency: conn.frequency, linkSpeed: 100 + i });
-        store.setConnection({ ...conn, rssi: -50 - i, linkSpeed: 100 + i });
+        store.setRssi({ ts: Date.now() + i, rssi: -46 - (i % 4), bssid: conn.bssid, frequency: conn.frequency, linkSpeed: 100 + i });
+        store.setConnection({ ...conn, rssi: -46 - ((i + 1) % 4), linkSpeed: 100 + i });
       }
     }, HOME.connection);
     await settle(page);
     assert.equal(await page.evaluate(() => window.__mutations), 0, 'nada foi tocado na tela');
     assert.equal(await page.textContent('.best-hero__text'), before);
+
+    // a pessoa andou até um ponto fraco sem o celular trocar de rádio: o sinal ao vivo muda de nível
+    // e o diagnóstico é refeito na hora, sem esperar a próxima varredura (nem a conexão ser reenviada)
+    await page.evaluate(async (conn) => {
+      const { store, bridge } = window.__wrx.app;
+      await bridge.unwatchRssi(); // as leituras do simulador (de outro rádio) não entram no meio
+      // o sinal usado é a mediana das leituras dos últimos segundos: a maioria tem de ser a nova
+      for (let i = 0; i < 12; i++) store.setRssi({ ts: Date.now() + i, rssi: -84, bssid: conn.bssid, frequency: conn.frequency, linkSpeed: 12 });
+    }, HOME.connection);
+    await page.waitForSelector('.best-diag[data-insight="weak-signal"]');
+    assert.ok((await page.evaluate(() => window.__mutations)) > 0);
+    await page.evaluate(() => {
+      window.__mutations = 0;
+    });
 
     // uma varredura nova, aí sim
     const moved = { ...fx.apartment, aps: fx.apartment.aps.map((a) => ({ ...a, level: a.bssid === HOME_24 ? -86 : a.level, ageMs: 100 })) };

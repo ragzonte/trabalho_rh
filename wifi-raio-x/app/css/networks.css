@@ -581,7 +581,7 @@
   color: var(--sig, var(--muted));
 }
 
-.row--stale > .net-row__trail {
+.row--stale > .net-row__trail > .spark {
   opacity: 0.6;
 }
 
