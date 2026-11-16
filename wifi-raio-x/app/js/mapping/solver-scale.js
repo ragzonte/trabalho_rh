@@ -13,10 +13,10 @@
 // 1. A distância entre dois lugares NO MAPA não serve de régua. Cada posição erra cerca de meio
 //    raio do mapa; entre dois lugares distantes de verdade, a distância do mapa erra ±30 a 37%
 //    (em ln) em torno da escala do próprio mapa — pior que a escala que o solucionador já tem
-//    (±24%). E ela é enviesada pela escolha do par: os dois lugares mais distantes NO MAPA saem
-//    25 a 33% compridos demais (escolher o máximo de uma medida ruidosa); os dois mais distantes
-//    DE VERDADE saem 30% curtos. Numa regressão direta do tamanho real contra as duas grandezas,
-//    a distância do par no mapa ganha peso ~0. Por isso ela NÃO entra na conta do tamanho.
+//    (±24%). E ela é enviesada pela escolha do par: em relação à escala do próprio mapa, os dois
+//    lugares mais distantes NO MAPA saem 33% compridos demais (é o máximo de uma medida ruidosa)
+//    e os dois mais distantes DE VERDADE, 32% curtos. Numa regressão direta do tamanho real contra
+//    as duas grandezas, a distância do par no mapa ganha peso ~0. Por isso ela NÃO entra na conta.
 // 2. O que serve de régua é o tamanho do mapa INTEIRO, que é a média de muitos pontos. A casa, de
 //    ponta a ponta (a maior distância entre dois lugares visitados), mede de 3,0 a 3,4 vezes o raio
 //    quadrático médio das varreduras (3,02 ± 0,14 parando em pontos; 3,35 ± 0,20 andando; 9 em 10
@@ -40,17 +40,24 @@
 //
 // RESULTADO NA BANCADA (140 levantamentos com lugares marcados, uma distância exata, o solucionador
 // inteiro; erro médio do tamanho, |mapa/real − 1|, antes -> depois):
-//   par proposto pela tela (o mais distante no mapa)     0,168 -> 0,130   (regra antiga: 0,165)
-//   os dois lugares mais distantes de verdade            0,168 -> 0,061   (regra antiga: 0,153)
-//   um par distante qualquer (60% da maior distância)    0,168 -> 0,132   (regra antiga: 0,129)
-//   um par qualquer de 3 m ou mais                       0,168 -> 0,155   (regra antiga: 0,140)
+//   par proposto pela tela (o mais distante no mapa)     0,168 -> 0,139   (regra antiga: 0,165)
+//   o par proposto e mais um (duas distâncias)           0,168 -> 0,132
+//   os dois lugares mais distantes de verdade            0,168 -> 0,062   (regra antiga: 0,153)
+//   um par distante qualquer (60% da maior distância)    0,168 -> 0,138   (regra antiga: 0,129)
+//   um par qualquer de 3 m ou mais                       0,168 -> 0,157   (regra antiga: 0,140)
 //   um par curto, de 2 a 4 m                             0,168 -> 0,166   (não muda nada)
-// Nos mapas que saíram mais de 20% pequenos (escritório, casas grandes): 0,285 -> 0,195 com o par
-// proposto e 0,039 com o par certo. Em nenhuma família de casas o erro médio piorou, com nenhum
-// desses pares, e a nota da bancada melhora em todos (48,2 -> 46,5 com o par proposto). O que se
-// perde: num mapa que saiu GRANDE (1 em cada 8) a medida não conserta nada — com o par mais
-// distante de verdade o erro até sobe um pouco (0,129 -> 0,164), pela folga do teto —, e com um
-// par sorteado ao acaso a regra antiga, de régua pelo par, ia um pouco melhor.
+// Nos mapas que saíram mais de 20% pequenos (escritório, casas grandes): 0,285 -> 0,213 com o par
+// proposto e 0,064 com o par certo. Com esses pares o erro médio não piorou em nenhuma família de
+// casas, e a nota da bancada melhora em todos (48,2 -> 46,8 com o par proposto, 45,9 com o certo).
+// Com a medida errando 10% (passos contados): 0,137 com o par proposto, 0,082 com o certo.
+// Em 92 levantamentos andando, com 8 varreduras sorteadas no papel de lugares marcados: 0,139 ->
+// 0,121 (par mais distante no mapa) e 0,111 (o mais distante de verdade); medindo exatamente de uma
+// ponta à outra do caminho, 0,139 -> 0,080 (aqui duas famílias pioram ~1 ponto percentual).
+// O QUE SE PERDE. Num mapa que saiu GRANDE (1 em cada 8) a medida não conserta nada — com o par
+// mais distante de verdade o erro até sobe um pouco (0,129 -> 0,154), pela folga do teto. Com um
+// par sorteado ao acaso a regra antiga, de régua pelo par, ia um pouco melhor. E com o par
+// proposto o mapa que cresce continua, em média, 17% pequeno: o par mais distante NO MAPA mede só
+// 3/4 da maior distância que havia para medir.
 
 /** Desvio-padrão (em ln) do tamanho do mapa em torno do real quando não há medida nenhuma. */
 export const SCALE_PRIOR_SD = 0.24;
@@ -60,7 +67,7 @@ export const SCALE_PRIOR_SD = 0.24;
  * propósito: errar para cima só deixa o ajuste mais tímido; errar para baixo esticaria um mapa que
  * estava certo. (Com 3,4 o ajuste rendia um ponto percentual a mais na média, mas quem media
  * exatamente de uma ponta à outra de um levantamento andando saía com o mapa grande demais em três
- * famílias de casas: erro de 12,5% -> 15,7% no apartamento.)
+ * famílias de casas: erro de 12,5% -> 16,2% no apartamento.)
  */
 export const SPAN_RADII = 3.6;
 /** Folga do teto, em ln: incerteza do comprimento do mapa (0,09) somada ao erro de quem mede (trena ou passos: ~0,05). */

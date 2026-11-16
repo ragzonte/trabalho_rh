@@ -573,7 +573,7 @@ export async function mountResult(root, env, { id }) {
     const hadAdjust = Array.isArray(S.survey.knownDistances) && S.survey.knownDistances.length > 0;
     // (medido na bancada, mapping/solver-scale.js: a distância medida é comparada com o mapa inteiro,
     // de ponta a ponta. Se não cabe, o mapa cresce até caber; se cabe, nada muda. Com o par que a tela
-    // propõe o erro de tamanho cai de 17% para 13%; com os dois lugares mais distantes de verdade, para 6%)
+    // propõe o erro de tamanho cai de 17% para 14%; com os dois lugares mais distantes de verdade, para 6%)
     const why = h(
       'div.prose',
       null,
@@ -632,6 +632,8 @@ export async function mountResult(root, env, { id }) {
         hint.textContent = preview ? preview.text : '';
         hint.hidden = !hint.textContent;
         if (preview) hint.dataset.kind = preview.kind;
+        // digitando: a prévia fica logo abaixo do campo, que costuma estar no pé do painel
+        if (!hint.hidden && document.activeElement === input) hint.scrollIntoView({ block: 'nearest' });
       };
       input.addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter') {

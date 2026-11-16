@@ -2097,8 +2097,8 @@ function buildQuality(ctx, floors, aps, areaM2, solution, spots) {
     // "Ajustar a escala" (uma distância medida pelo usuário) só faz o mapa CRESCER, e só quando a
     // distância medida não cabe nele de ponta a ponta (a conta e as medidas estão em solver-scale.js).
     // Na bancada (140 levantamentos com lugares marcados, uma distância exata) o erro médio de tamanho
-    // cai de 17% para 13% com o par que a tela propõe e para 6% com os dois lugares mais distantes de
-    // verdade; nos mapas mais de 20% pequenos, de 29% para 20% e para 4%; com uma distância curta não
+    // cai de 17% para 14% com o par que a tela propõe e para 6% com os dois lugares mais distantes de
+    // verdade; nos mapas mais de 20% pequenos, de 29% para 21% e para 6%; com uma distância curta não
     // muda. Por isso as notas pedem a MAIOR distância e dizem "se ele saiu pequeno", não "para acertar".
     if (usable && scaleConf < 0.5) notes.push('O tamanho é incerto: as distâncias em metros podem errar 40%. Medir a maior distância que puder entre dois lugares marcados, em “Ajustar a escala”, faz o mapa crescer se ele saiu pequeno.');
     else if (usable && scaleConf < 0.7) notes.push('O tamanho é aproximado: as distâncias costumam sair um pouco menores que as reais e podem errar uns 25%.');

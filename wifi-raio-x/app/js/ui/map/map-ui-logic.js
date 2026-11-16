@@ -524,10 +524,11 @@ export const ACCURACY = Object.freeze({
   /**
    * "Ajustar a escala" com a distância entre os dois lugares marcados mais distantes DE VERDADE
    * (140 levantamentos simulados com lugares marcados, a distância exata): o erro médio do tamanho
-   * cai de 17% para 6%, e em 8 de cada 10 mapas fica abaixo de 10%. Com o par que a tela propõe (o
-   * mais distante NO MAPA) cai de 17% para 13%: os mapas que crescem continuam, em média, 14%
-   * pequenos, porque o par proposto mede só 3/4 da maior distância da casa. Com um par qualquer,
-   * 17% -> 16%; com um par curto, nada muda. (Antes desta regra, com o par proposto: 17% -> 17%.)
+   * cai de 17% para 6%, e em 6 de cada 7 mapas fica abaixo de 10% (com a medida errando 10%, como
+   * em passos contados: 8%). Com o par que a tela propõe (o mais distante NO MAPA) cai de 17% para
+   * 14%: menos da metade dos mapas cresce, e os que crescem continuam, em média, 17% pequenos,
+   * porque o par proposto mede só 3/4 da maior distância da casa. Com um par qualquer, 17% -> 16%;
+   * com um par curto, nada muda. (Antes desta regra, com o par proposto: 17% -> 17%.)
    */
   scaleBestPct: 10,
   /** um passo largo de adulto, em metros: a régua de quem não tem trena */
