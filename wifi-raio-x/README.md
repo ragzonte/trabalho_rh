@@ -35,7 +35,7 @@ não guarda nem envia a sua localização.
 
 > **Dica:** o Android limita os apps a 4 varreduras de Wi-Fi a cada 2 minutos. Para o mapa
 > 3D ficar bem melhor (e a lista atualizar mais rápido), desligue esse limite em
-> *Configurações → Opções do desenvolvedor → Limitação da busca por Wi-Fi*. O próprio app
+> *Configurações → Opções do desenvolvedor → Limitar busca por Wi-Fi*. O próprio app
 > explica como.
 
 ## O que esperar do mapa 3D (com honestidade)
